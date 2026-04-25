@@ -1,0 +1,6 @@
+﻿apiVersion: v2
+name: proxyharbor
+description: Lightweight proxy lease, catalog, policy, and gateway service
+type: application
+version: 0.1.0
+appVersion: 0.1.0-alpha

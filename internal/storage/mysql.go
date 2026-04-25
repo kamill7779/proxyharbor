@@ -1,0 +1,598 @@
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
+)
+
+// MySQLStore 是基于 MySQL 8.x 的 Store 实现。
+//
+// 设计要点：
+//   - 表结构与 migrations/mysql/001_init.sql 保持一致；
+//   - JSON 字段统一用 encoding/json 序列化；
+//   - 幂等键独立成表 proxy_idempotency_keys，避免 lease 重复插入；
+//   - 所有时间使用 UTC，避免跨时区错乱。
+type MySQLStore struct {
+	db *sql.DB
+}
+
+// NewMySQLStore 打开连接并验证可用。
+func NewMySQLStore(ctx context.Context, dsn string, maxOpen, maxIdle int, connMaxAge time.Duration) (*MySQLStore, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("mysql open: %w", err)
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(connMaxAge)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("mysql ping: %w", err)
+	}
+	return &MySQLStore{db: db}, nil
+}
+
+// Close 释放连接池。
+func (s *MySQLStore) Close() error { return s.db.Close() }
+
+// DB 暴露底层句柄，供调用方用于 Leader Election 等场景的 advisory lock。
+func (s *MySQLStore) DB() *sql.DB { return s.db }
+
+// ---------- LeaseStore ----------
+
+func (s *MySQLStore) GetLeaseByIdempotency(ctx context.Context, scope IdempotencyScope) (domain.Lease, bool, error) {
+	var leaseID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT lease_id FROM proxy_idempotency_keys WHERE idempotency_key = ?`,
+		scope.String(),
+	).Scan(&leaseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Lease{}, false, nil
+	}
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	lease, err := s.GetLease(ctx, scope.TenantID, leaseID)
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	return lease, true, nil
+}
+
+func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, lease domain.Lease) (domain.Lease, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 幂等检查
+	var existing string
+	err = tx.QueryRowContext(ctx,
+		`SELECT lease_id FROM proxy_idempotency_keys WHERE idempotency_key = ?`,
+		scope.String(),
+	).Scan(&existing)
+	if err == nil {
+		// 已存在，回退到已有 lease
+		_ = tx.Commit()
+		return s.GetLease(ctx, scope.TenantID, existing)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.Lease{}, err
+	}
+
+	subjectJSON, _ := json.Marshal(lease.Subject)
+	resourceJSON, _ := json.Marshal(lease.ResourceRef)
+	policyJSON, _ := json.Marshal(lease.PolicyRef)
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO proxy_leases (lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
+			gateway_url, username, password_hash, proxy_id, expires_at, renew_before, catalog_version,
+			candidate_set_id, revoked, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		lease.ID, lease.TenantID, lease.Generation, subjectJSON, resourceJSON, policyJSON,
+		lease.GatewayURL, lease.Username, lease.Password, lease.ProxyID,
+		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
+		lease.CandidateSetID, lease.Revoked, lease.CreatedAt.UTC(), lease.UpdatedAt.UTC(),
+	); err != nil {
+		return domain.Lease{}, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO proxy_idempotency_keys (idempotency_key, tenant_id, stable_subject_id, resource_ref, request_kind, lease_id, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		scope.String(), scope.TenantID, scope.StableSubjectID, scope.ResourceRef, scope.RequestKind, lease.ID, time.Now().UTC(),
+	); err != nil {
+		return domain.Lease{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Lease{}, err
+	}
+	return lease, nil
+}
+
+func (s *MySQLStore) GetLease(ctx context.Context, tenantID, id string) (domain.Lease, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
+			gateway_url, username, password_hash, proxy_id, expires_at, renew_before, catalog_version,
+			candidate_set_id, revoked, created_at, updated_at
+		 FROM proxy_leases WHERE tenant_id = ? AND lease_id = ?`,
+		tenantID, id,
+	)
+	return scanLease(row)
+}
+
+func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domain.Lease, error) {
+	subjectJSON, _ := json.Marshal(lease.Subject)
+	resourceJSON, _ := json.Marshal(lease.ResourceRef)
+	policyJSON, _ := json.Marshal(lease.PolicyRef)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE proxy_leases SET generation=?, subject_json=?, resource_ref_json=?, policy_ref_json=?,
+			gateway_url=?, username=?, password_hash=?, proxy_id=?, expires_at=?, renew_before=?,
+			catalog_version=?, candidate_set_id=?, revoked=?, updated_at=?
+		 WHERE tenant_id=? AND lease_id=?`,
+		lease.Generation, subjectJSON, resourceJSON, policyJSON,
+		lease.GatewayURL, lease.Username, lease.Password, lease.ProxyID,
+		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
+		lease.CandidateSetID, lease.Revoked, time.Now().UTC(),
+		lease.TenantID, lease.ID,
+	)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return domain.Lease{}, domain.ErrNotFound
+	}
+	return lease, nil
+}
+
+func (s *MySQLStore) RevokeLease(ctx context.Context, tenantID, id string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE proxy_leases SET revoked = TRUE, updated_at = ? WHERE tenant_id = ? AND lease_id = ?`,
+		time.Now().UTC(), tenantID, id,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (s *MySQLStore) ListActiveLeases(ctx context.Context, tenantID string) ([]domain.Lease, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
+			gateway_url, username, password_hash, proxy_id, expires_at, renew_before, catalog_version,
+			candidate_set_id, revoked, created_at, updated_at
+		 FROM proxy_leases WHERE tenant_id = ? AND revoked = FALSE AND expires_at > UTC_TIMESTAMP()
+		 ORDER BY lease_id`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Lease, 0)
+	for rows.Next() {
+		l, err := scanLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) DeleteExpiredLeases(ctx context.Context, tenantID string, before time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM proxy_leases WHERE tenant_id = ? AND expires_at < ?`,
+		tenantID, before.UTC(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ---------- PolicyStore ----------
+
+func (s *MySQLStore) ListPolicies(ctx context.Context, tenantID string) ([]domain.Policy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT policy_id, tenant_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
+			ttl_seconds, labels_json, created_at, updated_at
+		 FROM policies WHERE tenant_id = ? ORDER BY policy_id`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Policy, 0)
+	for rows.Next() {
+		p, err := scanPolicy(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) GetPolicy(ctx context.Context, tenantID, id string) (domain.Policy, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT policy_id, tenant_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
+			ttl_seconds, labels_json, created_at, updated_at
+		 FROM policies WHERE tenant_id = ? AND policy_id = ?`,
+		tenantID, id,
+	)
+	return scanPolicy(row)
+}
+
+func (s *MySQLStore) UpsertPolicy(ctx context.Context, policy domain.Policy) (domain.Policy, error) {
+	now := time.Now().UTC()
+	if policy.ID == "" {
+		policy.ID = "policy-" + now.Format("20060102150405.000000000")
+	}
+	if policy.TenantID == "" {
+		policy.TenantID = "default"
+	}
+	if policy.TTLSeconds == 0 {
+		policy.TTLSeconds = 1800
+	}
+	labelsJSON, _ := json.Marshal(policy.Labels)
+	// 用 UPSERT，version 在已存在时由 SQL 自增以避免读改写竞态。
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO policies (policy_id, tenant_id, version, name, enabled, subject_type, resource_kind,
+			ttl_seconds, labels_json, created_at, updated_at)
+		 VALUES (?, ?, GREATEST(?,1), ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+			version = version + 1,
+			name = VALUES(name),
+			enabled = VALUES(enabled),
+			subject_type = VALUES(subject_type),
+			resource_kind = VALUES(resource_kind),
+			ttl_seconds = VALUES(ttl_seconds),
+			labels_json = VALUES(labels_json),
+			updated_at = VALUES(updated_at)`,
+		policy.ID, policy.TenantID, policy.Version, policy.Name, policy.Enabled,
+		policy.SubjectType, policy.ResourceKind, policy.TTLSeconds, labelsJSON, now, now,
+	)
+	if err != nil {
+		return domain.Policy{}, err
+	}
+	return s.GetPolicy(ctx, policy.TenantID, policy.ID)
+}
+
+func (s *MySQLStore) DeletePolicy(ctx context.Context, tenantID, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM policies WHERE tenant_id = ? AND policy_id = ?`, tenantID, id)
+	return err
+}
+
+// ---------- CatalogStore ----------
+
+func (s *MySQLStore) ListProviders(ctx context.Context, tenantID string) ([]domain.Provider, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at
+		 FROM proxy_sources WHERE tenant_id = ? ORDER BY source_id`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Provider, 0)
+	for rows.Next() {
+		p, err := scanProvider(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) GetProvider(ctx context.Context, tenantID, id string) (domain.Provider, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at
+		 FROM proxy_sources WHERE tenant_id = ? AND source_id = ?`,
+		tenantID, id,
+	)
+	return scanProvider(row)
+}
+
+func (s *MySQLStore) UpsertProvider(ctx context.Context, p domain.Provider) (domain.Provider, error) {
+	now := time.Now().UTC()
+	if p.TenantID == "" {
+		p.TenantID = "default"
+	}
+	if p.ID == "" {
+		p.ID = "provider-" + now.Format("20060102150405.000000000")
+	}
+	if p.Type == "" {
+		p.Type = "static"
+	}
+	if p.Name == "" {
+		p.Name = p.ID
+	}
+	cfgJSON, _ := json.Marshal(p.Labels)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxy_sources (source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)
+		 ON DUPLICATE KEY UPDATE kind=VALUES(kind), name=VALUES(name), enabled=VALUES(enabled),
+		   config_json=VALUES(config_json), updated_at=VALUES(updated_at)`,
+		p.ID, p.TenantID, p.Type, p.Name, p.Enabled, cfgJSON, now, now,
+	)
+	if err != nil {
+		return domain.Provider{}, err
+	}
+	return s.GetProvider(ctx, p.TenantID, p.ID)
+}
+
+func (s *MySQLStore) DeleteProvider(ctx context.Context, tenantID, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM proxy_sources WHERE tenant_id = ? AND source_id = ?`, tenantID, id)
+	return err
+}
+
+func (s *MySQLStore) GetProxy(ctx context.Context, tenantID, id string) (domain.Proxy, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
+		 FROM proxies WHERE tenant_id = ? AND proxy_id = ?`,
+		tenantID, id,
+	)
+	return scanProxy(row)
+}
+
+func (s *MySQLStore) UpsertProxy(ctx context.Context, p domain.Proxy) (domain.Proxy, error) {
+	now := time.Now().UTC()
+	if p.TenantID == "" {
+		p.TenantID = "default"
+	}
+	if p.ID == "" {
+		p.ID = "proxy-" + now.Format("20060102150405.000000000")
+	}
+	if p.Weight == 0 {
+		p.Weight = 1
+	}
+	if p.LastSeenAt.IsZero() {
+		p.LastSeenAt = now
+	}
+	labelsJSON, _ := json.Marshal(p.Labels)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxies (proxy_id, tenant_id, source_id, endpoint, healthy, weight, labels_json,
+			last_seen_at, failure_hint, created_at, updated_at)
+		 VALUES (?,?,NULLIF(?,''),?,?,?,?,?,NULLIF(?,''),?,?)
+		 ON DUPLICATE KEY UPDATE source_id=VALUES(source_id), endpoint=VALUES(endpoint), healthy=VALUES(healthy),
+		   weight=VALUES(weight), labels_json=VALUES(labels_json), last_seen_at=VALUES(last_seen_at),
+		   failure_hint=VALUES(failure_hint), updated_at=VALUES(updated_at)`,
+		p.ID, p.TenantID, p.ProviderID, p.Endpoint, p.Healthy, p.Weight, labelsJSON,
+		p.LastSeenAt.UTC(), p.FailureHint, now, now,
+	)
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	return s.GetProxy(ctx, p.TenantID, p.ID)
+}
+
+func (s *MySQLStore) DeleteProxy(ctx context.Context, tenantID, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM proxies WHERE tenant_id = ? AND proxy_id = ?`, tenantID, id)
+	return err
+}
+
+func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context, tenantID string) (domain.Proxy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
+		 FROM proxies WHERE tenant_id = ? AND healthy = TRUE
+		 ORDER BY weight DESC, proxy_id ASC LIMIT 1`,
+		tenantID,
+	)
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return domain.Proxy{}, domain.ErrNoHealthyProxy
+	}
+	return scanProxy(rows)
+}
+
+func (s *MySQLStore) ListCatalogProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
+		 FROM proxies WHERE tenant_id = ? ORDER BY proxy_id`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Proxy, 0)
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) LatestCatalog(ctx context.Context, tenantID string) (domain.Catalog, error) {
+	// 优先返回最新快照；若没有快照则基于 proxies 表实时构造。
+	row := s.db.QueryRowContext(ctx,
+		`SELECT version, proxies_json, generated_at, expires_at FROM proxy_catalog_snapshots
+		 WHERE tenant_id = ? ORDER BY generated_at DESC LIMIT 1`,
+		tenantID,
+	)
+	var (
+		version  string
+		raw      []byte
+		genAt    time.Time
+		expireAt time.Time
+	)
+	err := row.Scan(&version, &raw, &genAt, &expireAt)
+	if err == nil {
+		var proxies []domain.Proxy
+		_ = json.Unmarshal(raw, &proxies)
+		return domain.Catalog{TenantID: tenantID, Version: version, Proxies: proxies, Generated: genAt, ExpiresAt: expireAt}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.Catalog{}, err
+	}
+	proxies, err := s.ListCatalogProxies(ctx, tenantID)
+	if err != nil {
+		return domain.Catalog{}, err
+	}
+	now := time.Now().UTC()
+	sort.Slice(proxies, func(i, j int) bool { return proxies[i].ID < proxies[j].ID })
+	return domain.Catalog{TenantID: tenantID, Version: now.Format("20060102150405"), Proxies: proxies, Generated: now, ExpiresAt: now.Add(time.Minute)}, nil
+}
+
+func (s *MySQLStore) SaveCatalogSnapshot(ctx context.Context, c domain.Catalog) error {
+	raw, err := json.Marshal(c.Proxies)
+	if err != nil {
+		return err
+	}
+	id := c.TenantID + "-" + c.Version
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO proxy_catalog_snapshots (snapshot_id, tenant_id, version, proxies_json, generated_at, expires_at)
+		 VALUES (?,?,?,?,?,?)
+		 ON DUPLICATE KEY UPDATE proxies_json=VALUES(proxies_json), generated_at=VALUES(generated_at), expires_at=VALUES(expires_at)`,
+		id, c.TenantID, c.Version, raw, c.Generated.UTC(), c.ExpiresAt.UTC(),
+	)
+	return err
+}
+
+// ---------- AuditStore ----------
+
+func (s *MySQLStore) AppendAuditEvents(ctx context.Context, events []domain.AuditEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	// audit 落库由后续阶段实现，这里短路保留主流程不阻塞。
+	return nil
+}
+
+func (s *MySQLStore) ListAuditEvents(ctx context.Context, tenantID string, limit int) ([]domain.AuditEvent, error) {
+	return []domain.AuditEvent{}, nil
+}
+
+func (s *MySQLStore) AppendUsageEvents(ctx context.Context, events []domain.UsageEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT IGNORE INTO proxy_usage_events (event_id, tenant_id, lease_id, bytes_sent, bytes_received, occurred_at)
+		 VALUES (?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, e := range events {
+		if e.EventID == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, e.EventID, e.TenantID, e.LeaseID, e.BytesSent, e.BytesRecv, e.OccurredAt.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ---------- 内部 scanner ----------
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanLease(r rowScanner) (domain.Lease, error) {
+	var (
+		l                                                         domain.Lease
+		subjectJSON, resourceJSON, policyJSON                     []byte
+		expiresAt, renewBefore, createdAt, updatedAt              time.Time
+	)
+	if err := r.Scan(&l.ID, &l.TenantID, &l.Generation, &subjectJSON, &resourceJSON, &policyJSON,
+		&l.GatewayURL, &l.Username, &l.Password, &l.ProxyID, &expiresAt, &renewBefore,
+		&l.CatalogVersion, &l.CandidateSetID, &l.Revoked, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Lease{}, domain.ErrNotFound
+		}
+		return domain.Lease{}, err
+	}
+	_ = json.Unmarshal(subjectJSON, &l.Subject)
+	_ = json.Unmarshal(resourceJSON, &l.ResourceRef)
+	_ = json.Unmarshal(policyJSON, &l.PolicyRef)
+	l.ExpiresAt = expiresAt
+	l.RenewBefore = renewBefore
+	l.CreatedAt = createdAt
+	l.UpdatedAt = updatedAt
+	return l, nil
+}
+
+func scanPolicy(r rowScanner) (domain.Policy, error) {
+	var (
+		p          domain.Policy
+		labelsJSON []byte
+	)
+	if err := r.Scan(&p.ID, &p.TenantID, &p.Version, &p.Name, &p.Enabled, &p.SubjectType, &p.ResourceKind,
+		&p.TTLSeconds, &labelsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Policy{}, domain.ErrNotFound
+		}
+		return domain.Policy{}, err
+	}
+	_ = json.Unmarshal(labelsJSON, &p.Labels)
+	return p, nil
+}
+
+func scanProvider(r rowScanner) (domain.Provider, error) {
+	var (
+		p          domain.Provider
+		configJSON []byte
+	)
+	if err := r.Scan(&p.ID, &p.TenantID, &p.Type, &p.Name, &p.Enabled, &configJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Provider{}, domain.ErrNotFound
+		}
+		return domain.Provider{}, err
+	}
+	_ = json.Unmarshal(configJSON, &p.Labels)
+	return p, nil
+}
+
+func scanProxy(r rowScanner) (domain.Proxy, error) {
+	var (
+		p          domain.Proxy
+		labelsJSON []byte
+	)
+	if err := r.Scan(&p.ID, &p.TenantID, &p.ProviderID, &p.Endpoint, &p.Healthy, &p.Weight,
+		&labelsJSON, &p.LastSeenAt, &p.FailureHint); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Proxy{}, domain.ErrNotFound
+		}
+		return domain.Proxy{}, err
+	}
+	_ = json.Unmarshal(labelsJSON, &p.Labels)
+	return p, nil
+}

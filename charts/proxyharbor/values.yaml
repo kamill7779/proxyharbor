@@ -1,0 +1,40 @@
+image:
+  repository: proxyharbor
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# 角色：all（开发） | controller（控制面） | gateway（数据面）
+role: all
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# 必须由部署方覆盖
+auth:
+  key: ""
+
+mysql:
+  dsn: "" # 例如 user:pass@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
+  maxOpen: 20
+  maxIdle: 5
+  connMaxAge: 30m
+
+redis:
+  addr: ""        # 例如 redis:6379；为空时缓存降级为 noop
+  password: ""
+  db: 0
+
+cache:
+  ttl: 60s
+
+shutdownTimeout: 15s
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

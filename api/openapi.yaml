@@ -1,0 +1,288 @@
+openapi: 3.1.0
+info:
+  title: ProxyHarbor API
+  version: 0.1.0-alpha
+  x-stability: alpha
+servers:
+  - url: http://localhost:8080
+security:
+  - headerKey: []
+paths:
+  /healthz:
+    get:
+      security: []
+      responses:
+        '200': { description: ok }
+  /readyz:
+    get:
+      security: []
+      responses:
+        '200': { description: ready }
+  /version:
+    get:
+      security: []
+      responses:
+        '200': { description: version }
+  /v1/leases:
+    post:
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLeaseRequest' }
+      responses:
+        '201': { description: lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /v1/leases/{lease_id}:renew:
+    post:
+      parameters:
+        - { name: lease_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: renewed lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /v1/leases/{lease_id}:
+    delete:
+      parameters:
+        - { name: lease_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: revoked }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/providers:
+    get:
+      responses:
+        '200': { description: providers, content: { application/json: { schema: { type: object, properties: { providers: { type: array, items: { $ref: '#/components/schemas/Provider' } } } } } } }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Provider' }
+      responses:
+        '201': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
+  /v1/providers/{id}:
+    get:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Provider' }
+      responses:
+        '200': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
+    delete:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: deleted }
+  /v1/proxies:
+    get:
+      responses:
+        '200': { description: proxies, content: { application/json: { schema: { type: object, properties: { proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } } } } } } }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Proxy' }
+      responses:
+        '201': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /v1/proxies/{id}:
+    get:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Proxy' }
+      responses:
+        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+    delete:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: deleted }
+  /v1/proxies/{id}:health:
+    post:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [healthy]
+              properties:
+                healthy: { type: boolean }
+                failure_hint: { type: string }
+      responses:
+        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+  /v1/policies:
+    get:
+      responses:
+        '200': { description: policies }
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Policy' }
+      responses:
+        '201': { description: created policy }
+  /v1/policies/{id}:
+    get:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: policy }
+    put:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Policy' }
+      responses:
+        '200': { description: policy }
+    delete:
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: deleted }
+  /v1/catalog/latest:
+    get:
+      responses:
+        '200': { description: catalog, content: { application/json: { schema: { $ref: '#/components/schemas/Catalog' } } } }
+  /v1/internal/usage-events:batch:
+    post:
+      responses:
+        '202': { description: accepted }
+  /v1/internal/gateway-feedback:batch:
+    post:
+      responses:
+        '202': { description: accepted }
+  /v1/gateway/validate:
+    get:
+      security: []
+      parameters:
+        - { name: tenant_id, in: query, schema: { type: string } }
+        - { name: lease_id, in: query, required: true, schema: { type: string } }
+        - { name: password, in: query, schema: { type: string } }
+        - { name: target, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: valid lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    headerKey: { type: apiKey, in: header, name: ProxyHarbor-Key }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: common error response
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          enum: [policy_denied, subject_not_eligible, idempotency_conflict, no_healthy_proxy, lease_revoked, unsafe_destination, catalog_stale, auth_failed, tenant_disabled, not_found, unsupported]
+    CreateLeaseRequest:
+      type: object
+      required: [subject, resource_ref]
+      properties:
+        subject: { $ref: '#/components/schemas/Subject' }
+        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
+        policy_id: { type: string }
+        ttl_seconds: { type: integer }
+    Subject:
+      type: object
+      required: [subject_type, subject_id]
+      properties:
+        subject_type: { type: string }
+        subject_id: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+    ResourceRef:
+      type: object
+      required: [kind, id]
+      properties:
+        kind: { type: string }
+        id: { type: string }
+        scope: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+    Provider:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string, readOnly: true }
+        type: { type: string, enum: [static] }
+        name: { type: string }
+        enabled: { type: boolean }
+        labels: { type: object, additionalProperties: { type: string } }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    Proxy:
+      type: object
+      required: [endpoint]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string, readOnly: true }
+        provider_id: { type: string }
+        endpoint: { type: string }
+        healthy: { type: boolean }
+        weight: { type: integer }
+        labels: { type: object, additionalProperties: { type: string } }
+        last_seen_at: { type: string, format: date-time }
+        failure_hint: { type: string }
+    Policy:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string, readOnly: true }
+        version: { type: integer, readOnly: true }
+        name: { type: string }
+        enabled: { type: boolean }
+        subject_type: { type: string }
+        resource_kind: { type: string }
+        ttl_seconds: { type: integer }
+        labels: { type: object, additionalProperties: { type: string } }
+    Catalog:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        version: { type: string }
+        proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } }
+        generated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    Lease:
+      type: object
+      properties:
+        lease_id: { type: string }
+        tenant_id: { type: string }
+        lease_generation: { type: integer }
+        subject: { $ref: '#/components/schemas/Subject' }
+        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
+        policy_ref: { type: object }
+        gateway_url: { type: string }
+        username: { type: string }
+        password: { type: string }
+        proxy_id: { type: string }
+        expires_at: { type: string, format: date-time }
+        renew_before: { type: string, format: date-time }
+        catalog_version: { type: string }
+        candidate_set_id: { type: string }

@@ -1,0 +1,63 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-proxyharbor
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxyharbor
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxyharbor
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: proxyharbor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PROXYHARBOR_ROLE
+              value: {{ .Values.role | quote }}
+            - name: PROXYHARBOR_ADDR
+              value: ":8080"
+            - name: PROXYHARBOR_AUTH_KEY
+              value: {{ required "auth.key is required" .Values.auth.key | quote }}
+            - name: PROXYHARBOR_STORAGE
+              value: "mysql"
+            - name: PROXYHARBOR_MYSQL_DSN
+              value: {{ required "mysql.dsn is required" .Values.mysql.dsn | quote }}
+            - name: PROXYHARBOR_MYSQL_MAX_OPEN
+              value: {{ .Values.mysql.maxOpen | quote }}
+            - name: PROXYHARBOR_MYSQL_MAX_IDLE
+              value: {{ .Values.mysql.maxIdle | quote }}
+            - name: PROXYHARBOR_MYSQL_CONN_MAX_AGE
+              value: {{ .Values.mysql.connMaxAge | quote }}
+            - name: PROXYHARBOR_REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            - name: PROXYHARBOR_REDIS_PASSWORD
+              value: {{ .Values.redis.password | quote }}
+            - name: PROXYHARBOR_REDIS_DB
+              value: {{ .Values.redis.db | quote }}
+            - name: PROXYHARBOR_CACHE_TTL
+              value: {{ .Values.cache.ttl | quote }}
+            - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
+              value: {{ .Values.shutdownTimeout | quote }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+{{ toYaml .Values.resources | indent 12 }}

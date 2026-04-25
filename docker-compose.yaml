@@ -1,0 +1,47 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: proxyharbor
+      MYSQL_USER: proxyharbor
+      MYSQL_PASSWORD: proxyharbor
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./migrations/mysql/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  proxyharbor:
+    build:
+      context: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PROXYHARBOR_ROLE: all
+      PROXYHARBOR_ADDR: ":8080"
+      PROXYHARBOR_GATEWAY_URL: "http://localhost:8080"
+      PROXYHARBOR_AUTH_KEY: "change-me"
+      PROXYHARBOR_STORAGE: mysql
+      PROXYHARBOR_MYSQL_DSN: "proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC"
+      PROXYHARBOR_REDIS_ADDR: "redis:6379"
+      PROXYHARBOR_CACHE_TTL: "60s"
+    ports:
+      - "8080:8080"
