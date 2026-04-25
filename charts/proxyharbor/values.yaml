@@ -1,29 +1,69 @@
-image:
-  repository: proxyharbor
-  tag: latest
-  pullPolicy: IfNotPresent
+# ProxyHarbor Helm values
+# 适配 K8s ≥1.23 与 K3s。所有外部依赖（MySQL/Redis）均由用户提供，chart 不内置数据库子 chart。
+#
+# 最小可用配置（接入已有 MySQL+Redis）：
+#   helm install ph ./charts/proxyharbor \
+#     --set auth.key=$(openssl rand -hex 32) \
+#     --set mysql.dsn='user:pass@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC' \
+#     --set redis.addr=redis.svc:6379
+#
+# 推荐做法：把 auth.key 与 mysql.dsn 通过 existingSecret 注入，避免明文 values。
 
-# 角色：all（开发） | controller（控制面） | gateway（数据面）
+image:
+  repository: ghcr.io/kamill7779/proxyharbor
+  tag: ""              # 默认使用 .Chart.AppVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# all（开发） | controller（控制面） | gateway（数据面）
 role: all
 replicaCount: 2
 
-service:
-  type: ClusterIP
-  port: 8080
+# K3s/边缘环境优化：开启后将 resources/livenessProbe 调到更宽松
+lightweight: false
 
-# 必须由部署方覆盖
+service:
+  type: ClusterIP      # K3s 上想直接对外可改 LoadBalancer 由 servicelb 接管
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""        # K3s 默认 traefik；标准 K8s 一般是 nginx
+  annotations: {}
+  hosts:
+    - host: proxyharbor.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# 认证：二选一
+#   1) auth.key 直接给明文（不推荐生产）
+#   2) auth.existingSecret 指向已有 Secret，键名为 auth.existingSecretKey
 auth:
   key: ""
+  existingSecret: ""
+  existingSecretKey: "auth-key"
 
+# MySQL 连接：二选一
+#   1) mysql.dsn 直接给完整 DSN（明文）
+#   2) mysql.existingSecret 指向 Secret，键名为 mysql.existingSecretKey
 mysql:
-  dsn: "" # 例如 user:pass@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
+  dsn: ""
+  existingSecret: ""
+  existingSecretKey: "mysql-dsn"
   maxOpen: 20
   maxIdle: 5
   connMaxAge: 30m
 
+# Redis 连接：addr 为空时缓存自动降级为 noop（轻量场景可用）
+#   密码可走 redis.password 明文，或 existingSecret
 redis:
-  addr: ""        # 例如 redis:6379；为空时缓存降级为 noop
+  addr: ""
   password: ""
+  existingSecret: ""
+  existingSecretKey: "redis-password"
   db: 0
 
 cache:
@@ -31,6 +71,7 @@ cache:
 
 shutdownTimeout: 15s
 
+# 默认按云原生标准配置；lightweight=true 时自动按 K3s/边缘场景压低
 resources:
   requests:
     cpu: 100m
@@ -38,3 +79,34 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
+
+resourcesLightweight:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 96Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 15
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 10

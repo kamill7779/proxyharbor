@@ -528,9 +528,9 @@ type rowScanner interface {
 
 func scanLease(r rowScanner) (domain.Lease, error) {
 	var (
-		l                                                         domain.Lease
-		subjectJSON, resourceJSON, policyJSON                     []byte
-		expiresAt, renewBefore, createdAt, updatedAt              time.Time
+		l                                            domain.Lease
+		subjectJSON, resourceJSON, policyJSON        []byte
+		expiresAt, renewBefore, createdAt, updatedAt time.Time
 	)
 	if err := r.Scan(&l.ID, &l.TenantID, &l.Generation, &subjectJSON, &resourceJSON, &policyJSON,
 		&l.GatewayURL, &l.Username, &l.Password, &l.ProxyID, &expiresAt, &renewBefore,

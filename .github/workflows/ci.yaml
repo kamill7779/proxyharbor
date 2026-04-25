@@ -6,13 +6,44 @@ on:
   pull_request:
 
 jobs:
-  test:
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./...
+          cache: true
       - run: go vet ./...
-      - run: go build ./cmd/proxyharbor ./cmd/proxyharbor-controller ./cmd/proxyharbor-gateway ./cmd/proxyharbor-validator ./cmd/proxyctl
+      - run: go build ./...
+      - run: go test -race -count=1 ./...
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+      - name: Helm lint
+        run: helm lint charts/proxyharbor
+      - name: Helm template (smoke render)
+        run: |
+          helm template ph charts/proxyharbor \
+            --set auth.key=ci-test-key \
+            --set mysql.dsn='u:p@tcp(mysql:3306)/db?parseTime=true' \
+            --set redis.addr=redis:6379 \
+            > /tmp/render.yaml
+          test -s /tmp/render.yaml
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: proxyharbor:ci

@@ -37,7 +37,7 @@ type Config struct {
 	MySQLMaxOpen    int
 	MySQLMaxIdle    int
 	MySQLConnMaxAge time.Duration
-	RedisAddr       string        // 例如 redis:6379；为空时禁用缓存
+	RedisAddr       string // 例如 redis:6379；为空时禁用缓存
 	RedisPassword   string
 	RedisDB         int
 	CacheTTL        time.Duration // Catalog/Lease 默认缓存时长

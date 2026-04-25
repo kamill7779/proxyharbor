@@ -1,0 +1,139 @@
+# 自动发版工作流
+#
+# 触发方式：
+#   1) 推送形如 v0.1.1 / v0.2.0 / v1.0.0 的 tag → 全流程发版
+#   2) 手动 workflow_dispatch + 输入版本号
+#
+# 发布物：
+#   - GitHub Release（含 changelog 摘要）
+#   - 多平台容器镜像 ghcr.io/<owner>/proxyharbor:<version> + :latest
+#   - Helm chart 包（uploaded 到 release assets）
+#
+# 起始版本：v0.1.1
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v 前缀，例如 0.1.1）"
+        required: true
+        default: "0.1.1"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+          echo "解析到版本: ${VER}"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=1 ./...
+
+  docker:
+    needs: [resolve-version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    needs: [resolve-version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+      - name: Sync chart version
+        run: |
+          VER="${{ needs.resolve-version.outputs.version }}"
+          sed -i "s/^version: .*/version: ${VER}/" charts/proxyharbor/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: ${VER}/" charts/proxyharbor/Chart.yaml
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm package charts/proxyharbor -d dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: dist/*.tgz
+
+  release:
+    needs: [resolve-version, docker, helm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: dist
+      - name: Generate changelog
+        id: cl
+        run: |
+          PREV=$(git tag --sort=-v:refname | grep -v "^${{ needs.resolve-version.outputs.tag }}$" | head -n1 || true)
+          if [ -n "$PREV" ]; then
+            echo "## Changes since $PREV" > /tmp/cl.md
+            git log --pretty="format:- %s (%h)" "${PREV}..HEAD" >> /tmp/cl.md
+          else
+            echo "## Initial release ${{ needs.resolve-version.outputs.tag }}" > /tmp/cl.md
+          fi
+          cat /tmp/cl.md
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
+          name: ProxyHarbor ${{ needs.resolve-version.outputs.tag }}
+          body_path: /tmp/cl.md
+          files: dist/*.tgz
+          generate_release_notes: false

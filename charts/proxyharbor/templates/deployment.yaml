@@ -1,36 +1,46 @@
-﻿apiVersion: apps/v1
+﻿{{- $resources := ternary .Values.resourcesLightweight .Values.resources .Values.lightweight -}}
+apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-proxyharbor
+  name: {{ include "proxyharbor.fullname" . }}
+  labels:
+    {{- include "proxyharbor.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: proxyharbor
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "proxyharbor.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: proxyharbor
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "proxyharbor.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: proxyharbor
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "proxyharbor.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - containerPort: 8080
+              name: http
           env:
             - name: PROXYHARBOR_ROLE
               value: {{ .Values.role | quote }}
             - name: PROXYHARBOR_ADDR
               value: ":8080"
-            - name: PROXYHARBOR_AUTH_KEY
-              value: {{ required "auth.key is required" .Values.auth.key | quote }}
             - name: PROXYHARBOR_STORAGE
               value: "mysql"
-            - name: PROXYHARBOR_MYSQL_DSN
-              value: {{ required "mysql.dsn is required" .Values.mysql.dsn | quote }}
             - name: PROXYHARBOR_MYSQL_MAX_OPEN
               value: {{ .Values.mysql.maxOpen | quote }}
             - name: PROXYHARBOR_MYSQL_MAX_IDLE
@@ -39,25 +49,74 @@ spec:
               value: {{ .Values.mysql.connMaxAge | quote }}
             - name: PROXYHARBOR_REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
-            - name: PROXYHARBOR_REDIS_PASSWORD
-              value: {{ .Values.redis.password | quote }}
             - name: PROXYHARBOR_REDIS_DB
               value: {{ .Values.redis.db | quote }}
             - name: PROXYHARBOR_CACHE_TTL
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
+            # ----- 凭据：existingSecret 优先，否则取明文 -----
+            - name: PROXYHARBOR_AUTH_KEY
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.existingSecretKey }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: auth-key
+              {{- end }}
+            - name: PROXYHARBOR_MYSQL_DSN
+              {{- if .Values.mysql.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mysql.existingSecret }}
+                  key: {{ .Values.mysql.existingSecretKey }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: mysql-dsn
+              {{- end }}
+            {{- if or .Values.redis.existingSecret .Values.redis.password }}
+            - name: PROXYHARBOR_REDIS_PASSWORD
+              {{- if .Values.redis.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.existingSecretKey }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: redis-password
+              {{- end }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 8080
-            initialDelaySeconds: 3
-            periodSeconds: 10
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 15
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
           resources:
-{{ toYaml .Values.resources | indent 12 }}
+            {{- toYaml $resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
