@@ -3,14 +3,17 @@ package server_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
@@ -329,6 +332,27 @@ func TestTenantCrossBehalfOf(t *testing.T) {
 	}
 }
 
+func TestAuthFailureIsObservableWithoutKeyLeak(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	handler := server.New(svc, auth.NewLegacy("good-key"))
+	logger := &captureLogHandler{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logger))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	rr := requestWithAuth(t, handler, http.MethodGet, "/v1/policies", "", "bad-key")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !logger.contains("auth.failure") {
+		t.Fatalf("expected auth.failure log, got %#v", logger.messages())
+	}
+	if logger.contains("bad-key") {
+		t.Fatal("auth failure log must not include plaintext key")
+	}
+}
+
 // Admin deletes tenant -> all keys immediately invalid.
 func TestAdminDeleteTenantInvalidatesKeys(t *testing.T) {
 	adminStore := newMockAdminStore()
@@ -359,4 +383,46 @@ func requestWithAuth(t *testing.T, handler http.Handler, method, path, body, key
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	return rr
+}
+
+type captureLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureLogHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *captureLogHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *captureLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *captureLogHandler) WithGroup(_ string) slog.Handler { return h }
+
+func (h *captureLogHandler) contains(needle string) bool {
+	for _, message := range h.messages() {
+		if strings.Contains(message, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *captureLogHandler) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	messages := make([]string, 0, len(h.records))
+	for _, record := range h.records {
+		line := record.Message
+		record.Attrs(func(attr slog.Attr) bool {
+			line += " " + attr.Key + "=" + attr.Value.String()
+			return true
+		})
+		messages = append(messages, line)
+	}
+	return messages
 }

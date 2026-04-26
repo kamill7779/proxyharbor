@@ -73,7 +73,18 @@ spec:
                   key: auth-key
               {{- end }}
             {{- else if eq .Values.auth.mode "tenant-keys" }}
-            # tenant-keys: 通过 auth.existingSecret 或 values 注入 PROXYHARBOR_TENANT_KEYS
+            - name: PROXYHARBOR_TENANT_KEYS
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: tenant-keys
+              {{- else if .Values.auth.tenantKeys }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: tenant-keys
+              {{- end }}
             {{- else if eq .Values.auth.mode "dynamic-keys" }}
             - name: PROXYHARBOR_ADMIN_KEY
               {{- if .Values.auth.existingSecret }}

@@ -286,7 +286,14 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
-    headerKey: { type: apiKey, in: header, name: ProxyHarbor-Key }
+    headerKey:
+      type: apiKey
+      in: header
+      name: ProxyHarbor-Key
+      description: >-
+        Accepts the configured legacy key, a static tenant key from PROXYHARBOR_TENANT_KEYS,
+        a dynamic tenant key issued by /admin/tenants/{id}/keys, or the bootstrap admin key
+        for /admin/* and X-On-Behalf-Of control-plane calls.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key

@@ -4,16 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var staleCounter int64
+var staleCounter atomic.Int64
 
-func recordStale() { staleCounter++ }
+func recordStale() { staleCounter.Add(1) }
 
 // StaleCount returns the number of times the cache has been marked stale.
 func StaleCount() int64 {
-	return staleCounter
+	return staleCounter.Load()
 }
 
 type entry struct {

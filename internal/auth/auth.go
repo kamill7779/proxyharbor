@@ -25,7 +25,11 @@ type TenantKey struct {
 	RevokedAt *time.Time
 }
 
-const (`n`tHeaderName      = "ProxyHarbor-Key"`n`tTenantQueryName = "tenant_id"`n`tDefaultTenantID = "default"`n)
+const (
+	HeaderName      = "ProxyHarbor-Key"
+	TenantQueryName = "tenant_id"
+	DefaultTenantID = "default"
+)
 
 // TenantHeaderName is used by admin keys to assert which tenant they act on behalf of.
 const TenantHeaderName = "X-On-Behalf-Of"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -470,6 +471,7 @@ func (s *Server) requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (domain.Principal, bool) {
 	p, err := s.authn.Authenticate(r)
 	if err != nil {
+		slog.Warn("auth.failure", "path", r.URL.Path, "method", r.Method, "err", err)
 		respond(w, nil, err, http.StatusOK)
 		return domain.Principal{}, false
 	}

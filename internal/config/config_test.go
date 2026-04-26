@@ -18,7 +18,8 @@ func TestResolveAuthModeExplicit(t *testing.T) {
 		{auth.ModeLegacy, auth.ModeLegacy, true, "legacy-single-key requires"},
 	}
 	for _, tc := range cases {
-		cfg := Config{AuthMode: tc.mode, Role: "all", Selector: "zfair", StickyPolicy: "none", HealthBufferMax: 1, ZFairQuantum: 1, ZFairDefaultLatencyMS: 1, ZFairMaxPromote: 1, StorageDriver: DriverMemory}
+		cfg := validBaseConfig()
+		cfg.AuthMode = tc.mode
 		err := cfg.validate()
 		if tc.wantErr {
 			if err == nil {
@@ -38,55 +39,28 @@ func TestResolveAuthModeExplicit(t *testing.T) {
 }
 
 func TestResolveAuthModeDynamicOK(t *testing.T) {
-	cfg := Config{
-		AuthMode:              auth.ModeDynamicKeys,
-		AdminKey:              "admin-key-1234567890123456789012345678",
-		KeyPepper:             "pepper-1234567890123456789012345678",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg := validBaseConfig()
+	cfg.AuthMode = auth.ModeDynamicKeys
+	cfg.AdminKey = "admin-key-1234567890123456789012345678"
+	cfg.KeyPepper = "pepper-1234567890123456789012345678"
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestResolveAuthModeTenantKeysOK(t *testing.T) {
-	cfg := Config{
-		AuthMode:              auth.ModeTenantKeys,
-		TenantKeys:            "t1:k1",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg := validBaseConfig()
+	cfg.AuthMode = auth.ModeTenantKeys
+	cfg.TenantKeys = "t1:k1"
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestResolveAuthModeLegacyOK(t *testing.T) {
-	cfg := Config{
-		AuthMode:              auth.ModeLegacy,
-		AuthKey:               "legacy-key",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg := validBaseConfig()
+	cfg.AuthMode = auth.ModeLegacy
+	cfg.AuthKey = "legacy-key"
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,18 +68,9 @@ func TestResolveAuthModeLegacyOK(t *testing.T) {
 
 func TestResolveAuthModeDefault(t *testing.T) {
 	// AdminKey only -> dynamic
-	cfg := Config{
-		AdminKey:              "admin-key-1234567890123456780123456789",
-		KeyPepper:             "pepper-123456789012345678901234567890",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg := validBaseConfig()
+	cfg.AdminKey = "admin-key-1234567890123456780123456789"
+	cfg.KeyPepper = "pepper-123456789012345678901234567890"
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,44 +79,39 @@ func TestResolveAuthModeDefault(t *testing.T) {
 	}
 
 	// TenantKeys only -> tenant-keys
-	cfg = Config{
-		TenantKeys:            "t1:k1",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg = validBaseConfig()
+	cfg.TenantKeys = "t1:k1"
 	if resolveAuthMode(cfg) != auth.ModeTenantKeys {
 		t.Fatalf("expected tenant-keys default, got %s", resolveAuthMode(cfg))
 	}
 
 	// AuthKey only -> legacy
-	cfg = Config{
-		AuthKey:               "legacy",
-		Role:                  "all",
-		Selector:              "zfair",
-		StickyPolicy:          "none",
-		HealthBufferMax:       1,
-		ZFairQuantum:          1,
-		ZFairDefaultLatencyMS: 1,
-		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
-	}
+	cfg = validBaseConfig()
+	cfg.AuthKey = "legacy"
 	if resolveAuthMode(cfg) != auth.ModeLegacy {
 		t.Fatalf("expected legacy default, got %s", resolveAuthMode(cfg))
 	}
 }
 
 func TestPepperTooShort(t *testing.T) {
-	cfg := Config{
-		AuthMode:              auth.ModeDynamicKeys,
-		AdminKey:              "admin-key-1234567890123456789012345678",
-		KeyPepper:             "short",
+	cfg := validBaseConfig()
+	cfg.AuthMode = auth.ModeDynamicKeys
+	cfg.AdminKey = "admin-key-1234567890123456789012345678"
+	cfg.KeyPepper = "short"
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("expected error for short pepper")
+	}
+	if !contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func validBaseConfig() Config {
+	return Config{
 		Role:                  "all",
+		LogFormat:             "json",
+		LogLevel:              "info",
 		Selector:              "zfair",
 		StickyPolicy:          "none",
 		HealthBufferMax:       1,
@@ -159,13 +119,6 @@ func TestPepperTooShort(t *testing.T) {
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
 		StorageDriver:         DriverMemory,
-	}
-	err := cfg.validate()
-	if err == nil {
-		t.Fatal("expected error for short pepper")
-	}
-	if !contains(err.Error(), "at least 32 bytes") {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

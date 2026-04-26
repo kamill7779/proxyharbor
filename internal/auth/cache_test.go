@@ -101,6 +101,46 @@ func TestDynamicStore_RevokeMiss(t *testing.T) {
 	}
 }
 
+func TestDynamicStore_RevokeTwoInstancesWithinRefreshWindow(t *testing.T) {
+	pepper := []byte("test-pepper-32-bytes-long!!!!")
+	presented := "key_one"
+	hash := hashKey(pepper, presented)
+	store := &mockKeyStore{
+		keys:    []TenantKeyRow{{ID: "k1", TenantID: "tnt", KeyHash: hash}},
+		version: 1,
+	}
+	first, err := NewDynamicStore(store, pepper, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewDynamicStore(store, pepper, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := first.Lookup(presented); !ok {
+		t.Fatal("first instance should hit before revoke")
+	}
+	if _, ok := second.Lookup(presented); !ok {
+		t.Fatal("second instance should hit before revoke")
+	}
+
+	now := time.Now()
+	store.keys = []TenantKeyRow{{ID: "k1", TenantID: "tnt", KeyHash: hash, RevokedAt: &now}}
+	store.version = 2
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		first.tick(context.Background())
+		second.tick(context.Background())
+		_, firstOK := first.Lookup(presented)
+		_, secondOK := second.Lookup(presented)
+		if !firstOK && !secondOK {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected both instances to miss within 5s after version bump")
+}
+
 // U3: DB temporarily unavailable, loaded keys still hit, stale metric exported.
 func TestDynamicStore_StaleFallback(t *testing.T) {
 	pepper := []byte("test-pepper-32-bytes-long!!!!")
