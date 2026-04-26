@@ -161,6 +161,110 @@ paths:
     get:
       responses:
         '200': { description: catalog, content: { application/json: { schema: { $ref: '#/components/schemas/Catalog' } } } }
+  /admin/tenants:
+    get:
+      security:
+        - headerKey: []
+      responses:
+        '200':
+          description: tenants list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants:
+                    type: array
+                    items: { $ref: '#/components/schemas/Tenant' }
+    post:
+      security:
+        - headerKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, display_name]
+              properties:
+                id: { type: string }
+                display_name: { type: string }
+      responses:
+        '201': { description: created tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{id}:
+    patch:
+      security:
+        - headerKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string }
+                status: { type: string, enum: [active, suspended] }
+      responses:
+        '200': { description: updated tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+    delete:
+      security:
+        - headerKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: deleted }
+  /admin/tenants/{id}/keys:
+    get:
+      security:
+        - headerKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: keys list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: '#/components/schemas/TenantKey' }
+    post:
+      security:
+        - headerKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+                purpose: { type: string, enum: [general, platform_container, ci] }
+                ttl_seconds: { type: integer }
+      responses:
+        '201':
+          description: issued key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssuedKey' }
+        '400': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{id}/keys/{kid}:
+    delete:
+      security:
+        - headerKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: kid, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: revoked }
   /v1/internal/usage-events:batch:
     post:
       responses:
@@ -269,6 +373,33 @@ components:
         proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } }
         generated_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    TenantKey:
+      type: object
+      properties:
+        key_id: { type: string }
+        tenant_id: { type: string }
+        key_fp: { type: string }
+        label: { type: string }
+        purpose: { type: string }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    IssuedKey:
+      type: object
+      properties:
+        key_id: { type: string }
+        tenant_id: { type: string }
+        key: { type: string }
+        key_fp: { type: string }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     Lease:
       type: object
       properties:

@@ -38,13 +38,18 @@ ingress:
           pathType: Prefix
   tls: []
 
-# 认证：二选一
-#   1) auth.key 直接给明文（不推荐生产）
-#   2) auth.existingSecret 指向已有 Secret，键名为 auth.existingSecretKey
+# 认证模式（v0.1.5+）
+#   legacy       : 单 Key 开发模式（PROXYHARBOR_AUTH_KEY）
+#   tenant-keys  : 多租户静态配置（PROXYHARBOR_TENANT_KEYS）
+#   dynamic-keys : 生产多租户 DB 驱动（推荐）
 auth:
-  key: ""
-  existingSecret: ""
+  mode: dynamic-keys
+  key: ""                     # legacy 模式专用（向后兼容）
+  existingSecret: ""          # 指向已有 Secret（含 auth-key / admin-key / pepper 等键）
   existingSecretKey: "auth-key"
+  adminKey: ""                # Bootstrap Admin Key（dynamic-keys 必填，≥32 字符）
+  pepper: ""                  # Key Pepper（dynamic-keys 必填，≥32 字节随机）
+  refreshInterval: 5s         # 缓存轮询间隔
 
 # MySQL 连接：二选一
 #   1) mysql.dsn 直接给完整 DSN（明文）
