@@ -28,18 +28,18 @@ const (
 
 // Config 是 proxyharbor 进程启动所需的全部配置。
 type Config struct {
-	Role            string        // all | controller | gateway
-	Addr            string        // HTTP 监听地址
-	GatewayURL      string        // Lease 中回填的网关地址
-	AuthKey         string        // ProxyHarbor-Key 头校验值
-	StorageDriver   StorageDriver // memory | mysql
-	MySQLDSN        string        // 形如 user:pass@tcp(host:3306)/db?parseTime=true
-	MySQLMaxOpen    int
-	MySQLMaxIdle    int
-	MySQLConnMaxAge time.Duration
-	RedisAddr       string // 例如 redis:6379；为空时禁用缓存
-	RedisPassword   string
-	RedisDB         int
+	Role                       string        // all | controller | gateway
+	Addr                       string        // HTTP 监听地址
+	GatewayURL                 string        // Lease 中回填的网关地址
+	AuthKey                    string        // ProxyHarbor-Key 头校验值
+	StorageDriver              StorageDriver // memory | mysql
+	MySQLDSN                   string        // 形如 user:pass@tcp(host:3306)/db?parseTime=true
+	MySQLMaxOpen               int
+	MySQLMaxIdle               int
+	MySQLConnMaxAge            time.Duration
+	RedisAddr                  string // 例如 redis:6379；为空时禁用缓存
+	RedisPassword              string
+	RedisDB                    int
 	CacheTTL                   time.Duration // Catalog/Lease 默认缓存时长
 	ShutdownTimeout            time.Duration
 	AllowInternalProxyEndpoint bool // 仅 dev/本地：允许上游代理指向 loopback/私网
@@ -48,18 +48,18 @@ type Config struct {
 // Load 解析环境变量与命令行 flag 后返回配置。
 func Load(args []string) (Config, error) {
 	cfg := Config{
-		Role:            envStr("PROXYHARBOR_ROLE", "all"),
-		Addr:            envStr("PROXYHARBOR_ADDR", ":8080"),
-		GatewayURL:      envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
-		AuthKey:         os.Getenv("PROXYHARBOR_AUTH_KEY"),
-		StorageDriver:   StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
-		MySQLDSN:        os.Getenv("PROXYHARBOR_MYSQL_DSN"),
-		MySQLMaxOpen:    envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
-		MySQLMaxIdle:    envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
-		MySQLConnMaxAge: envDur("PROXYHARBOR_MYSQL_CONN_MAX_AGE", 30*time.Minute),
-		RedisAddr:       os.Getenv("PROXYHARBOR_REDIS_ADDR"),
-		RedisPassword:   os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
-		RedisDB:         envInt("PROXYHARBOR_REDIS_DB", 0),
+		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
+		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
+		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
+		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
+		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
+		MySQLDSN:                   os.Getenv("PROXYHARBOR_MYSQL_DSN"),
+		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
+		MySQLMaxIdle:               envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
+		MySQLConnMaxAge:            envDur("PROXYHARBOR_MYSQL_CONN_MAX_AGE", 30*time.Minute),
+		RedisAddr:                  os.Getenv("PROXYHARBOR_REDIS_ADDR"),
+		RedisPassword:              os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
+		RedisDB:                    envInt("PROXYHARBOR_REDIS_DB", 0),
 		CacheTTL:                   envDur("PROXYHARBOR_CACHE_TTL", 60*time.Second),
 		ShutdownTimeout:            envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		AllowInternalProxyEndpoint: envBool("PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT", false),
