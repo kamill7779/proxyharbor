@@ -49,7 +49,12 @@ type Lease struct {
 	PolicyRef      PolicyRef   `json:"policy_ref"`
 	GatewayURL     string      `json:"gateway_url"`
 	Username       string      `json:"username"`
-	Password       string      `json:"password"`
+	// Password 是租约的明文凭据，仅在 CreateLease 响应中一次性返回；
+	// 持久化层不得写入此字段，scan 时必须保持为空。
+	Password string `json:"password,omitempty"`
+	// PasswordHash 是 Password 的不可逆哈希，存于 password_hash 列；
+	// 校验时使用 subtle.ConstantTimeCompare 比较哈希，绝不返回给客户端。
+	PasswordHash   string      `json:"-"`
 	ProxyID        string      `json:"proxy_id"`
 	ExpiresAt      time.Time   `json:"expires_at"`
 	RenewBefore    time.Time   `json:"renew_before"`

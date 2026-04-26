@@ -95,13 +95,16 @@ func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, le
 	resourceJSON, _ := json.Marshal(lease.ResourceRef)
 	policyJSON, _ := json.Marshal(lease.PolicyRef)
 
+	// 任何情况下都不持久化明文密码，调用方必须先填好 PasswordHash。
+	lease.Password = ""
+
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO proxy_leases (lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
 			gateway_url, username, password_hash, proxy_id, expires_at, renew_before, catalog_version,
 			candidate_set_id, revoked, created_at, updated_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		lease.ID, lease.TenantID, lease.Generation, subjectJSON, resourceJSON, policyJSON,
-		lease.GatewayURL, lease.Username, lease.Password, lease.ProxyID,
+		lease.GatewayURL, lease.Username, lease.PasswordHash, lease.ProxyID,
 		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
 		lease.CandidateSetID, lease.Revoked, lease.CreatedAt.UTC(), lease.UpdatedAt.UTC(),
 	); err != nil {
@@ -135,13 +138,14 @@ func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domai
 	subjectJSON, _ := json.Marshal(lease.Subject)
 	resourceJSON, _ := json.Marshal(lease.ResourceRef)
 	policyJSON, _ := json.Marshal(lease.PolicyRef)
+	lease.Password = ""
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE proxy_leases SET generation=?, subject_json=?, resource_ref_json=?, policy_ref_json=?,
 			gateway_url=?, username=?, password_hash=?, proxy_id=?, expires_at=?, renew_before=?,
 			catalog_version=?, candidate_set_id=?, revoked=?, updated_at=?
 		 WHERE tenant_id=? AND lease_id=?`,
 		lease.Generation, subjectJSON, resourceJSON, policyJSON,
-		lease.GatewayURL, lease.Username, lease.Password, lease.ProxyID,
+		lease.GatewayURL, lease.Username, lease.PasswordHash, lease.ProxyID,
 		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
 		lease.CandidateSetID, lease.Revoked, time.Now().UTC(),
 		lease.TenantID, lease.ID,
@@ -533,7 +537,7 @@ func scanLease(r rowScanner) (domain.Lease, error) {
 		expiresAt, renewBefore, createdAt, updatedAt time.Time
 	)
 	if err := r.Scan(&l.ID, &l.TenantID, &l.Generation, &subjectJSON, &resourceJSON, &policyJSON,
-		&l.GatewayURL, &l.Username, &l.Password, &l.ProxyID, &expiresAt, &renewBefore,
+		&l.GatewayURL, &l.Username, &l.PasswordHash, &l.ProxyID, &expiresAt, &renewBefore,
 		&l.CatalogVersion, &l.CandidateSetID, &l.Revoked, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Lease{}, domain.ErrNotFound

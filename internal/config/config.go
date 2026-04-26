@@ -40,8 +40,9 @@ type Config struct {
 	RedisAddr       string // 例如 redis:6379；为空时禁用缓存
 	RedisPassword   string
 	RedisDB         int
-	CacheTTL        time.Duration // Catalog/Lease 默认缓存时长
-	ShutdownTimeout time.Duration
+	CacheTTL                   time.Duration // Catalog/Lease 默认缓存时长
+	ShutdownTimeout            time.Duration
+	AllowInternalProxyEndpoint bool // 仅 dev/本地：允许上游代理指向 loopback/私网
 }
 
 // Load 解析环境变量与命令行 flag 后返回配置。
@@ -59,8 +60,9 @@ func Load(args []string) (Config, error) {
 		RedisAddr:       os.Getenv("PROXYHARBOR_REDIS_ADDR"),
 		RedisPassword:   os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
 		RedisDB:         envInt("PROXYHARBOR_REDIS_DB", 0),
-		CacheTTL:        envDur("PROXYHARBOR_CACHE_TTL", 60*time.Second),
-		ShutdownTimeout: envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
+		CacheTTL:                   envDur("PROXYHARBOR_CACHE_TTL", 60*time.Second),
+		ShutdownTimeout:            envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
+		AllowInternalProxyEndpoint: envBool("PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT", false),
 	}
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
@@ -119,6 +121,18 @@ func envDur(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		case "0", "false", "no", "n", "off":
+			return false
 		}
 	}
 	return fallback

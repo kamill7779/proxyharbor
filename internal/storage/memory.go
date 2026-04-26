@@ -62,6 +62,8 @@ func (s *MemoryStore) CreateLease(_ context.Context, scope IdempotencyScope, lea
 	if existing, ok := s.idempotency[scopeKey]; ok {
 		return copyLease(s.leases[key(scope.TenantID, existing)]), nil
 	}
+	// 不持久化明文密码。
+	lease.Password = ""
 	s.leases[key(lease.TenantID, lease.ID)] = copyLease(lease)
 	s.idempotency[scopeKey] = lease.ID
 	return copyLease(lease), nil
@@ -86,6 +88,7 @@ func (s *MemoryStore) UpdateLease(_ context.Context, lease domain.Lease) (domain
 	if _, ok := s.leases[leaseKey]; !ok {
 		return domain.Lease{}, domain.ErrNotFound
 	}
+	lease.Password = ""
 	s.leases[leaseKey] = copyLease(lease)
 	return copyLease(lease), nil
 }

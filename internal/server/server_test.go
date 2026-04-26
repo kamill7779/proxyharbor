@@ -93,6 +93,7 @@ func TestStaticProviderHealthyProxyLeaseAndGatewayForward(t *testing.T) {
 
 	store := storage.NewMemoryStore()
 	svc := control.NewService(store, "http://gateway.local")
+	svc.SetAllowInternalProxyEndpoint(true)
 	handler := server.New(svc, auth.New("test-key"))
 
 	provider := request(t, handler, http.MethodPost, "/v1/providers", `{"id":"static-test","type":"static","name":"test","enabled":true}`, "")
@@ -114,8 +115,14 @@ func TestStaticProviderHealthyProxyLeaseAndGatewayForward(t *testing.T) {
 		t.Fatalf("create lease status = %d body=%s", first.Code, first.Body.String())
 	}
 	second := request(t, handler, http.MethodPost, "/v1/leases", body, "idem-forward")
-	if second.Body.String() != first.Body.String() {
-		t.Fatalf("idempotency changed response\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	// 幂等重试不会重新返回明文密码（后端不持久化明文），所以仅比较 lease ID。
+	var firstLease, secondLease struct {
+		ID string `json:"lease_id"`
+	}
+	_ = json.Unmarshal(first.Body.Bytes(), &firstLease)
+	_ = json.Unmarshal(second.Body.Bytes(), &secondLease)
+	if firstLease.ID == "" || firstLease.ID != secondLease.ID {
+		t.Fatalf("idempotency mismatch first=%s second=%s", first.Body.String(), second.Body.String())
 	}
 	var lease struct {
 		ID       string `json:"lease_id"`
@@ -189,6 +196,7 @@ func TestGatewayConnectUsesLeaseProxy(t *testing.T) {
 
 	store := storage.NewMemoryStore()
 	svc := control.NewService(store, "http://gateway.local")
+	svc.SetAllowInternalProxyEndpoint(true)
 	handler := server.New(svc, auth.New("test-key"))
 	proxyURL, _ := url.Parse(proxy.URL)
 	proxyURL.User = url.UserPassword("upstream", "secret")

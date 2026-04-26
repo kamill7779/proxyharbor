@@ -46,6 +46,7 @@ func main() {
 
 	svc := control.NewService(store, cfg.GatewayURL)
 	svc.SetCache(cacheImpl, cfg.CacheTTL)
+	svc.SetAllowInternalProxyEndpoint(cfg.AllowInternalProxyEndpoint)
 
 	role := server.Role(cfg.Role)
 	handler := server.NewForRole(svc, auth.New(cfg.AuthKey), role)
