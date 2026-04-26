@@ -9,3 +9,4 @@ coverage.out
 /cmd/loadgen/
 /perf/
 /docker-compose.perf.yaml
+.claude/
