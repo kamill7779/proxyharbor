@@ -26,6 +26,10 @@ type Store interface {
 	AuditStore
 }
 
+type DependencyChecker interface {
+	CheckDependencies(context.Context) map[string]error
+}
+
 type LeaseStore interface {
 	GetLeaseByIdempotency(context.Context, IdempotencyScope) (domain.Lease, bool, error)
 	CreateLease(context.Context, IdempotencyScope, domain.Lease) (domain.Lease, error)

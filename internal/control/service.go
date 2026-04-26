@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -27,10 +28,19 @@ type Service struct {
 	allowInternalProxyEndpoint bool
 	resolver                   *net.Resolver
 	selector                   selector.ProxySelector
+	logger                     *slog.Logger
 }
 
 func NewService(store storage.Store, gatewayURL string) *Service {
 	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver, selector: selector.FirstSelectable{}}
+}
+
+func (s *Service) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		s.logger = nil
+		return
+	}
+	s.logger = logger
 }
 
 func (s *Service) SetAllowInternalProxyEndpoint(allow bool) { s.allowInternalProxyEndpoint = allow }
@@ -90,6 +100,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	}
 	proxy, err := s.selector.Select(ctx, principal.TenantID, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
 	if err != nil {
+		s.logSelectorError(principal.TenantID, len(candidates), err)
 		return domain.Lease{}, err
 	}
 	now := s.now()
@@ -331,6 +342,20 @@ func (s *Service) pickPolicy(ctx context.Context, tenantID string, req CreateLea
 		}
 	}
 	return domain.Policy{}, domain.ErrPolicyDenied
+}
+
+func (s *Service) logSelectorError(tenantID string, candidateCount int, err error) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("selector.select.failed",
+		"tenant_id", tenantID,
+		"candidate_count", candidateCount,
+		"error", domain.ErrorCode(err),
+		"error_kind", string(domain.ErrorKindOf(err)),
+		"reason", domain.ErrorReason(err),
+	)
 }
 
 func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }

@@ -66,7 +66,7 @@ curl http://localhost:8080/readyz
 ```
 
 ```json
-{"role":"all","status":"ready"}
+{"dependencies":{"mysql":"ok","redis_cache":"ok","redis_selector":"ok"},"role":"all","status":"ready"}
 ```
 
 ### 3. Register a provider
@@ -231,16 +231,20 @@ Three consecutive failures trip the circuit breaker. Base cooldown is 30 s, maxi
 | --- | --- | --- |
 | `PROXYHARBOR_AUTH_KEY` | Shared key for control-plane API calls | **required** |
 | `PROXYHARBOR_ROLE` | Process role: `all` / `controller` / `gateway` | `all` |
-| `PROXYHARBOR_STORAGE` | Storage driver: `mysql` / `memory` | `mysql` |
+| `PROXYHARBOR_LOG_FORMAT` | Standard-library slog output format: `json` / `text` | `json` |
+| `PROXYHARBOR_LOG_LEVEL` | Standard-library slog level: `info` / `debug` | `info` |
+| `PROXYHARBOR_STORAGE` | Storage driver: `mysql` / `memory` | `memory` |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL connection string | empty |
-| `PROXYHARBOR_REDIS_ADDR` | Redis address | empty |
+| `PROXYHARBOR_REDIS_ADDR` | Redis address; zfair production mode depends on it and cache reuses it | empty |
 | `PROXYHARBOR_SELECTOR` | Proxy selector name | `zfair` |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Refuse startup when zfair has no Redis | `true` |
+| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Refuse startup when zfair has no Redis; `false` remains for local legacy configs | `true` |
 | `PROXYHARBOR_SCORING_PROFILE` | Health scoring profile: `default` / `aggressive` / `lenient` | `default` |
 | `PROXYHARBOR_ZFAIR_QUANTUM` | Base virtual-runtime increment | `1000` |
 | `PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS` | Default latency for proxies without EWMA data (ms) | `200` |
 | `PROXYHARBOR_ZFAIR_MAX_PROMOTE` | Max delayed proxies promoted before each selection | `128` |
 | `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | Allow loopback/private addresses (testing only) | `false` |
+
+`/readyz` checks enabled critical dependencies in real time: MySQL storage, Redis cache, and Redis zfair selector. It returns 503 while a dependency is down and recovers to 200 after the dependency recovers. Startup uses bounded retry for MySQL/Redis and never waits forever. zfair may rebuild an empty ready queue once from tenant-scoped Redis nodes; ProxyHarbor still does not introduce leader election or cross-controller coordination in v0.1.3.
 
 See `.env.example` for a fully commented template.
 

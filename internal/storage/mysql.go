@@ -45,8 +45,14 @@ func NewMySQLStore(ctx context.Context, dsn string, maxOpen, maxIdle int, connMa
 // Close 释放连接池。
 func (s *MySQLStore) Close() error { return s.db.Close() }
 
-// DB 暴露底层句柄，供调用方用于 Leader Election 等场景的 advisory lock。
+// DB exposes the underlying handle for diagnostics and maintenance tasks.
 func (s *MySQLStore) DB() *sql.DB { return s.db }
+
+func (s *MySQLStore) CheckDependencies(ctx context.Context) map[string]error {
+	pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	return map[string]error{"mysql": s.db.PingContext(pingCtx)}
+}
 
 // ---------- LeaseStore ----------
 

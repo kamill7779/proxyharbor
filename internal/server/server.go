@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -30,6 +31,7 @@ type Server struct {
 	authn          *auth.Authenticator
 	role           Role
 	healthRecorder health.HealthRecorder
+	dependency     storage.DependencyChecker
 }
 
 func New(svc *control.Service, authn *auth.Authenticator) http.Handler {
@@ -43,7 +45,11 @@ func NewForRole(svc *control.Service, authn *auth.Authenticator, role Role) http
 }
 
 func NewForRoleWithHealthRecorder(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder) http.Handler {
-	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder}
+	return NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, recorder, nil)
+}
+
+func NewForRoleWithHealthRecorderAndDependencies(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder, dependency storage.DependencyChecker) http.Handler {
+	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder, dependency: dependency}
 	s.routes()
 	return Recover(s)
 }
@@ -91,7 +97,30 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "role": string(s.role)})
+	if s.dependency == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "role": string(s.role), "reasons": map[string]string{}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+	checks := s.dependency.CheckDependencies(ctx)
+	reasons := make(map[string]string, len(checks))
+	ready := true
+	for name, err := range checks {
+		if err != nil {
+			reasons[name] = "unavailable"
+			ready = false
+			continue
+		}
+		reasons[name] = "ok"
+	}
+	status := http.StatusOK
+	bodyStatus := "ready"
+	if !ready {
+		status = http.StatusServiceUnavailable
+		bodyStatus = "degraded"
+	}
+	writeJSON(w, status, map[string]any{"status": bodyStatus, "role": string(s.role), "reasons": reasons})
 }
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {

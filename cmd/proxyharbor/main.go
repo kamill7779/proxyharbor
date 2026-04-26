@@ -22,10 +22,9 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-
 	cfg, err := config.Load(os.Args[1:])
+	logger := newLogger(cfg)
+	slog.SetDefault(logger)
 	if err != nil {
 		logger.Error("load config", "err", err)
 		os.Exit(2)
@@ -44,7 +43,7 @@ func main() {
 	cacheImpl, closeCache := openCache(ctx, cfg, logger)
 	defer closeCache()
 
-	selectorImpl, closeSelector, err := openSelector(ctx, cfg)
+	selectorImpl, closeSelector, err := openSelector(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("open selector", "err", err)
 		os.Exit(1)
@@ -59,12 +58,13 @@ func main() {
 	defer healthRecorder.Close(context.Background())
 
 	svc := control.NewService(store, cfg.GatewayURL)
+	svc.SetLogger(logger)
 	svc.SetCache(cacheImpl, cfg.CacheTTL)
 	svc.SetAllowInternalProxyEndpoint(cfg.AllowInternalProxyEndpoint)
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	handler := server.NewForRoleWithHealthRecorder(svc, auth.New(cfg.AuthKey), role, healthRecorder)
+	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, auth.New(cfg.AuthKey), role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -90,9 +90,50 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown", "err", err)
 	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer drainCancel()
+	healthRecorder.Close(drainCtx)
 }
 
-func openSelector(ctx context.Context, cfg config.Config) (selector.ProxySelector, func(), error) {
+func newLogger(cfg config.Config) *slog.Logger {
+	level := slog.LevelInfo
+	if cfg.LogLevel == "debug" {
+		level = slog.LevelDebug
+	}
+	options := &slog.HandlerOptions{Level: level}
+	if cfg.LogFormat == "text" {
+		return slog.New(slog.NewTextHandler(os.Stdout, options))
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, options))
+}
+
+type checker interface {
+	Check(context.Context) error
+}
+
+type dependencyChecks struct {
+	store    storage.Store
+	cache    cache.Cache
+	selector selector.ProxySelector
+}
+
+func (d dependencyChecks) CheckDependencies(ctx context.Context) map[string]error {
+	checks := map[string]error{}
+	if store, ok := d.store.(storage.DependencyChecker); ok {
+		for name, err := range store.CheckDependencies(ctx) {
+			checks[name] = err
+		}
+	}
+	if redisCache, ok := d.cache.(checker); ok {
+		checks["redis_cache"] = redisCache.Check(ctx)
+	}
+	if redisSelector, ok := d.selector.(checker); ok {
+		checks["redis_selector"] = redisSelector.Check(ctx)
+	}
+	return checks
+}
+
+func openSelector(ctx context.Context, cfg config.Config, logger *slog.Logger) (selector.ProxySelector, func(), error) {
 	if cfg.Selector != selector.NameZFair {
 		return nil, func() {}, errors.New("unsupported selector")
 	}
@@ -102,14 +143,16 @@ func openSelector(ctx context.Context, cfg config.Config) (selector.ProxySelecto
 		}
 		return nil, func() {}, nil
 	}
-	sel, err := selector.NewRedisZFair(ctx, selector.RedisZFairConfig{
-		Addr:             cfg.RedisAddr,
-		Password:         cfg.RedisPassword,
-		DB:               cfg.RedisDB,
-		Quantum:          float64(cfg.ZFairQuantum),
-		DefaultLatencyMS: int64(cfg.ZFairDefaultLatencyMS),
-		MaxPromote:       int64(cfg.ZFairMaxPromote),
-		MaxScan:          int64(cfg.ZFairMaxPromote),
+	sel, err := retry(ctx, 30*time.Second, logger, "redis selector", func(attemptCtx context.Context) (*selector.RedisZFair, error) {
+		return selector.NewRedisZFair(attemptCtx, selector.RedisZFairConfig{
+			Addr:             cfg.RedisAddr,
+			Password:         cfg.RedisPassword,
+			DB:               cfg.RedisDB,
+			Quantum:          float64(cfg.ZFairQuantum),
+			DefaultLatencyMS: int64(cfg.ZFairDefaultLatencyMS),
+			MaxPromote:       int64(cfg.ZFairMaxPromote),
+			MaxScan:          int64(cfg.ZFairMaxPromote),
+		})
 	})
 	if err != nil {
 		return nil, func() {}, err
@@ -120,7 +163,9 @@ func openSelector(ctx context.Context, cfg config.Config) (selector.ProxySelecto
 func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (storage.Store, func(), error) {
 	switch cfg.StorageDriver {
 	case config.DriverMySQL:
-		s, err := storage.NewMySQLStore(ctx, cfg.MySQLDSN, cfg.MySQLMaxOpen, cfg.MySQLMaxIdle, cfg.MySQLConnMaxAge)
+		s, err := retry(ctx, 30*time.Second, logger, "mysql", func(attemptCtx context.Context) (*storage.MySQLStore, error) {
+			return storage.NewMySQLStore(attemptCtx, cfg.MySQLDSN, cfg.MySQLMaxOpen, cfg.MySQLMaxIdle, cfg.MySQLConnMaxAge)
+		})
 		if err != nil {
 			return nil, func() {}, err
 		}
@@ -138,10 +183,49 @@ func openCache(ctx context.Context, cfg config.Config, logger *slog.Logger) (cac
 		logger.Warn("redis is not configured; cache falls back to noop")
 		return cache.Noop{}, func() {}
 	}
-	r, err := cache.NewRedis(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	r, err := retry(ctx, 30*time.Second, logger, "redis cache", func(attemptCtx context.Context) (*cache.Redis, error) {
+		return cache.NewRedis(attemptCtx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	})
 	if err != nil {
 		logger.Error("redis cache init failed; cache falls back to noop", "err", err)
 		return cache.Noop{}, func() {}
 	}
 	return r, func() { _ = r.Close() }
+}
+
+func retry[T any](ctx context.Context, maxElapsed time.Duration, logger *slog.Logger, name string, fn func(context.Context) (T, error)) (T, error) {
+	deadline := time.Now().Add(maxElapsed)
+	attempt := 0
+	delay := 500 * time.Millisecond
+	var zero T
+	var lastErr error
+	for attempt < 10 {
+		attempt++
+		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		value, err := fn(attemptCtx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("startup dependency ready", "dependency", name, "attempt", attempt)
+			}
+			return value, nil
+		}
+		lastErr = err
+		if time.Now().Add(delay).After(deadline) || ctx.Err() != nil {
+			logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "err", lastErr)
+			return zero, lastErr
+		}
+		logger.Warn("startup dependency retry", "dependency", name, "attempt", attempt, "err", err)
+		select {
+		case <-time.After(delay + time.Duration(attempt%3)*100*time.Millisecond):
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+		delay *= 2
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+	}
+	logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "err", lastErr)
+	return zero, lastErr
 }

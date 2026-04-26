@@ -2,6 +2,9 @@ package health
 
 import (
 	"context"
+	"errors"
+	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -34,10 +37,11 @@ type CoalescingRecorder struct {
 	policy        ScoringPolicy
 	flushInterval time.Duration
 
-	mu     sync.Mutex
-	events []proxyEvent
-	closed bool
-	done   chan struct{}
+	mu      sync.Mutex
+	events  []proxyEvent
+	closed  bool
+	done    chan struct{}
+	stopped chan struct{}
 }
 
 type proxyEvent struct {
@@ -79,6 +83,7 @@ func NewCoalescingRecorder(store OutcomeStore, options RecorderOptions) *Coalesc
 		flushInterval: flushInterval,
 		events:        make([]proxyEvent, 0, bufferSize),
 		done:          make(chan struct{}),
+		stopped:       make(chan struct{}),
 	}
 	go recorder.run()
 	return recorder
@@ -102,45 +107,7 @@ func (r *CoalescingRecorder) RecordProxyResult(_ context.Context, tenantID, prox
 }
 
 func (r *CoalescingRecorder) Flush(ctx context.Context) {
-	if r == nil || r.store == nil {
-		return
-	}
-	events := r.drain()
-	if len(events) == 0 {
-		return
-	}
-	for _, delta := range r.coalesce(events) {
-		key := delta.key
-		bucket := delta.bucket
-		if bucket.successCount > 0 {
-			latencyMS := 0
-			if bucket.latencyCount > 0 {
-				latencyMS = bucket.latencySumMS / bucket.latencyCount
-			}
-			_ = r.store.RecordProxyOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
-				Success:    true,
-				Reward:     r.policy.SuccessReward * bucket.successCount,
-				LatencyMS:  latencyMS,
-				ObservedAt: time.Now().UTC(),
-			})
-		}
-		if bucket.hasFailure {
-			penalty := r.policy.FailurePenalty[bucket.failureKind]
-			if penalty <= 0 {
-				penalty = r.policy.FailurePenalty[FailureUnknown]
-			}
-			_ = r.store.RecordProxyOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
-				Success:               false,
-				FailureKind:           bucket.failureKind.String(),
-				FailureHint:           bucket.failureHint,
-				Penalty:               penalty,
-				MaxConsecutiveFailure: r.policy.CircuitOpenThreshold,
-				BaseCooldown:          r.policy.CircuitBaseCooldown,
-				MaxCooldown:           r.policy.CircuitMaxCooldown,
-				ObservedAt:            time.Now().UTC(),
-			})
-		}
-	}
+	r.flush(ctx)
 }
 
 func (r *CoalescingRecorder) Close(ctx context.Context) {
@@ -155,10 +122,21 @@ func (r *CoalescingRecorder) Close(ctx context.Context) {
 	r.closed = true
 	close(r.done)
 	r.mu.Unlock()
-	r.Flush(ctx)
+
+	select {
+	case <-r.stopped:
+	case <-ctx.Done():
+	}
+	drained, failed := r.flushDrain(ctx)
+	if failed > 0 {
+		slog.Warn("health.shutdown.drained", "events", drained, "failed", failed)
+		return
+	}
+	slog.Info("health.shutdown.drained", "events", drained)
 }
 
 func (r *CoalescingRecorder) run() {
+	defer close(r.stopped)
 	ticker := time.NewTicker(r.flushInterval)
 	defer ticker.Stop()
 	for {
@@ -177,6 +155,87 @@ func (r *CoalescingRecorder) drain() []proxyEvent {
 	events := append([]proxyEvent(nil), r.events...)
 	r.events = r.events[:0]
 	return events
+}
+
+func (r *CoalescingRecorder) flush(ctx context.Context) int {
+	drained, _ := r.flushDrain(ctx)
+	return drained
+}
+
+func (r *CoalescingRecorder) flushDrain(ctx context.Context) (int, int) {
+	if r == nil || r.store == nil {
+		return 0, 0
+	}
+	events := r.drain()
+	if len(events) == 0 {
+		return 0, 0
+	}
+	failed := r.writeEvents(ctx, events)
+	return len(events) - failed, failed
+}
+
+func (r *CoalescingRecorder) writeEvents(ctx context.Context, events []proxyEvent) int {
+	failed := 0
+	for _, delta := range r.coalesce(events) {
+		key := delta.key
+		bucket := delta.bucket
+		if bucket.successCount > 0 {
+			latencyMS := 0
+			if bucket.latencyCount > 0 {
+				latencyMS = bucket.latencySumMS / bucket.latencyCount
+			}
+			if err := r.recordOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
+				Success:    true,
+				Reward:     r.policy.SuccessReward * bucket.successCount,
+				LatencyMS:  latencyMS,
+				ObservedAt: time.Now().UTC(),
+			}); err != nil {
+				failed += bucket.successCount
+			}
+		}
+		if bucket.hasFailure {
+			penalty := r.policy.FailurePenalty[bucket.failureKind]
+			if penalty <= 0 {
+				penalty = r.policy.FailurePenalty[FailureUnknown]
+			}
+			if err := r.recordOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
+				Success:               false,
+				FailureKind:           bucket.failureKind.String(),
+				FailureHint:           bucket.failureHint,
+				Penalty:               penalty,
+				MaxConsecutiveFailure: r.policy.CircuitOpenThreshold,
+				BaseCooldown:          r.policy.CircuitBaseCooldown,
+				MaxCooldown:           r.policy.CircuitMaxCooldown,
+				ObservedAt:            time.Now().UTC(),
+			}); err != nil {
+				failed++
+			}
+		}
+	}
+	return failed
+}
+
+func (r *CoalescingRecorder) recordOutcome(ctx context.Context, tenantID, proxyID string, delta storage.ProxyHealthDelta) error {
+	err := r.store.RecordProxyOutcome(ctx, tenantID, proxyID, delta)
+	if err == nil {
+		return nil
+	}
+	if retryableRecorderError(err) {
+		err = r.store.RecordProxyOutcome(ctx, tenantID, proxyID, delta)
+		if err == nil {
+			return nil
+		}
+	}
+	slog.Warn("health.recorder.write_failed", "tenant_id", tenantID, "proxy_id", proxyID, "err", err)
+	return err
+}
+
+func retryableRecorderError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 type orderedProxyDelta struct {

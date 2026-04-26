@@ -55,6 +55,29 @@ for _, proxy_id in ipairs(due) do
   end
 end
 
+if redis.call('ZCARD', ready) == 0 then
+  for proxy_id, _ in pairs(allowed) do
+    local node_key = node_prefix .. proxy_id
+    if redis.call('EXISTS', node_key) == 1 and redis.call('ZSCORE', delayed, proxy_id) == false then
+      local node = redis.call('HMGET', node_key, 'weight', 'health_score', 'circuit_open_until', 'next_eligible_at', 'virtual_runtime')
+      local weight = tonumber(node[1]) or 0
+      local health_score = tonumber(node[2]) or 0
+      local circuit_open_until = tonumber(node[3]) or 0
+      local next_eligible_at = tonumber(node[4]) or 0
+      local vr = tonumber(node[5]) or 0
+      if weight > 0 and health_score > 0 then
+        if circuit_open_until > now_ms then
+          redis.call('ZADD', delayed, circuit_open_until, proxy_id)
+        elseif next_eligible_at > now_ms then
+          redis.call('ZADD', delayed, next_eligible_at, proxy_id)
+        else
+          redis.call('ZADD', ready, vr, proxy_id)
+        end
+      end
+    end
+  end
+end
+
 for i = 1, max_scan do
   local picked = redis.call('ZRANGE', ready, 0, 0, 'WITHSCORES')
   if #picked == 0 then
@@ -190,24 +213,69 @@ func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []d
 	}
 	result, err := s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
 	if errors.Is(err, redis.Nil) || result == nil {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		if rebuildErr := s.ensureCandidates(ctx, tenantID, candidateByID); rebuildErr != nil {
+			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_rebuild_failed", rebuildErr)
+		}
+		result, err = s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
+		if errors.Is(err, redis.Nil) || result == nil {
+			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_after_rebuild", nil)
+		}
 	}
 	if err != nil {
-		return domain.Proxy{}, err
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_eval_failed", err)
 	}
 	values, ok := result.([]any)
 	if !ok || len(values) == 0 {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorMalformedResult, "malformed_result", nil)
 	}
 	proxyID := fmt.Sprint(values[0])
 	selected, ok := candidateByID[proxyID]
 	if !ok {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorStaleResult, "stale_result", nil)
 	}
 	return selected, nil
 }
 
-func readyKey(tenantID string) string         { return "proxyharbor:{" + tenantID + "}:selector:ready" }
-func delayedKey(tenantID string) string       { return "proxyharbor:{" + tenantID + "}:selector:delayed" }
+func (s *RedisZFair) ensureCandidates(ctx context.Context, tenantID string, candidates map[string]domain.Proxy) error {
+	lockKey := rebuildLockKey(tenantID)
+	locked, err := s.client.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+	if err != nil {
+		return err
+	}
+	if !locked {
+		return nil
+	}
+	defer s.client.Del(context.Background(), lockKey)
+
+	pipe := s.client.Pipeline()
+	nowMS := s.now().UTC().UnixMilli()
+	for proxyID, candidate := range candidates {
+		if candidate.TenantID != tenantID || !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+			continue
+		}
+		nodeKey := nodeKey(tenantID, proxyID)
+		score := float64(0)
+		if vr, err := s.client.HGet(ctx, nodeKey, "virtual_runtime").Float64(); err == nil {
+			score = vr
+		}
+		circuitOpenUntil := int64(0)
+		if !candidate.CircuitOpenUntil.IsZero() {
+			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
+		}
+		if circuitOpenUntil > nowMS {
+			pipe.ZAdd(ctx, delayedKey(tenantID), redis.Z{Score: float64(circuitOpenUntil), Member: proxyID})
+			continue
+		}
+		pipe.ZAdd(ctx, readyKey(tenantID), redis.Z{Score: score, Member: proxyID})
+	}
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func readyKey(tenantID string) string   { return "proxyharbor:{" + tenantID + "}:selector:ready" }
+func delayedKey(tenantID string) string { return "proxyharbor:{" + tenantID + "}:selector:delayed" }
+func rebuildLockKey(tenantID string) string {
+	return "proxyharbor:{" + tenantID + "}:selector:rebuild_lock"
+}
 func nodePrefix(tenantID string) string       { return "proxyharbor:{" + tenantID + "}:selector:node:" }
 func nodeKey(tenantID, proxyID string) string { return nodePrefix(tenantID) + proxyID }
