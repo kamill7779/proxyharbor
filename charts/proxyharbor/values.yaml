@@ -1,35 +1,36 @@
 # ProxyHarbor Helm values
-# 适配 K8s ≥1.23 与 K3s。所有外部依赖（MySQL/Redis）均由用户提供，chart 不内置数据库子 chart。
+# Supports Kubernetes >=1.23 and K3s. External dependencies (MySQL/Redis) are provided by users;
+# this chart does not bundle database subcharts.
 #
-# 最小可用配置（接入已有 MySQL+Redis）：
+# Minimal install using existing MySQL + Redis:
 #   helm install ph ./charts/proxyharbor \
-#     --set auth.tenantKeys.default=$(openssl rand -hex 32) \
+#     --set auth.key=$(openssl rand -hex 32) \
 #     --set mysql.dsn='user:pass@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC' \
 #     --set redis.addr=redis.svc:6379
 #
-# Recommended: inject auth.tenantKeysExistingSecret and mysql.dsn from existing Secrets to avoid plaintext values.
+# Recommended: inject auth.key and mysql.dsn through existingSecret instead of plaintext values.
 
 image:
   repository: ghcr.io/kamill7779/proxyharbor
-  tag: ""              # 默认使用 .Chart.AppVersion
+  tag: ""              # Defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
   pullSecrets: []
 
-# all（开发） | controller（控制面） | gateway（数据面）
+# all (dev) | controller (control plane) | gateway (data plane)
 role: all
 replicaCount: 2
 
-# K3s/边缘环境优化：开启后将 resources/livenessProbe 调到更宽松
+# K3s/edge optimization: lowers resources and relaxes livenessProbe when enabled.
 lightweight: false
 
 service:
-  type: ClusterIP      # K3s 上想直接对外可改 LoadBalancer 由 servicelb 接管
+  type: ClusterIP      # Use LoadBalancer on K3s when servicelb should expose it directly.
   port: 8080
   annotations: {}
 
 ingress:
   enabled: false
-  className: ""        # K3s 默认 traefik；标准 K8s 一般是 nginx
+  className: ""        # K3s defaults to traefik; common Kubernetes clusters often use nginx.
   annotations: {}
   hosts:
     - host: proxyharbor.local
@@ -38,38 +39,36 @@ ingress:
           pathType: Prefix
   tls: []
 
-# 认证：二选一
-# Auth: tenantKeys is recommended. Each entry is tenant_id:key.
-# Control-plane clients only send ProxyHarbor-Key; tenant ID is derived from the key.
-# Use legacySingleKey only for pre-v0.1.4 deployments. tenantKeys and legacySingleKey are mutually exclusive.
+# Auth mode (v0.1.5+):
+#   legacy       : single-key development mode (PROXYHARBOR_AUTH_KEY)
+#   tenant-keys  : multi-tenant static config (PROXYHARBOR_TENANT_KEYS)
+#   dynamic-keys : production multi-tenant DB-backed mode (recommended)
 auth:
-  tenantKeys: {}
-  tenantKeysString: ""
-  tenantKeysExistingSecret: ""
-  tenantKeysExistingSecretKey: "tenant-keys"
-  legacySingleKey: ""
-  # Deprecated aliases for legacy fields; kept for old CI and values files.
-  key: ""
-  existingSecret: ""
+  mode: legacy
+  key: "change-me"            # legacy mode only; backwards compatible
+  tenantKeys: ""              # tenant-keys mode: tenant_id:key,tenant_id:key
+  existingSecret: ""          # Existing Secret containing auth-key / admin-key / pepper keys.
   existingSecretKey: "auth-key"
-  legacyExistingSecret: ""
-  legacyExistingSecretKey: "auth-key"
+  adminKey: ""                # Bootstrap Admin Key; required for dynamic-keys, >=32 chars.
+  pepper: ""                  # Key Pepper; required for dynamic-keys, >=32 random bytes.
+  refreshInterval: 5s         # Cache polling interval.
 
-# MySQL 连接：二选一
-#   1) mysql.dsn 直接给完整 DSN（明文）
-#   2) mysql.existingSecret 指向 Secret，键名为 mysql.existingSecretKey
+# MySQL connection; choose one:
+#   1) Set mysql.dsn directly (plaintext).
+#   2) Point mysql.existingSecret to a Secret key named by mysql.existingSecretKey.
 mysql:
-  dsn: ""
+  dsn: "proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true"
   existingSecret: ""
   existingSecretKey: "mysql-dsn"
   maxOpen: 20
   maxIdle: 5
   connMaxAge: 30m
 
-# Redis 连接：addr 为空时缓存自动降级为 noop（轻量场景可用）
-#   密码可走 redis.password 明文，或 existingSecret
+# Redis connection. Empty addr degrades cache to noop for lightweight scenarios.
+# Password can be provided as redis.password plaintext or via existingSecret.
 redis:
   addr: ""
+  selectorRedisRequired: false
   password: ""
   existingSecret: ""
   existingSecretKey: "redis-password"
@@ -80,7 +79,7 @@ cache:
 
 shutdownTimeout: 15s
 
-# 默认按云原生标准配置；lightweight=true 时自动按 K3s/边缘场景压低
+# Defaults target cloud-native deployments; lightweight=true lowers settings for K3s/edge.
 resources:
   requests:
     cpu: 100m

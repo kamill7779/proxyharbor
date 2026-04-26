@@ -64,12 +64,14 @@ func main() {
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	authn := newAuthenticator(cfg)
-	logger.Info("auth initialised",
-		"mode", string(authn.Mode()),
-		"tenants", authn.Tenants(),
-		"keys", len(cfg.TenantKeys))
-	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	authn, authClose, err := buildAuthenticator(ctx, cfg, store)
+	if err != nil {
+		logger.Error("open authenticator", "err", err)
+		os.Exit(1)
+	}
+	defer authClose()
+	adminStore := buildAdminStore(store)
+	handler := server.NewForRoleWithHealthRecorderDependenciesAndAdmin(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl}, adminStore, cfg.KeyPepper)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -80,7 +82,8 @@ func main() {
 	go func() {
 		logger.Info("proxyharbor listening",
 			"role", cfg.Role, "addr", cfg.Addr, "storage", cfg.StorageDriver,
-			"redis", cfg.RedisAddr != "", "selector", cfg.Selector)
+			"redis", cfg.RedisAddr != "", "selector", cfg.Selector,
+			"auth_mode", cfg.AuthMode, "auth_cache_entries", authn.CacheEntries())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("listen", "err", err)
 			stop()
@@ -100,6 +103,36 @@ func main() {
 	healthRecorder.Close(drainCtx)
 }
 
+func buildAdminStore(store storage.Store) server.AdminStore {
+	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
+		return server.NewMySQLAdminStore(mysqlStore.DB())
+	}
+	return server.NewMemoryAdminStore()
+}
+
+func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, func(), error) {
+	switch cfg.AuthMode {
+	case auth.ModeDynamicKeys:
+		mysqlStore, ok := store.(*storage.MySQLStore)
+		if !ok {
+			return nil, func() {}, errors.New("auth mode dynamic-keys requires mysql storage")
+		}
+		dynamicStore, err := auth.NewDynamicStore(auth.NewMySQLKeyStore(mysqlStore.DB()), []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		refreshCtx, cancel := context.WithCancel(ctx)
+		go dynamicStore.Run(refreshCtx)
+		return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), cancel, nil
+	case auth.ModeTenantKeys:
+		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), func() {}, nil
+	case auth.ModeLegacy:
+		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), func() {}, nil
+	default:
+		return nil, func() {}, errors.New("unsupported auth mode")
+	}
+}
+
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
@@ -110,16 +143,6 @@ func newLogger(cfg config.Config) *slog.Logger {
 		return slog.New(slog.NewTextHandler(os.Stdout, options))
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, options))
-}
-
-// newAuthenticator selects between strict tenant-key auth and legacy
-// single-key auth based on configuration. Mutual exclusion has already been
-// validated by config.Load.
-func newAuthenticator(cfg config.Config) *auth.Authenticator {
-	if len(cfg.TenantKeys) > 0 {
-		return auth.NewWithTenantKeys(cfg.TenantKeys)
-	}
-	return auth.New(cfg.AuthKey)
 }
 
 type checker interface {

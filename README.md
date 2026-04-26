@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
   <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
 </div>
 
@@ -41,10 +41,10 @@ docker compose --profile bundle up -d --build
 - `redis`：zfair 调度状态 + Lease/Catalog 缓存
 - `proxyharbor`：控制面 + 网关一体进程
 
-默认开发 API Key：
+默认开发 API Key（legacy 模式）：
 
 ```env
-PROXYHARBOR_TENANT_KEYS=default:changeme1234567890abcdef
+PROXYHARBOR_AUTH_KEY=change-me
 ```
 
 **对外暴露前务必修改为强密钥**：
@@ -54,10 +54,26 @@ cp .env.example .env
 ```
 
 ```env
-PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001
+PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
 PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
 PROXYHARBOR_REDIS_ADDR=redis:6379
 ```
+
+## Authentication Modes
+
+ProxyHarbor v0.1.5 支持三种鉴权模式：
+
+| 模式 | 适用场景 | 配置 | 特点 |
+| --- | --- | --- | --- |
+| `legacy` | 单租户开发 | `PROXYHARBOR_AUTH_KEY` | 简单单 Key，零行为变化 |
+| `tenant-keys` | 多租户静态配置 | `PROXYHARBOR_TENANT_KEYS` | env 配置，不可在线变更 |
+| `dynamic-keys` | 生产多租户 | `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` | DB 驱动，可在线签发/撤销 |
+
+- **legacy**：v0.1.3 行为，单 `PROXYHARBOR_AUTH_KEY` 控制所有控制面访问。
+- **tenant-keys**：v0.1.4 行为，`PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` 静态映射租户与 Key。
+- **dynamic-keys**：v0.1.5 推荐生产模式，Admin Key 通过 env 注入，Tenant Key 由 `/admin/tenants/{id}/keys` 签发并持久化到 DB，支持 ≤5 秒撤销生效。
+
+升级路径：保留原有 `PROXYHARBOR_AUTH_KEY` 或 `PROXYHARBOR_TENANT_KEYS` 即可零行为变化；设置 `PROXYHARBOR_AUTH_MODE=dynamic-keys` 并提供 `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` 即启用 dynamic-keys 模式。
 
 ### 2. 检查服务就绪状态
 
@@ -72,7 +88,7 @@ curl http://localhost:8080/readyz
 ### 3. 注册 Provider
 
 ```bash
-curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
+curl -H 'ProxyHarbor-Key: change-me' \
   -H 'Content-Type: application/json' \
   -d '{"id":"static-main","type":"static","name":"我的代理池","enabled":true}' \
   http://localhost:8080/v1/providers
@@ -81,7 +97,7 @@ curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
 ### 4. 添加代理节点
 
 ```bash
-curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
+curl -H 'ProxyHarbor-Key: change-me' \
   -H 'Content-Type: application/json' \
   -d '{"id":"proxy-1","provider_id":"static-main","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
   http://localhost:8080/v1/proxies
@@ -98,7 +114,7 @@ for item in \
   'proxy-3 http://proxy3.example.com:8080 50'
 do
   set -- $item
-  curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
+  curl -H 'ProxyHarbor-Key: change-me' \
     -H 'Content-Type: application/json' \
     -d "{\"id\":\"$1\",\"provider_id\":\"static-main\",\"endpoint\":\"$2\",\"healthy\":true,\"weight\":$3}" \
     http://localhost:8080/v1/proxies
@@ -115,7 +131,7 @@ $proxies = @(
 )
 foreach ($proxy in $proxies) {
   $body = @{ id=$proxy.id; provider_id='static-main'; endpoint=$proxy.endpoint; healthy=$true; weight=$proxy.weight } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='changeme1234567890abcdef'} -ContentType 'application/json' -Body $body
+  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='change-me'} -ContentType 'application/json' -Body $body
 }
 ```
 
@@ -124,7 +140,7 @@ foreach ($proxy in $proxies) {
 租约颁发至少需要一条启用的策略：
 
 ```bash
-curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
+curl -H 'ProxyHarbor-Key: change-me' \
   -H 'Content-Type: application/json' \
   -d '{"id":"default","name":"默认策略","enabled":true,"ttl_seconds":1800}' \
   http://localhost:8080/v1/policies
@@ -133,7 +149,7 @@ curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
 ### 6. 创建租约
 
 ```bash
-curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
+curl -H 'ProxyHarbor-Key: change-me' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-lease-1' \
   -d '{"subject":{"subject_type":"user","subject_id":"local-dev"},"resource_ref":{"kind":"url","id":"https://example.com"},"ttl_seconds":600}' \
@@ -161,21 +177,13 @@ docker compose --profile app up -d --build
 ### 直接运行二进制
 
 ```bash
-PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001 \
+PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret \
 PROXYHARBOR_STORAGE=mysql \
 PROXYHARBOR_MYSQL_DSN='proxyharbor:proxyharbor@tcp(127.0.0.1:3306)/proxyharbor?parseTime=true&loc=UTC' \
 PROXYHARBOR_REDIS_ADDR='127.0.0.1:6379' \
 PROXYHARBOR_SELECTOR=zfair \
 go run ./cmd/proxyharbor
 ```
-
-## 租户身份模型
-
-ProxyHarbor v0.1.4 推荐使用 `PROXYHARBOR_TENANT_KEYS`。每个条目形如 `tenant_id:key`，服务端在收到 `ProxyHarbor-Key` 后反查出可信的 `principal.TenantID`。
-
-- 控制面调用只需要传 `ProxyHarbor-Key`，不需要再传 `ProxyHarbor-Tenant` 或 `tenant_id`。
-- 如果旧客户端仍传 `ProxyHarbor-Tenant` 或 query `tenant_id`，它必须与 key 绑定的租户一致，否则返回 `403 tenant_mismatch`。
-- `PROXYHARBOR_AUTH_KEY` 仅保留给 legacy 单 Key 部署；不要与 `PROXYHARBOR_TENANT_KEYS` 同时设置。
 
 ## 数据模型
 
@@ -237,15 +245,18 @@ ProxyHarbor v0.1.4 推荐使用 `PROXYHARBOR_TENANT_KEYS`。每个条目形如 `
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `PROXYHARBOR_TENANT_KEYS` | 推荐模式：`tenant:key,tenant:key`；key 同时承载控制面鉴权与租户身份 | **推荐必填** |
-| `PROXYHARBOR_TENANT_KEY_MIN_LEN` | Tenant key 最小长度 | `16` |
-| `PROXYHARBOR_AUTH_KEY` | Legacy 单 Key 模式；仅在未设置 `PROXYHARBOR_TENANT_KEYS` 时可用 | 兼容旧部署 |
+| `PROXYHARBOR_AUTH_MODE` | 鉴权模式：`legacy-single-key`（`legacy` alias）/ `tenant-keys` / `dynamic-keys`；未设置时根据已配置 Key 推断 | 推断 |
+| `PROXYHARBOR_AUTH_KEY` | legacy 模式专用密钥 | 空 |
+| `PROXYHARBOR_TENANT_KEYS` | tenant-keys 模式静态映射 `tnt:key,tnt2:key2` | 空 |
+| `PROXYHARBOR_ADMIN_KEY` | dynamic-keys 模式 Bootstrap Admin Key（≥32 字符） | 空 |
+| `PROXYHARBOR_KEY_PEPPER` | dynamic-keys 模式 Pepper（≥32 字节随机） | 空 |
+| `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | 缓存增量轮询间隔 | `5s` |
 | `PROXYHARBOR_ROLE` | 进程角色：`all` / `controller` / `gateway` | `all` |
 | `PROXYHARBOR_STORAGE` | 存储驱动：`mysql` / `memory` | `mysql` |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL 连接串 | 空 |
 | `PROXYHARBOR_REDIS_ADDR` | Redis 地址 | 空 |
 | `PROXYHARBOR_SELECTOR` | 调度器名称 | `zfair` |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | zfair 无 Redis 时拒绝启动 | `true` |
+| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | zfair 无 Redis 时拒绝启动；Helm 默认关闭以便轻量安装 | `true`（Helm: `false`） |
 | `PROXYHARBOR_SCORING_PROFILE` | 健康评分档位：`default` / `aggressive` / `lenient` | `default` |
 | `PROXYHARBOR_ZFAIR_QUANTUM` | 虚拟运行时基础增量 | `1000` |
 | `PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS` | 无 EWMA 数据时的默认延迟（ms） | `200` |
@@ -275,3 +286,11 @@ ProxyHarbor v0.1.4 推荐使用 `PROXYHARBOR_TENANT_KEYS`。每个条目形如 `
 ## 许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
+
+
+## Platform Contract (v0.1.5 Milestone C)
+
+ProxyHarbor v0.1.5 defines a platform-container contract for dynamic tenant keys. The platform-api flow is: create an instance, call ProxyHarbor Admin API to create a tenant key with `purpose=platform_container`, write the returned one-time key into a Kubernetes Secret, then inject it into the workload as `PROXYHARBOR_KEY`. Container SDKs should read keys in this order: env `PROXYHARBOR_KEY`, mounted file `/var/run/proxyharbor/key`, then a future IMDS-like sidecar. See `docs/versions/v0.1.5.md` for the full contract and rollback notes.
+
+
+

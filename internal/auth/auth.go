@@ -1,10 +1,11 @@
 package auth
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
@@ -14,103 +15,105 @@ const (
 	TenantHeaderName = "ProxyHarbor-Tenant"
 	TenantQueryName  = "tenant_id"
 	DefaultTenantID  = "default"
+	OnBehalfOfHeader = "X-On-Behalf-Of"
 )
 
-// AuthMode reports the authentication strategy in effect.
 type AuthMode string
 
 const (
-	// ModeLegacy: a single shared key proves possession; tenant id is taken
-	// from the ProxyHarbor-Tenant header / tenant_id query (client-asserted).
-	// Preserved for backward compatibility with v0.1.3 deployments.
-	ModeLegacy AuthMode = "legacy-single-key"
-
-	// ModeTenantKeys: the presented key is reverse-looked up to its tenant.
-	// Client-asserted tenant headers may not override the bound tenant.
-	ModeTenantKeys AuthMode = "tenant-keys"
+	ModeLegacy      AuthMode = "legacy-single-key"
+	ModeTenantKeys  AuthMode = "tenant-keys"
+	ModeDynamicKeys AuthMode = "dynamic-keys"
 )
 
-// Authenticator validates incoming control-plane requests and returns a
-// trusted Principal whose TenantID is server-decided when ModeTenantKeys is
-// active.
+type TenantKey struct {
+	ID        string
+	TenantID  string
+	KeyHash   string
+	KeyFP     string
+	Label     string
+	Purpose   string
+	CreatedBy string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+}
+
 type Authenticator struct {
-	mode        AuthMode
-	legacyKey   string
-	keyToTenant map[string]string
-	tenants     map[string]struct{}
+	mode     AuthMode
+	legacy   string
+	static   map[string]string
+	dynamic  *DynamicStore
+	adminKey string
 }
 
-// New constructs a legacy single-key authenticator. Use NewWithTenantKeys for
-// strict tenant-bound auth.
-func New(legacyKey string) *Authenticator {
-	return &Authenticator{mode: ModeLegacy, legacyKey: legacyKey}
+func New(key string) *Authenticator {
+	return NewLegacy(key)
 }
 
-// NewWithTenantKeys constructs an authenticator that maps each presented key
-// to its bound tenant. The provided map MUST already be validated (no empty
-// keys/values, no duplicates) by the caller (config layer).
-func NewWithTenantKeys(tenantKeys map[string]string) *Authenticator {
-	cloned := make(map[string]string, len(tenantKeys))
-	tenants := make(map[string]struct{}, len(tenantKeys))
-	for k, t := range tenantKeys {
-		cloned[k] = t
-		tenants[t] = struct{}{}
-	}
-	return &Authenticator{mode: ModeTenantKeys, keyToTenant: cloned, tenants: tenants}
+func NewLegacy(key string) *Authenticator {
+	return &Authenticator{mode: ModeLegacy, legacy: key}
 }
 
-// Mode returns the active authentication mode.
-func (a *Authenticator) Mode() AuthMode {
-	if a == nil {
-		return ModeLegacy
-	}
-	return a.mode
+func NewTenantKeys(keys map[string]string) *Authenticator {
+	return &Authenticator{mode: ModeTenantKeys, static: keys}
 }
 
-// Tenants returns the set of tenants known to the authenticator (only
-// meaningful in tenant-keys mode).
-func (a *Authenticator) Tenants() []string {
+func NewDynamicKeys(dynamic *DynamicStore) *Authenticator {
+	return &Authenticator{mode: ModeDynamicKeys, dynamic: dynamic}
+}
+
+func (a *Authenticator) WithAdminKey(adminKey string) *Authenticator {
 	if a == nil {
 		return nil
 	}
-	out := make([]string, 0, len(a.tenants))
-	for t := range a.tenants {
-		out = append(out, t)
+	a.adminKey = adminKey
+	return a
+}
+
+func (a *Authenticator) CacheEntries() int {
+	if a == nil || a.dynamic == nil {
+		return 0
 	}
-	return out
+	return a.dynamic.Len()
 }
 
 func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) {
-	if a == nil {
+	if a == nil || r == nil {
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
 	presented := r.Header.Get(HeaderName)
 	if presented == "" {
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
+	if a.adminKey != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(a.adminKey)) == 1 {
+		return domain.Principal{ID: "admin:" + Fingerprint(presented), Type: "admin"}, nil
+	}
 
 	switch a.mode {
-	case ModeTenantKeys:
-		tenantID, ok := a.keyToTenant[presented]
+	case ModeDynamicKeys:
+		if a.dynamic == nil {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		key, ok := a.dynamic.Lookup(presented)
 		if !ok {
 			return domain.Principal{}, domain.ErrAuthFailed
 		}
-		// If the client also asserts a tenant, it must match the bound one.
-		// Mismatch is an authorization error (403), not authentication (401).
-		if claimed := strings.TrimSpace(r.Header.Get(TenantHeaderName)); claimed != "" && claimed != tenantID {
+		if claimed := claimedTenant(r); claimed != "" && claimed != key.tenantID {
 			return domain.Principal{}, domain.ErrTenantMismatch
 		}
-		if claimed := strings.TrimSpace(r.URL.Query().Get(TenantQueryName)); claimed != "" && claimed != tenantID {
+		return domain.Principal{ID: "tenant-key:" + key.keyID, Type: "tenant_key", TenantID: key.tenantID}, nil
+	case ModeTenantKeys:
+		tenantID, ok := a.static[presented]
+		if !ok {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		if claimed := claimedTenant(r); claimed != "" && claimed != tenantID {
 			return domain.Principal{}, domain.ErrTenantMismatch
 		}
-		return domain.Principal{
-			ID:       "tenant-key:" + Fingerprint(presented),
-			Type:     "tenant_key",
-			TenantID: tenantID,
-		}, nil
-
-	default: // ModeLegacy
-		if a.legacyKey == "" || presented != a.legacyKey {
+		return domain.Principal{ID: "tenant-key:" + Fingerprint(presented), Type: "tenant_key", TenantID: tenantID}, nil
+	case ModeLegacy:
+		if a.legacy == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(a.legacy)) != 1 {
 			return domain.Principal{}, domain.ErrAuthFailed
 		}
 		tenantID, ok := ResolveTenantID(r)
@@ -118,18 +121,19 @@ func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) 
 			return domain.Principal{}, domain.ErrAuthFailed
 		}
 		return domain.Principal{ID: "configured-key", Type: "header_key", TenantID: tenantID}, nil
+	default:
+		return domain.Principal{}, domain.ErrAuthFailed
 	}
 }
 
-// Fingerprint returns the first 8 hex chars of sha256(key). It is suitable
-// for log correlation only; do NOT use it for authentication or reverse
-// lookup.
-func Fingerprint(key string) string {
-	if key == "" {
+func claimedTenant(r *http.Request) string {
+	if r == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:8]
+	if tenantID := strings.TrimSpace(r.Header.Get(OnBehalfOfHeader)); tenantID != "" {
+		return tenantID
+	}
+	return strings.TrimSpace(r.Header.Get(TenantHeaderName))
 }
 
 func TenantIDFromRequest(r *http.Request) string {
@@ -137,9 +141,6 @@ func TenantIDFromRequest(r *http.Request) string {
 	return tenantID
 }
 
-// ResolveTenantID extracts a client-asserted tenant id. In tenant-keys mode
-// the result is informational only; the authoritative tenant comes from the
-// authenticated principal.
 func ResolveTenantID(r *http.Request) (string, bool) {
 	if r == nil {
 		return DefaultTenantID, true
@@ -171,4 +172,68 @@ func ValidTenantID(tenantID string) bool {
 		return false
 	}
 	return true
+}
+
+func ParseTenantKeys(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, mapping := range parseTenantKeyMappings(raw) {
+		out[mapping.key] = mapping.tenantID
+	}
+	return out
+}
+
+type tenantKeyMapping struct {
+	tenantID string
+	key      string
+}
+
+func parseTenantKeyMappings(raw string) []tenantKeyMapping {
+	var out []tenantKeyMapping
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		tenantID := strings.TrimSpace(kv[0])
+		key := strings.TrimSpace(kv[1])
+		if tenantID == "" || key == "" {
+			continue
+		}
+		out = append(out, tenantKeyMapping{tenantID: tenantID, key: key})
+	}
+	return out
+}
+
+func ValidateTenantKeys(raw string) error {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			return fmt.Errorf("invalid tenant key mapping %q: expected tenant_id:key", part)
+		}
+		tenantID := strings.TrimSpace(kv[0])
+		key := strings.TrimSpace(kv[1])
+		if tenantID == "" || key == "" {
+			return fmt.Errorf("invalid tenant key mapping %q: tenant_id and key are required", part)
+		}
+		if !ValidTenantID(tenantID) {
+			return fmt.Errorf("invalid tenant key mapping %q: invalid tenant_id", part)
+		}
+	}
+	if len(parseTenantKeyMappings(raw)) == 0 {
+		return fmt.Errorf("invalid tenant key mappings: at least one tenant_id:key mapping is required")
+	}
+	return nil
+}
+
+func Fingerprint(key string) string {
+	h := sha256Pepper(nil, key)
+	return fmt.Sprintf("%x", h[:4])
 }

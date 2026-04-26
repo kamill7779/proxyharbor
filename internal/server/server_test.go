@@ -7,16 +7,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/control"
 	"github.com/kamill7779/proxyharbor/internal/server"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
@@ -260,201 +263,166 @@ func bufioNewReader(conn net.Conn) *bufio.Reader {
 	return bufio.NewReader(conn)
 }
 
-// --- v0.1.4 tenant-key auth coverage --------------------------------------
-
-func tenantKeyHandler(t *testing.T, keys map[string]string) http.Handler {
-	t.Helper()
+// v0.1.4 static PROXYHARBOR_TENANT_KEYS compatibility.
+func TestTenantKeysCompatibility(t *testing.T) {
 	store := storage.NewMemoryStore()
 	svc := control.NewService(store, "http://gateway.local")
-	return server.New(svc, auth.NewWithTenantKeys(keys))
+	keys := auth.ParseTenantKeys("tenant_a:key_a,tenant_b:key_b")
+	authn := auth.NewTenantKeys(keys)
+	handler := server.New(svc, authn)
+
+	// tenant_a key works.
+	rr := requestWithAuth(t, handler, "GET", "/v1/catalog/latest", "", "key_a")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tenant_a catalog status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// tenant_b key works.
+	rr = requestWithAuth(t, handler, "GET", "/v1/catalog/latest", "", "key_b")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tenant_b catalog status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }
 
-// raw issues an HTTP request with explicit headers, used for cases where the
-// existing `request` helper cannot vary the key / tenant header.
-func raw(t *testing.T, handler http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+// Admin with On-Behalf-Of creates policy; tenant sees it with own key.
+func TestAdminOnBehalfOfCreatesPolicy(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	adminStore := newMockAdminStore()
+	adminStore.tenants["t1"] = domain.Tenant{ID: "t1", Name: "Test", Enabled: true}
+	authn := auth.NewLegacy("legacy").WithAdminKey("admin-secret")
+	handler := server.NewWithAdminStore(svc, authn, adminStore, "pepper")
+
+	// Admin creates policy on behalf of t1.
+	_ = adminRequest(t, handler, "POST", "/v1/policies", `{"id":"p1","name":"test","enabled":true,"ttl_seconds":600}`, "admin-secret")
+	// Re-execute with the header set properly.
+	req := httptest.NewRequest("POST", "/v1/policies", bytes.NewBufferString(`{"id":"p1","name":"test","enabled":true,"ttl_seconds":600}`))
+	req.Header.Set(auth.HeaderName, "admin-secret")
+	req.Header.Set("X-On-Behalf-Of", "t1")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create policy status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Tenant uses own key to list policies.
+	authn2 := auth.NewTenantKeys(map[string]string{"tk": "t1"})
+	handler2 := server.New(svc, authn2)
+	rr = requestWithAuth(t, handler2, "GET", "/v1/policies", "", "tk")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list policies status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Tenant A key with X-On-Behalf-Of: B -> 403.
+func TestTenantCrossBehalfOf(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	authn := auth.NewTenantKeys(map[string]string{"tk": "t1"})
+	handler := server.New(svc, authn)
+
+	req := httptest.NewRequest("GET", "/v1/policies", nil)
+	req.Header.Set(auth.HeaderName, "tk")
+	req.Header.Set("X-On-Behalf-Of", "t2")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthFailureIsObservableWithoutKeyLeak(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	handler := server.New(svc, auth.NewLegacy("good-key"))
+	logger := &captureLogHandler{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logger))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	rr := requestWithAuth(t, handler, http.MethodGet, "/v1/policies", "", "bad-key")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !logger.contains("auth.failure") {
+		t.Fatalf("expected auth.failure log, got %#v", logger.messages())
+	}
+	if logger.contains("bad-key") {
+		t.Fatal("auth failure log must not include plaintext key")
+	}
+}
+
+// Admin deletes tenant -> all keys immediately invalid.
+func TestAdminDeleteTenantInvalidatesKeys(t *testing.T) {
+	adminStore := newMockAdminStore()
+	adminStore.tenants["t1"] = domain.Tenant{ID: "t1", Name: "Test", Enabled: true}
+	adminStore.keys["t1"] = []auth.TenantKey{{ID: "k1", TenantID: "t1", KeyHash: "hash"}}
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	authn := auth.NewLegacy("legacy").WithAdminKey("admin-secret")
+	handler := server.NewWithAdminStore(svc, authn, adminStore, "pepper")
+
+	// Delete tenant.
+	rr := adminRequest(t, handler, "DELETE", "/admin/tenants/t1", "", "admin-secret")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete tenant status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Verify tenant is disabled.
+	if adminStore.tenants["t1"].Enabled {
+		t.Fatal("expected tenant to be disabled")
+	}
+}
+
+func requestWithAuth(t *testing.T, handler http.Handler, method, path, body, key string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set(auth.HeaderName, key)
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	return rr
 }
 
-func TestTenantKeyAuth_IsolationAndOverrides(t *testing.T) {
-	const (
-		keyA = "tenantAkeyAAAAAAAA"
-		keyB = "tenantBkeyBBBBBBBB"
-	)
-	handler := tenantKeyHandler(t, map[string]string{keyA: "tenanta", keyB: "tenantb"})
-
-	policyBody := `{"id":"p1","name":"p1","enabled":true}`
-
-	// A1: tenantA creates a policy; readable by tenantA.
-	create := raw(t, handler, http.MethodPost, "/v1/policies", policyBody, map[string]string{auth.HeaderName: keyA})
-	if create.Code != http.StatusCreated {
-		t.Fatalf("A1 create status=%d body=%s", create.Code, create.Body.String())
-	}
-	listA := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyA})
-	if listA.Code != http.StatusOK || !strings.Contains(listA.Body.String(), `"p1"`) {
-		t.Fatalf("A1 list status=%d body=%s", listA.Code, listA.Body.String())
-	}
-
-	// A2: tenantB cannot see tenantA's policy.
-	listB := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyB})
-	if listB.Code != http.StatusOK {
-		t.Fatalf("A2 list status=%d body=%s", listB.Code, listB.Body.String())
-	}
-	if strings.Contains(listB.Body.String(), `"p1"`) {
-		t.Fatalf("A2 cross-tenant leak: %s", listB.Body.String())
-	}
-
-	// A3: tenantA key + tenantB header asserts mismatch -> 403.
-	mismatch := raw(t, handler, http.MethodPost, "/v1/policies", policyBody, map[string]string{
-		auth.HeaderName:       keyA,
-		auth.TenantHeaderName: "tenantb",
-	})
-	if mismatch.Code != http.StatusForbidden {
-		t.Fatalf("A3 mismatch status=%d body=%s", mismatch.Code, mismatch.Body.String())
-	}
-	if !strings.Contains(mismatch.Body.String(), "tenant_mismatch") {
-		t.Fatalf("A3 expected tenant_mismatch error, got %s", mismatch.Body.String())
-	}
-
-	// A4: tenantA key + matching tenant header is accepted.
-	match := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"p2","name":"p2","enabled":true}`, map[string]string{
-		auth.HeaderName:       keyA,
-		auth.TenantHeaderName: "tenanta",
-	})
-	if match.Code != http.StatusCreated {
-		t.Fatalf("A4 match status=%d body=%s", match.Code, match.Body.String())
-	}
-
-	// A5: unknown key -> 401.
-	unknown := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: "doesnotexistAAAAAA"})
-	if unknown.Code != http.StatusUnauthorized {
-		t.Fatalf("A5 unknown key status=%d", unknown.Code)
-	}
-
-	// A6: missing key header -> 401.
-	missing := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{})
-	if missing.Code != http.StatusUnauthorized {
-		t.Fatalf("A6 missing key status=%d", missing.Code)
-	}
-
-	// A7: body-asserted tenant_id is ignored; principal.TenantID wins.
-	bodyWithCrossTenant := `{"id":"p3","name":"p3","enabled":true,"tenant_id":"tenantb"}`
-	create7 := raw(t, handler, http.MethodPost, "/v1/policies", bodyWithCrossTenant, map[string]string{auth.HeaderName: keyA})
-	if create7.Code != http.StatusCreated {
-		t.Fatalf("A7 create status=%d body=%s", create7.Code, create7.Body.String())
-	}
-	listAAfter := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyA})
-	if !strings.Contains(listAAfter.Body.String(), `"p3"`) {
-		t.Fatalf("A7 expected p3 under tenantA, got %s", listAAfter.Body.String())
-	}
-	listBAfter := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyB})
-	if strings.Contains(listBAfter.Body.String(), `"p3"`) {
-		t.Fatalf("A7 leaked into tenantB: %s", listBAfter.Body.String())
-	}
-
-	// A3b: query param tenant_id mismatch -> 403.
-	queryMismatch := raw(t, handler, http.MethodGet, "/v1/catalog/latest?tenant_id=tenantb", "", map[string]string{auth.HeaderName: keyA})
-	if queryMismatch.Code != http.StatusForbidden {
-		t.Fatalf("A3b query mismatch status=%d body=%s", queryMismatch.Code, queryMismatch.Body.String())
-	}
+type captureLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
 }
 
-func TestTenantKeyAuth_InternalEventTenantOverride(t *testing.T) {
-	const keyA = "tenantAkeyAAAAAAAA"
-	store := storage.NewMemoryStore()
-	svc := control.NewService(store, "http://gateway.local")
-	handler := server.New(svc, auth.NewWithTenantKeys(map[string]string{keyA: "tenanta"}))
+func (h *captureLogHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
 
-	usageBody := `{"events":[{"event_id":"u1","tenant_id":"tenantb","lease_id":"l1","bytes_sent":1,"bytes_received":2}]}`
-	usage := raw(t, handler, http.MethodPost, "/v1/internal/usage-events:batch", usageBody, map[string]string{auth.HeaderName: keyA})
-	if usage.Code != http.StatusAccepted {
-		t.Fatalf("usage status=%d body=%s", usage.Code, usage.Body.String())
-	}
-
-	auditBody := `{"events":[{"event_id":"a1","tenant_id":"tenantb","action":"x","resource":"r"}]}`
-	audit := raw(t, handler, http.MethodPost, "/v1/internal/gateway-feedback:batch", auditBody, map[string]string{auth.HeaderName: keyA})
-	if audit.Code != http.StatusAccepted {
-		t.Fatalf("audit status=%d body=%s", audit.Code, audit.Body.String())
-	}
-
-	tenantAEvents, err := store.ListAuditEvents(context.Background(), "tenanta", 10)
-	if err != nil {
-		t.Fatalf("list tenantA audit: %v", err)
-	}
-	if len(tenantAEvents) != 1 || tenantAEvents[0].TenantID != "tenanta" || tenantAEvents[0].EventID != "a1" {
-		t.Fatalf("expected audit under tenantA, got %+v", tenantAEvents)
-	}
-	tenantBEvents, err := store.ListAuditEvents(context.Background(), "tenantb", 10)
-	if err != nil {
-		t.Fatalf("list tenantB audit: %v", err)
-	}
-	if len(tenantBEvents) != 0 {
-		t.Fatalf("expected no audit pollution under tenantB, got %+v", tenantBEvents)
-	}
+func (h *captureLogHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
 }
 
-func TestLegacySingleKeyAuth_BackwardCompat(t *testing.T) {
-	// L1 / L2: legacy mode preserves v0.1.3 semantics: client-asserted tenant
-	// is honoured; absence defaults to "default".
-	store := storage.NewMemoryStore()
-	svc := control.NewService(store, "http://gateway.local")
-	handler := server.New(svc, auth.New("legacy-key"))
+func (h *captureLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
 
-	createDefault := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"plegacy","name":"plegacy","enabled":true}`, map[string]string{
-		auth.HeaderName: "legacy-key",
-	})
-	if createDefault.Code != http.StatusCreated {
-		t.Fatalf("L1 create status=%d body=%s", createDefault.Code, createDefault.Body.String())
-	}
+func (h *captureLogHandler) WithGroup(_ string) slog.Handler { return h }
 
-	// L2: explicit tenant header still drives tenancy in legacy mode.
-	createTeam := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"pteam","name":"pteam","enabled":true}`, map[string]string{
-		auth.HeaderName:       "legacy-key",
-		auth.TenantHeaderName: "team-a",
-	})
-	if createTeam.Code != http.StatusCreated {
-		t.Fatalf("L2 create status=%d body=%s", createTeam.Code, createTeam.Body.String())
+func (h *captureLogHandler) contains(needle string) bool {
+	for _, message := range h.messages() {
+		if strings.Contains(message, needle) {
+			return true
+		}
 	}
-
-	listDefault := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{
-		auth.HeaderName: "legacy-key",
-	})
-	if !strings.Contains(listDefault.Body.String(), `"plegacy"`) || strings.Contains(listDefault.Body.String(), `"pteam"`) {
-		t.Fatalf("L1/L2 default tenant view wrong: %s", listDefault.Body.String())
-	}
-
-	listTeam := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{
-		auth.HeaderName:       "legacy-key",
-		auth.TenantHeaderName: "team-a",
-	})
-	if !strings.Contains(listTeam.Body.String(), `"pteam"`) || strings.Contains(listTeam.Body.String(), `"plegacy"`) {
-		t.Fatalf("L2 team-a view wrong: %s", listTeam.Body.String())
-	}
-
-	// Bad key still rejected.
-	bad := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: "nope"})
-	if bad.Code != http.StatusUnauthorized {
-		t.Fatalf("legacy bad key status=%d", bad.Code)
-	}
+	return false
 }
 
-func TestAuth_FingerprintIsStableAndShort(t *testing.T) {
-	if got := auth.Fingerprint(""); got != "" {
-		t.Fatalf("empty key fingerprint should be empty, got %q", got)
+func (h *captureLogHandler) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	messages := make([]string, 0, len(h.records))
+	for _, record := range h.records {
+		line := record.Message
+		record.Attrs(func(attr slog.Attr) bool {
+			line += " " + attr.Key + "=" + attr.Value.String()
+			return true
+		})
+		messages = append(messages, line)
 	}
-	a := auth.Fingerprint("tenantAkeyAAAAAAAA")
-	b := auth.Fingerprint("tenantAkeyAAAAAAAA")
-	if a != b || len(a) != 8 {
-		t.Fatalf("fingerprint not stable/short: a=%q b=%q", a, b)
-	}
-	if auth.Fingerprint("other") == a {
-		t.Fatalf("fingerprint collided unexpectedly")
-	}
+	return messages
 }

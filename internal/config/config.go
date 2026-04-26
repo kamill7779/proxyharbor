@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/auth"
 )
 
 type StorageDriver string
@@ -30,8 +32,11 @@ type Config struct {
 	Addr                       string
 	GatewayURL                 string
 	AuthKey                    string
-	TenantKeys                 map[string]string // key -> tenantID; non-empty enables strict tenant-key auth mode
-	TenantKeyMinLen            int
+	AuthMode                   auth.AuthMode
+	AdminKey                   string
+	KeyPepper                  string
+	AuthRefreshInterval        time.Duration
+	TenantKeys                 string
 	LogFormat                  string
 	LogLevel                   string
 	StorageDriver              StorageDriver
@@ -61,12 +66,17 @@ type Config struct {
 }
 
 func Load(args []string) (Config, error) {
+	authModeStr := envStr("PROXYHARBOR_AUTH_MODE", "")
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
 		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
-		TenantKeyMinLen:            envInt("PROXYHARBOR_TENANT_KEY_MIN_LEN", 16),
+		AuthMode:                   auth.AuthMode(authModeStr),
+		AdminKey:                   os.Getenv("PROXYHARBOR_ADMIN_KEY"),
+		KeyPepper:                  os.Getenv("PROXYHARBOR_KEY_PEPPER"),
+		AuthRefreshInterval:        envDur("PROXYHARBOR_AUTH_REFRESH_INTERVAL", 5*time.Second),
+		TenantKeys:                 os.Getenv("PROXYHARBOR_TENANT_KEYS"),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
 		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
@@ -100,6 +110,11 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
 	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
+	authModeFlag := fs.String("auth-mode", authModeStr, "auth mode: legacy-single-key | tenant-keys | dynamic-keys")
+	fs.StringVar(&cfg.AdminKey, "admin-key", cfg.AdminKey, "bootstrap admin key")
+	fs.StringVar(&cfg.KeyPepper, "key-pepper", cfg.KeyPepper, "key hashing pepper for dynamic mode")
+	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
+	fs.StringVar(&cfg.TenantKeys, "tenant-keys", cfg.TenantKeys, "static tenant keys: tenant_id:key,tenant_id:key")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
@@ -122,82 +137,14 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
-	tenantKeys, err := parseTenantKeys(os.Getenv("PROXYHARBOR_TENANT_KEYS"), cfg.TenantKeyMinLen)
-	if err != nil {
-		return Config{}, err
+	if *authModeFlag != "" {
+		cfg.AuthMode = normalizeAuthMode(auth.AuthMode(*authModeFlag))
 	}
-	cfg.TenantKeys = tenantKeys
+	cfg.AuthMode = resolveAuthMode(cfg)
 	return cfg, cfg.validate()
 }
 
-// parseTenantKeys parses entries of the form `tenantID:key,tenantID:key`.
-// The first ':' separates tenant from key; key may itself contain ':'.
-// Returns a non-nil map only when at least one entry was provided.
-func parseTenantKeys(raw string, minKeyLen int) (map[string]string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, nil
-	}
-	if minKeyLen <= 0 {
-		minKeyLen = 16
-	}
-	keyToTenant := make(map[string]string)
-	seenTenant := make(map[string]struct{})
-	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		idx := strings.Index(item, ":")
-		if idx <= 0 || idx == len(item)-1 {
-			return nil, fmt.Errorf("invalid PROXYHARBOR_TENANT_KEYS entry %q: expected tenant:key", item)
-		}
-		tenant := strings.TrimSpace(item[:idx])
-		key := strings.TrimSpace(item[idx+1:])
-		if !validTenantID(tenant) {
-			return nil, fmt.Errorf("invalid tenant id %q in PROXYHARBOR_TENANT_KEYS", tenant)
-		}
-		if len(key) < minKeyLen {
-			return nil, fmt.Errorf("tenant key for %q is shorter than minimum length %d", tenant, minKeyLen)
-		}
-		if _, dup := seenTenant[tenant]; dup {
-			return nil, fmt.Errorf("duplicate tenant %q in PROXYHARBOR_TENANT_KEYS", tenant)
-		}
-		if existing, dup := keyToTenant[key]; dup {
-			return nil, fmt.Errorf("duplicate tenant key shared by %q and %q", existing, tenant)
-		}
-		keyToTenant[key] = tenant
-		seenTenant[tenant] = struct{}{}
-	}
-	if len(keyToTenant) == 0 {
-		return nil, nil
-	}
-	return keyToTenant, nil
-}
-
-// validTenantID mirrors auth.ValidTenantID without creating an import cycle.
-func validTenantID(tenantID string) bool {
-	if len(tenantID) == 0 || len(tenantID) > 64 {
-		return false
-	}
-	for _, r := range tenantID {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func (c Config) validate() error {
-	hasLegacy := strings.TrimSpace(c.AuthKey) != ""
-	hasTenantKeys := len(c.TenantKeys) > 0
-	switch {
-	case hasLegacy && hasTenantKeys:
-		return errors.New("ambiguous auth config: set either PROXYHARBOR_AUTH_KEY (legacy) or PROXYHARBOR_TENANT_KEYS, not both")
-	case !hasLegacy && !hasTenantKeys:
-		return errors.New("auth key is required: set PROXYHARBOR_TENANT_KEYS (recommended) or PROXYHARBOR_AUTH_KEY (legacy)")
-	}
 	switch c.Role {
 	case "all", "controller", "gateway":
 	default:
@@ -237,7 +184,68 @@ func (c Config) validate() error {
 	if c.StickyPolicy == "" {
 		return errors.New("sticky policy must not be empty")
 	}
+
+	mode := resolveAuthMode(c)
+	switch mode {
+	case auth.ModeDynamicKeys:
+		if c.StorageDriver != DriverMySQL {
+			return errors.New("auth mode dynamic-keys requires storage=mysql")
+		}
+		if c.AdminKey == "" {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_ADMIN_KEY")
+		}
+		if len(c.AdminKey) < 32 {
+			return errors.New("PROXYHARBOR_ADMIN_KEY must be at least 32 bytes")
+		}
+		if c.KeyPepper == "" {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_KEY_PEPPER")
+		}
+		if len(c.KeyPepper) < 32 {
+			return errors.New("PROXYHARBOR_KEY_PEPPER must be at least 32 bytes")
+		}
+		if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_AUTH_REFRESH_INTERVAL <= 5s and > 0")
+		}
+	case auth.ModeTenantKeys:
+		if c.TenantKeys == "" {
+			return errors.New("auth mode tenant-keys requires PROXYHARBOR_TENANT_KEYS")
+		}
+		if err := auth.ValidateTenantKeys(c.TenantKeys); err != nil {
+			return fmt.Errorf("invalid PROXYHARBOR_TENANT_KEYS: %w", err)
+		}
+	case auth.ModeLegacy:
+		if c.AuthKey == "" {
+			return errors.New("auth mode legacy-single-key requires -auth-key or PROXYHARBOR_AUTH_KEY")
+		}
+	case "":
+		return errors.New("auth configuration requires PROXYHARBOR_TENANT_KEYS, PROXYHARBOR_AUTH_KEY, or PROXYHARBOR_ADMIN_KEY")
+	default:
+		return fmt.Errorf("unsupported auth mode: %q", mode)
+	}
 	return nil
+}
+
+func resolveAuthMode(c Config) auth.AuthMode {
+	if c.AuthMode != "" {
+		return normalizeAuthMode(c.AuthMode)
+	}
+	if c.TenantKeys != "" {
+		return auth.ModeTenantKeys
+	}
+	if c.AuthKey != "" {
+		return auth.ModeLegacy
+	}
+	if c.AdminKey != "" {
+		return auth.ModeDynamicKeys
+	}
+	return ""
+}
+
+func normalizeAuthMode(mode auth.AuthMode) auth.AuthMode {
+	if mode == "legacy" {
+		return auth.ModeLegacy
+	}
+	return mode
 }
 
 func envStr(key, fallback string) string {

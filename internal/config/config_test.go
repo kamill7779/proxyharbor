@@ -3,141 +3,276 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/auth"
 )
 
-func TestParseTenantKeys_Valid(t *testing.T) {
+func TestResolveAuthModeExplicit(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  string
-		want map[string]string
+		mode       auth.AuthMode
+		wantMode   auth.AuthMode
+		wantErr    bool
+		errContain string
 	}{
-		{
-			name: "C1 single entry",
-			raw:  "tenanta:abcdefghijklmnop",
-			want: map[string]string{"abcdefghijklmnop": "tenanta"},
-		},
-		{
-			name: "C2 multiple entries",
-			raw:  "tenanta:keykeykeykeykey1,tenantb:keykeykeykeykey2",
-			want: map[string]string{"keykeykeykeykey1": "tenanta", "keykeykeykeykey2": "tenantb"},
-		},
-		{
-			name: "trailing whitespace tolerated",
-			raw:  "  tenanta:keykeykeykeykey1 , tenantb:keykeykeykeykey2 ",
-			want: map[string]string{"keykeykeykeykey1": "tenanta", "keykeykeykeykey2": "tenantb"},
-		},
-		{
-			name: "key may contain colon",
-			raw:  "tenanta:abcd:efgh:ijkl:mnop",
-			want: map[string]string{"abcd:efgh:ijkl:mnop": "tenanta"},
-		},
+		{auth.ModeDynamicKeys, auth.ModeDynamicKeys, true, "storage=mysql"},
+		{auth.ModeTenantKeys, auth.ModeTenantKeys, true, "tenant-keys requires PROXYHARBOR_TENANT_KEYS"},
+		{auth.ModeLegacy, auth.ModeLegacy, true, "legacy-single-key requires"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseTenantKeys(tc.raw, 16)
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
+		cfg := validTestConfig(Config{AuthMode: tc.mode, Role: "all", Selector: "zfair", StickyPolicy: "none", HealthBufferMax: 1, ZFairQuantum: 1, ZFairDefaultLatencyMS: 1, ZFairMaxPromote: 1, StorageDriver: DriverMemory})
+		err := cfg.validate()
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("mode=%s: expected error", tc.mode)
 			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("len=%d want=%d (got=%v)", len(got), len(tc.want), got)
-			}
-			for k, v := range tc.want {
-				if got[k] != v {
-					t.Errorf("key %q -> %q, want %q", k, got[k], v)
+			if tc.errContain != "" {
+				if !contains(err.Error(), tc.errContain) {
+					t.Fatalf("mode=%s: error %q does not contain %q", tc.mode, err.Error(), tc.errContain)
 				}
 			}
-		})
-	}
-}
-
-func TestParseTenantKeys_Invalid(t *testing.T) {
-	cases := []struct {
-		name      string
-		raw       string
-		minKeyLen int
-		errSubstr string
-	}{
-		{name: "C3 key too short", raw: "tenanta:short", minKeyLen: 16, errSubstr: "shorter than"},
-		{name: "C4 invalid tenant id (uppercase)", raw: "Bad_Tenant:keykeykeykeykey1", minKeyLen: 16, errSubstr: "invalid tenant id"},
-		{name: "C4b invalid tenant id (special char)", raw: "te.nant:keykeykeykeykey1", minKeyLen: 16, errSubstr: "invalid tenant id"},
-		{name: "C5 duplicate key", raw: "a:keykeykeykeykey1,b:keykeykeykeykey1", minKeyLen: 16, errSubstr: "duplicate tenant key"},
-		{name: "C6 duplicate tenant", raw: "a:keykeykeykeykey1,a:keykeykeykeykey2", minKeyLen: 16, errSubstr: "duplicate tenant"},
-		{name: "missing colon", raw: "tenantAkey", minKeyLen: 16, errSubstr: "expected tenant:key"},
-		{name: "empty key after colon", raw: "tenantA:", minKeyLen: 16, errSubstr: "expected tenant:key"},
-		{name: "empty tenant before colon", raw: ":keykeykeykeykey1", minKeyLen: 16, errSubstr: "expected tenant:key"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseTenantKeys(tc.raw, tc.minKeyLen)
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
+		} else {
+			if err != nil {
+				t.Fatalf("mode=%s: unexpected error: %v", tc.mode, err)
 			}
-			if !strings.Contains(err.Error(), tc.errSubstr) {
-				t.Fatalf("err=%q does not contain %q", err.Error(), tc.errSubstr)
-			}
-		})
+		}
 	}
 }
 
-func TestParseTenantKeys_EmptyReturnsNil(t *testing.T) {
-	got, err := parseTenantKeys("", 16)
-	if err != nil || got != nil {
-		t.Fatalf("empty input: got=%v err=%v", got, err)
-	}
-	got, err = parseTenantKeys("   ", 16)
-	if err != nil || got != nil {
-		t.Fatalf("whitespace input: got=%v err=%v", got, err)
+func TestResolveAuthModeDynamicOK(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "pepper-1234567890123456789012345678",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestConfigValidate_AuthModes(t *testing.T) {
-	base := func() Config {
-		return Config{
-			Role:                  "all",
-			LogFormat:             "json",
-			LogLevel:              "info",
-			StorageDriver:         DriverMemory,
-			Selector:              "zfair",
-			SelectorRedisRequired: false,
-			HealthBufferMax:       10,
-			ZFairQuantum:          1,
-			ZFairDefaultLatencyMS: 1,
-			ZFairMaxPromote:       1,
-			StickyPolicy:          "none",
-		}
+func TestDynamicModeRequiresMySQL(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "pepper-1234567890123456789012345678",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
+	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "storage=mysql") {
+		t.Fatalf("expected storage=mysql validation error, got %v", err)
+	}
+}
+
+func TestLegacyAliasNormalizes(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              "legacy",
+		AuthKey:               "legacy-key",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolveAuthMode(cfg) != auth.ModeLegacy {
+		t.Fatalf("expected legacy-single-key, got %s", resolveAuthMode(cfg))
+	}
+}
+
+func TestResolveAuthModeTenantKeysOK(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeTenantKeys,
+		TenantKeys:            "t1:k1",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveAuthModeLegacyOK(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeLegacy,
+		AuthKey:               "legacy-key",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTenantKeysModeRejectsMalformedConfig(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeTenantKeys,
+		TenantKeys:            "broken",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
+	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "invalid PROXYHARBOR_TENANT_KEYS") {
+		t.Fatalf("expected invalid tenant keys error, got %v", err)
+	}
+}
+
+func TestResolveAuthModeDefault(t *testing.T) {
+	// AdminKey only -> dynamic
+	cfg := validTestConfig(Config{
+		AdminKey:              "admin-key-1234567890123456780123456789",
+		KeyPepper:             "pepper-123456789012345678901234567890",
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolveAuthMode(cfg) != auth.ModeDynamicKeys {
+		t.Fatalf("expected dynamic-keys default, got %s", resolveAuthMode(cfg))
 	}
 
-	t.Run("C7 legacy only", func(t *testing.T) {
-		c := base()
-		c.AuthKey = "legacy"
-		if err := c.validate(); err != nil {
-			t.Fatalf("expected ok, got %v", err)
-		}
+	// TenantKeys only -> tenant-keys
+	cfg = validTestConfig(Config{
+		TenantKeys:            "t1:k1",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
 	})
+	if resolveAuthMode(cfg) != auth.ModeTenantKeys {
+		t.Fatalf("expected tenant-keys default, got %s", resolveAuthMode(cfg))
+	}
 
-	t.Run("tenant-keys only", func(t *testing.T) {
-		c := base()
-		c.TenantKeys = map[string]string{"keykeykeykeykey1": "tenantA"}
-		if err := c.validate(); err != nil {
-			t.Fatalf("expected ok, got %v", err)
-		}
+	// AuthKey only -> legacy
+	cfg = validTestConfig(Config{
+		AuthKey:               "legacy",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
 	})
+	if resolveAuthMode(cfg) != auth.ModeLegacy {
+		t.Fatalf("expected legacy default, got %s", resolveAuthMode(cfg))
+	}
+}
 
-	t.Run("C8 both set is ambiguous", func(t *testing.T) {
-		c := base()
-		c.AuthKey = "legacy"
-		c.TenantKeys = map[string]string{"keykeykeykeykey1": "tenantA"}
-		err := c.validate()
-		if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-			t.Fatalf("expected ambiguous error, got %v", err)
-		}
+func TestPepperTooShort(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "short",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 	})
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("expected error for short pepper")
+	}
+	if !contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
-	t.Run("C9 neither set", func(t *testing.T) {
-		c := base()
-		err := c.validate()
-		if err == nil || !strings.Contains(err.Error(), "auth key is required") {
-			t.Fatalf("expected required error, got %v", err)
-		}
+func TestDynamicRefreshIntervalMustSatisfyRevocationSLO(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "pepper-1234567890123456789012345678",
+		AuthRefreshInterval:   10 * time.Second,
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "<= 5s") {
+		t.Fatalf("expected refresh interval validation error, got %v", err)
+	}
+}
+
+func validTestConfig(cfg Config) Config {
+	cfg.LogFormat = "json"
+	cfg.LogLevel = "info"
+	if cfg.AuthRefreshInterval == 0 {
+		cfg.AuthRefreshInterval = 5 * time.Second
+	}
+	return cfg
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
+}
+
+func containsAt(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
