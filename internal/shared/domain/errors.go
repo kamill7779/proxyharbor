@@ -11,6 +11,7 @@ var (
 	ErrUnsafeDestination   = errors.New("unsafe_destination")
 	ErrCatalogStale        = errors.New("catalog_stale")
 	ErrAuthFailed          = errors.New("auth_failed")
+	ErrTenantMismatch      = errors.New("tenant_mismatch")
 	ErrTenantDisabled      = errors.New("tenant_disabled")
 	ErrNotFound            = errors.New("not_found")
 	ErrUnsupported         = errors.New("unsupported")

@@ -3,11 +3,11 @@
 #
 # 最小可用配置（接入已有 MySQL+Redis）：
 #   helm install ph ./charts/proxyharbor \
-#     --set auth.key=$(openssl rand -hex 32) \
+#     --set auth.tenantKeys.default=$(openssl rand -hex 32) \
 #     --set mysql.dsn='user:pass@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC' \
 #     --set redis.addr=redis.svc:6379
 #
-# 推荐做法：把 auth.key 与 mysql.dsn 通过 existingSecret 注入，避免明文 values。
+# Recommended: inject auth.tenantKeysExistingSecret and mysql.dsn from existing Secrets to avoid plaintext values.
 
 image:
   repository: ghcr.io/kamill7779/proxyharbor
@@ -39,12 +39,21 @@ ingress:
   tls: []
 
 # 认证：二选一
-#   1) auth.key 直接给明文（不推荐生产）
-#   2) auth.existingSecret 指向已有 Secret，键名为 auth.existingSecretKey
+# Auth: tenantKeys is recommended. Each entry is tenant_id:key.
+# Control-plane clients only send ProxyHarbor-Key; tenant ID is derived from the key.
+# Use legacySingleKey only for pre-v0.1.4 deployments. tenantKeys and legacySingleKey are mutually exclusive.
 auth:
+  tenantKeys: {}
+  tenantKeysString: ""
+  tenantKeysExistingSecret: ""
+  tenantKeysExistingSecretKey: "tenant-keys"
+  legacySingleKey: ""
+  # Deprecated aliases for legacy fields; kept for old CI and values files.
   key: ""
   existingSecret: ""
   existingSecretKey: "auth-key"
+  legacyExistingSecret: ""
+  legacyExistingSecretKey: "auth-key"
 
 # MySQL 连接：二选一
 #   1) mysql.dsn 直接给完整 DSN（明文）

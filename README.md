@@ -44,7 +44,7 @@ docker compose --profile bundle up -d --build
 默认开发 API Key：
 
 ```env
-PROXYHARBOR_AUTH_KEY=change-me
+PROXYHARBOR_TENANT_KEYS=default:changeme1234567890abcdef
 ```
 
 **对外暴露前务必修改为强密钥**：
@@ -54,7 +54,7 @@ cp .env.example .env
 ```
 
 ```env
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
+PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001
 PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
 PROXYHARBOR_REDIS_ADDR=redis:6379
 ```
@@ -72,7 +72,7 @@ curl http://localhost:8080/readyz
 ### 3. 注册 Provider
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"static-main","type":"static","name":"我的代理池","enabled":true}' \
   http://localhost:8080/v1/providers
@@ -81,7 +81,7 @@ curl -H 'ProxyHarbor-Key: change-me' \
 ### 4. 添加代理节点
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"proxy-1","provider_id":"static-main","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
   http://localhost:8080/v1/proxies
@@ -98,7 +98,7 @@ for item in \
   'proxy-3 http://proxy3.example.com:8080 50'
 do
   set -- $item
-  curl -H 'ProxyHarbor-Key: change-me' \
+  curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
     -H 'Content-Type: application/json' \
     -d "{\"id\":\"$1\",\"provider_id\":\"static-main\",\"endpoint\":\"$2\",\"healthy\":true,\"weight\":$3}" \
     http://localhost:8080/v1/proxies
@@ -115,7 +115,7 @@ $proxies = @(
 )
 foreach ($proxy in $proxies) {
   $body = @{ id=$proxy.id; provider_id='static-main'; endpoint=$proxy.endpoint; healthy=$true; weight=$proxy.weight } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='change-me'} -ContentType 'application/json' -Body $body
+  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='changeme1234567890abcdef'} -ContentType 'application/json' -Body $body
 }
 ```
 
@@ -124,7 +124,7 @@ foreach ($proxy in $proxies) {
 租约颁发至少需要一条启用的策略：
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"default","name":"默认策略","enabled":true,"ttl_seconds":1800}' \
   http://localhost:8080/v1/policies
@@ -133,7 +133,7 @@ curl -H 'ProxyHarbor-Key: change-me' \
 ### 6. 创建租约
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-lease-1' \
   -d '{"subject":{"subject_type":"user","subject_id":"local-dev"},"resource_ref":{"kind":"url","id":"https://example.com"},"ttl_seconds":600}' \
@@ -161,13 +161,21 @@ docker compose --profile app up -d --build
 ### 直接运行二进制
 
 ```bash
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret \
+PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001 \
 PROXYHARBOR_STORAGE=mysql \
 PROXYHARBOR_MYSQL_DSN='proxyharbor:proxyharbor@tcp(127.0.0.1:3306)/proxyharbor?parseTime=true&loc=UTC' \
 PROXYHARBOR_REDIS_ADDR='127.0.0.1:6379' \
 PROXYHARBOR_SELECTOR=zfair \
 go run ./cmd/proxyharbor
 ```
+
+## 租户身份模型
+
+ProxyHarbor v0.1.4 推荐使用 `PROXYHARBOR_TENANT_KEYS`。每个条目形如 `tenant_id:key`，服务端在收到 `ProxyHarbor-Key` 后反查出可信的 `principal.TenantID`。
+
+- 控制面调用只需要传 `ProxyHarbor-Key`，不需要再传 `ProxyHarbor-Tenant` 或 `tenant_id`。
+- 如果旧客户端仍传 `ProxyHarbor-Tenant` 或 query `tenant_id`，它必须与 key 绑定的租户一致，否则返回 `403 tenant_mismatch`。
+- `PROXYHARBOR_AUTH_KEY` 仅保留给 legacy 单 Key 部署；不要与 `PROXYHARBOR_TENANT_KEYS` 同时设置。
 
 ## 数据模型
 
@@ -229,7 +237,9 @@ go run ./cmd/proxyharbor
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `PROXYHARBOR_AUTH_KEY` | 控制面 API 鉴权密钥 | **必填** |
+| `PROXYHARBOR_TENANT_KEYS` | 推荐模式：`tenant:key,tenant:key`；key 同时承载控制面鉴权与租户身份 | **推荐必填** |
+| `PROXYHARBOR_TENANT_KEY_MIN_LEN` | Tenant key 最小长度 | `16` |
+| `PROXYHARBOR_AUTH_KEY` | Legacy 单 Key 模式；仅在未设置 `PROXYHARBOR_TENANT_KEYS` 时可用 | 兼容旧部署 |
 | `PROXYHARBOR_ROLE` | 进程角色：`all` / `controller` / `gateway` | `all` |
 | `PROXYHARBOR_STORAGE` | 存储驱动：`mysql` / `memory` | `mysql` |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL 连接串 | 空 |

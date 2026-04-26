@@ -55,19 +55,40 @@ spec:
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
-            # ----- 凭据：existingSecret 优先，否则取明文 -----
+            # ----- Auth: tenant keys by default, legacy single key only for old deployments -----
+            {{- $tenantKeys := "" }}
+            {{- if .Values.auth.tenantKeysString }}
+            {{- $tenantKeys = .Values.auth.tenantKeysString }}
+            {{- else if .Values.auth.tenantKeys }}
+            {{- $parts := list }}
+            {{- range $tenant, $key := .Values.auth.tenantKeys }}
+            {{- $parts = append $parts (printf "%s:%s" $tenant $key) }}
+            {{- end }}
+            {{- $tenantKeys = join "," $parts }}
+            {{- end }}
+            {{- if or .Values.auth.tenantKeysExistingSecret $tenantKeys }}
+            - name: PROXYHARBOR_TENANT_KEYS
+              valueFrom:
+                secretKeyRef:
+                  {{ if .Values.auth.tenantKeysExistingSecret }}
+                  name: {{ .Values.auth.tenantKeysExistingSecret }}
+                  key: {{ .Values.auth.tenantKeysExistingSecretKey }}
+                  {{ else }}
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: tenant-keys
+                  {{ end }}
+            {{- else }}
             - name: PROXYHARBOR_AUTH_KEY
-              {{- if .Values.auth.existingSecret }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.existingSecretKey }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
+                  {{ if (default .Values.auth.existingSecret .Values.auth.legacyExistingSecret) }}
+                  name: {{ (default .Values.auth.existingSecret .Values.auth.legacyExistingSecret) }}
+                  key: {{ (default .Values.auth.existingSecretKey .Values.auth.legacyExistingSecretKey) }}
+                  {{ else }}
                   name: {{ include "proxyharbor.fullname" . }}-secret
                   key: auth-key
-              {{- end }}
+                  {{ end }}
+            {{- end }}
             - name: PROXYHARBOR_MYSQL_DSN
               {{- if .Values.mysql.existingSecret }}
               valueFrom:
