@@ -16,6 +16,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/control"
 	"github.com/kamill7779/proxyharbor/internal/server"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
@@ -257,4 +258,105 @@ func basicAuth(username, password string) string {
 
 func bufioNewReader(conn net.Conn) *bufio.Reader {
 	return bufio.NewReader(conn)
+}
+
+// v0.1.4 static PROXYHARBOR_TENANT_KEYS compatibility.
+func TestTenantKeysCompatibility(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	keys := auth.ParseTenantKeys("tenant_a:key_a,tenant_b:key_b")
+	authn := auth.NewTenantKeys(keys)
+	handler := server.New(svc, authn)
+
+	// tenant_a key works.
+	rr := requestWithAuth(t, handler, "GET", "/v1/catalog/latest", "", "key_a")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tenant_a catalog status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// tenant_b key works.
+	rr = requestWithAuth(t, handler, "GET", "/v1/catalog/latest", "", "key_b")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tenant_b catalog status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Admin with On-Behalf-Of creates policy; tenant sees it with own key.
+func TestAdminOnBehalfOfCreatesPolicy(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	adminStore := newMockAdminStore()
+	adminStore.tenants["t1"] = domain.Tenant{ID: "t1", Name: "Test", Enabled: true}
+	authn := auth.NewLegacy("legacy").WithAdminKey("admin-secret")
+	handler := server.NewWithAdminStore(svc, authn, adminStore, "pepper")
+
+	// Admin creates policy on behalf of t1.
+	_ = adminRequest(t, handler, "POST", "/v1/policies", `{"id":"p1","name":"test","enabled":true,"ttl_seconds":600}`, "admin-secret")
+	// Re-execute with the header set properly.
+	req := httptest.NewRequest("POST", "/v1/policies", bytes.NewBufferString(`{"id":"p1","name":"test","enabled":true,"ttl_seconds":600}`))
+	req.Header.Set(auth.HeaderName, "admin-secret")
+	req.Header.Set("X-On-Behalf-Of", "t1")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create policy status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Tenant uses own key to list policies.
+	authn2 := auth.NewTenantKeys(map[string]string{"tk": "t1"})
+	handler2 := server.New(svc, authn2)
+	rr = requestWithAuth(t, handler2, "GET", "/v1/policies", "", "tk")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list policies status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Tenant A key with X-On-Behalf-Of: B -> 403.
+func TestTenantCrossBehalfOf(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	authn := auth.NewTenantKeys(map[string]string{"tk": "t1"})
+	handler := server.New(svc, authn)
+
+	req := httptest.NewRequest("GET", "/v1/policies", nil)
+	req.Header.Set(auth.HeaderName, "tk")
+	req.Header.Set("X-On-Behalf-Of", "t2")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Admin deletes tenant -> all keys immediately invalid.
+func TestAdminDeleteTenantInvalidatesKeys(t *testing.T) {
+	adminStore := newMockAdminStore()
+	adminStore.tenants["t1"] = domain.Tenant{ID: "t1", Name: "Test", Enabled: true}
+	adminStore.keys["t1"] = []auth.TenantKey{{ID: "k1", TenantID: "t1", KeyHash: "hash"}}
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	authn := auth.NewLegacy("legacy").WithAdminKey("admin-secret")
+	handler := server.NewWithAdminStore(svc, authn, adminStore, "pepper")
+
+	// Delete tenant.
+	rr := adminRequest(t, handler, "DELETE", "/admin/tenants/t1", "", "admin-secret")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete tenant status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Verify tenant is disabled.
+	if adminStore.tenants["t1"].Enabled {
+		t.Fatal("expected tenant to be disabled")
+	}
+}
+
+func requestWithAuth(t *testing.T, handler http.Handler, method, path, body, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set(auth.HeaderName, key)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
 }

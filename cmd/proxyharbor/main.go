@@ -64,7 +64,20 @@ func main() {
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, auth.New(cfg.AuthKey), role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	authn, adminStore, cancelAuth, err := openAuthenticator(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("open authenticator", "err", err)
+		os.Exit(1)
+	}
+	defer cancelAuth()
+	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	if adminStore != nil {
+		if adminAware, ok := handler.(interface {
+			SetAdminStore(server.AdminStore, string)
+		}); ok {
+			adminAware.SetAdminStore(adminStore, cfg.KeyPepper)
+		}
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -93,6 +106,21 @@ func main() {
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer drainCancel()
 	healthRecorder.Close(drainCtx)
+}
+
+func openAuthenticator(ctx context.Context, cfg config.Config, logger *slog.Logger) (*auth.Authenticator, server.AdminStore, func(), error) {
+	switch cfg.AuthMode {
+	case auth.ModeDynamicKeys:
+		store := server.NewMemoryAdminStore()
+		logger.Warn("dynamic-key auth store is compatibility-only until Milestone A storage is merged")
+		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), store, func() {}, nil
+	case auth.ModeTenantKeys:
+		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), server.NewMemoryAdminStore(), func() {}, nil
+	case auth.ModeLegacy:
+		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), server.NewMemoryAdminStore(), func() {}, nil
+	default:
+		return nil, nil, func() {}, errors.New("unsupported auth mode")
+	}
 }
 
 func newLogger(cfg config.Config) *slog.Logger {
