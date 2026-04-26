@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/cache"
+	"github.com/kamill7779/proxyharbor/internal/control/selector"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
@@ -25,17 +26,15 @@ type Service struct {
 	gatewayURL                 string
 	allowInternalProxyEndpoint bool
 	resolver                   *net.Resolver
+	selector                   selector.ProxySelector
 }
 
 func NewService(store storage.Store, gatewayURL string) *Service {
-	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver}
+	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver, selector: selector.FirstSelectable{}}
 }
 
-// SetAllowInternalProxyEndpoint 控制上游代理 endpoint 是否允许指向 loopback/私网/link-local。
-// 生产环境必须保持 false；本地 dev、单元测试可设 true。
 func (s *Service) SetAllowInternalProxyEndpoint(allow bool) { s.allowInternalProxyEndpoint = allow }
 
-// SetCache 注入热路径缓存。传 nil 等同于关闭缓存。
 func (s *Service) SetCache(c cache.Cache, ttl time.Duration) {
 	if c == nil {
 		s.cache = cache.Noop{}
@@ -45,6 +44,14 @@ func (s *Service) SetCache(c cache.Cache, ttl time.Duration) {
 	if ttl > 0 {
 		s.cacheTTL = ttl
 	}
+}
+
+func (s *Service) SetSelector(sel selector.ProxySelector) {
+	if sel == nil {
+		s.selector = selector.FirstSelectable{}
+		return
+	}
+	s.selector = sel
 }
 
 type CreateLeaseRequest struct {
@@ -77,7 +84,11 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	proxy, err := s.store.ChooseHealthyProxy(ctx, principal.TenantID)
+	candidates, err := s.store.ListSelectableProxies(ctx, principal.TenantID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	proxy, err := s.selector.Select(ctx, principal.TenantID, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
 	if err != nil {
 		return domain.Lease{}, err
 	}
@@ -97,8 +108,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	// 幂等命中时 saved 已是历史 lease，明文必须保持为空；
-	// 首次创建才将 plaintext 一次性贴回响应。
+
 	if saved.ID == lease.ID && saved.PasswordHash == lease.PasswordHash {
 		saved.Password = plaintext
 	}
@@ -325,9 +335,6 @@ func (s *Service) pickPolicy(ctx context.Context, tenantID string, req CreateLea
 
 func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }
 
-// safeTarget 拦截到入参表达的对外请求目标。对域名会解析 DNS 并对全部返回 IP 逐个检查，
-// 拒绝 loopback / RFC1918 私网 / link-local / unspecified / multicast / CGNAT / cloud metadata。
-// 这是针对 SSRF 和 DNS rebinding 的最低限度防御。
 func safeTarget(target string) bool {
 	host := extractHost(target)
 	return isSafeHost(host)
@@ -358,7 +365,6 @@ func isSafeHost(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return !isInternalIP(ip)
 	}
-	// 域名：解析后逐个 IP 检查。解析失败也拒绝（fail-closed）。
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
@@ -381,7 +387,7 @@ func isInternalIP(ip net.IP) bool {
 		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	// CGNAT 100.64.0.0/10 以及常见云 metadata IP
+	// CGNAT 100.64.0.0/10 娴犮儱寮风敮姝岊潌娴?metadata IP
 	if v4 := ip.To4(); v4 != nil {
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
 			return true
@@ -393,8 +399,6 @@ func isInternalIP(ip net.IP) bool {
 	return false
 }
 
-// safeProxyEndpoint 同样拒绝上游代理指向内网。在 SetAllowInternalProxyEndpoint(true) 后
-// 仅限 dev/测试场景下放行 loopback / 私网。
 func (s *Service) safeProxyEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
@@ -409,14 +413,11 @@ func (s *Service) safeProxyEndpoint(endpoint string) bool {
 	return isSafeHost(strings.ToLower(u.Hostname()))
 }
 
-// hashLeasePassword 以 leaseID 为 salt 对明文计算 SHA-256，仅依赖标准库。
-// Lease password 是 192-bit 随机令牌，无需额外 KDF；salt 防止跨租户 leaseID 同名碍碍。
 func hashLeasePassword(leaseID, plaintext string) string {
 	sum := sha256.Sum256([]byte(leaseID + ":" + plaintext))
 	return hex.EncodeToString(sum[:])
 }
 
-// verifyLeasePassword 使用常量时间比较，防止计时侧信道泄露哈希。
 func verifyLeasePassword(leaseID, storedHash, plaintext string) bool {
 	if storedHash == "" || plaintext == "" {
 		return false

@@ -141,12 +141,7 @@ func (s *MemoryStore) ChooseHealthyProxy(_ context.Context, tenantID string) (do
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	proxies := make([]domain.Proxy, 0)
-	for _, proxy := range s.proxies {
-		if proxy.TenantID == tenantID && proxy.Healthy {
-			proxies = append(proxies, copyProxy(proxy))
-		}
-	}
+	proxies := s.selectableProxiesLocked(tenantID, time.Now().UTC())
 	if len(proxies) == 0 {
 		return domain.Proxy{}, domain.ErrNoHealthyProxy
 	}
@@ -157,6 +152,80 @@ func (s *MemoryStore) ChooseHealthyProxy(_ context.Context, tenantID string) (do
 		return proxies[i].Weight > proxies[j].Weight
 	})
 	return proxies[0], nil
+}
+
+func (s *MemoryStore) ListSelectableProxies(_ context.Context, tenantID string) ([]domain.Proxy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.selectableProxiesLocked(tenantID, time.Now().UTC()), nil
+}
+
+func (s *MemoryStore) RecordProxyOutcome(_ context.Context, tenantID, proxyID string, delta ProxyHealthDelta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	proxy, ok := s.proxies[key(tenantID, proxyID)]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	observedAt := delta.ObservedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	proxy.LastCheckedAt = observedAt
+	if proxy.HealthScore == 0 && proxy.ConsecutiveFailures == 0 && proxy.LastSuccessAt.IsZero() && proxy.LastFailureAt.IsZero() {
+		proxy.HealthScore = 100
+	}
+	if delta.Success {
+		reward := delta.Reward
+		if reward <= 0 {
+			reward = 1
+		}
+		proxy.ConsecutiveFailures = 0
+		proxy.HealthScore = minInt(100, proxy.HealthScore+reward)
+		proxy.LastSuccessAt = observedAt
+		if delta.LatencyMS > 0 {
+			if proxy.LatencyEWMAms <= 0 {
+				proxy.LatencyEWMAms = delta.LatencyMS
+			} else {
+				proxy.LatencyEWMAms = int(float64(proxy.LatencyEWMAms)*0.8 + float64(delta.LatencyMS)*0.2)
+			}
+		}
+		if !proxy.CircuitOpenUntil.IsZero() && !proxy.CircuitOpenUntil.After(observedAt) {
+			proxy.CircuitOpenUntil = time.Time{}
+		}
+	} else {
+		penalty := delta.Penalty
+		if penalty <= 0 {
+			penalty = 10
+		}
+		proxy.ConsecutiveFailures++
+		proxy.HealthScore = maxInt(0, proxy.HealthScore-penalty)
+		proxy.LastFailureAt = observedAt
+		proxy.FailureHint = delta.FailureHint
+		threshold := delta.MaxConsecutiveFailure
+		if threshold <= 0 {
+			threshold = 3
+		}
+		baseCooldown := delta.BaseCooldown
+		if baseCooldown <= 0 {
+			baseCooldown = 30 * time.Second
+		}
+		maxCooldown := delta.MaxCooldown
+		if maxCooldown <= 0 {
+			maxCooldown = 5 * time.Minute
+		}
+		if proxy.ConsecutiveFailures >= threshold {
+			cooldown := time.Duration(proxy.ConsecutiveFailures) * baseCooldown
+			if cooldown > maxCooldown {
+				cooldown = maxCooldown
+			}
+			proxy.CircuitOpenUntil = observedAt.Add(cooldown)
+		}
+	}
+	s.proxies[key(tenantID, proxyID)] = copyProxy(proxy)
+	return nil
 }
 
 func (s *MemoryStore) ListProviders(_ context.Context, tenantID string) ([]domain.Provider, error) {
@@ -245,6 +314,9 @@ func (s *MemoryStore) UpsertProxy(_ context.Context, proxy domain.Proxy) (domain
 	if proxy.Weight == 0 {
 		proxy.Weight = 1
 	}
+	if proxy.HealthScore == 0 && proxy.ConsecutiveFailures == 0 && proxy.LastSuccessAt.IsZero() && proxy.LastFailureAt.IsZero() {
+		proxy.HealthScore = 100
+	}
 	if proxy.LastSeenAt.IsZero() {
 		proxy.LastSeenAt = time.Now().UTC()
 	}
@@ -284,6 +356,21 @@ func (s *MemoryStore) ListCatalogProxies(_ context.Context, tenantID string) ([]
 	defer s.mu.RUnlock()
 
 	return s.proxiesForTenantLocked(tenantID), nil
+}
+
+func (s *MemoryStore) selectableProxiesLocked(tenantID string, now time.Time) []domain.Proxy {
+	proxies := make([]domain.Proxy, 0)
+	for _, proxy := range s.proxies {
+		if proxy.TenantID != tenantID || !proxy.Healthy || proxy.Weight <= 0 || proxy.HealthScore <= 0 {
+			continue
+		}
+		if !proxy.CircuitOpenUntil.IsZero() && proxy.CircuitOpenUntil.After(now) {
+			continue
+		}
+		proxies = append(proxies, copyProxy(proxy))
+	}
+	sort.Slice(proxies, func(i, j int) bool { return proxies[i].ID < proxies[j].ID })
+	return proxies
 }
 
 func (s *MemoryStore) ListPolicies(_ context.Context, tenantID string) ([]domain.Policy, error) {
@@ -441,4 +528,18 @@ func copyStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -352,7 +352,9 @@ func (s *MySQLStore) DeleteProvider(ctx context.Context, tenantID, id string) er
 
 func (s *MySQLStore) GetProxy(ctx context.Context, tenantID, id string) (domain.Proxy, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
+			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
 		 FROM proxies WHERE tenant_id = ? AND proxy_id = ?`,
 		tenantID, id,
@@ -371,19 +373,27 @@ func (s *MySQLStore) UpsertProxy(ctx context.Context, p domain.Proxy) (domain.Pr
 	if p.Weight == 0 {
 		p.Weight = 1
 	}
+	if p.HealthScore == 0 && p.ConsecutiveFailures == 0 && p.LastSuccessAt.IsZero() && p.LastFailureAt.IsZero() {
+		p.HealthScore = 100
+	}
 	if p.LastSeenAt.IsZero() {
 		p.LastSeenAt = now
 	}
 	labelsJSON, _ := json.Marshal(p.Labels)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO proxies (proxy_id, tenant_id, source_id, endpoint, healthy, weight, labels_json,
-			last_seen_at, failure_hint, created_at, updated_at)
-		 VALUES (?,?,NULLIF(?,''),?,?,?,?,?,NULLIF(?,''),?,?)
+			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
+			last_checked_at, last_success_at, last_failure_at, last_seen_at, failure_hint, created_at, updated_at)
+		 VALUES (?,?,NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),?,?)
 		 ON DUPLICATE KEY UPDATE source_id=VALUES(source_id), endpoint=VALUES(endpoint), healthy=VALUES(healthy),
-		   weight=VALUES(weight), labels_json=VALUES(labels_json), last_seen_at=VALUES(last_seen_at),
+		   weight=VALUES(weight), labels_json=VALUES(labels_json), health_score=VALUES(health_score),
+		   consecutive_failures=VALUES(consecutive_failures), circuit_open_until=VALUES(circuit_open_until),
+		   latency_ewma_ms=VALUES(latency_ewma_ms), last_checked_at=VALUES(last_checked_at),
+		   last_success_at=VALUES(last_success_at), last_failure_at=VALUES(last_failure_at), last_seen_at=VALUES(last_seen_at),
 		   failure_hint=VALUES(failure_hint), updated_at=VALUES(updated_at)`,
 		p.ID, p.TenantID, p.ProviderID, p.Endpoint, p.Healthy, p.Weight, labelsJSON,
-		p.LastSeenAt.UTC(), p.FailureHint, now, now,
+		p.HealthScore, p.ConsecutiveFailures, nullTime(p.CircuitOpenUntil), nullInt(p.LatencyEWMAms),
+		nullTime(p.LastCheckedAt), nullTime(p.LastSuccessAt), nullTime(p.LastFailureAt), p.LastSeenAt.UTC(), p.FailureHint, now, now,
 	)
 	if err != nil {
 		return domain.Proxy{}, err
@@ -399,9 +409,13 @@ func (s *MySQLStore) DeleteProxy(ctx context.Context, tenantID, id string) error
 
 func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context, tenantID string) (domain.Proxy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
+			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
 		 FROM proxies WHERE tenant_id = ? AND healthy = TRUE
+		   AND weight > 0 AND health_score > 0
+		   AND (circuit_open_until IS NULL OR circuit_open_until <= UTC_TIMESTAMP())
 		 ORDER BY weight DESC, proxy_id ASC LIMIT 1`,
 		tenantID,
 	)
@@ -415,9 +429,105 @@ func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context, tenantID string) (d
 	return scanProxy(rows)
 }
 
+func (s *MySQLStore) ListSelectableProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
+			last_checked_at, last_success_at, last_failure_at, labels_json,
+			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
+		 FROM proxies
+		 WHERE tenant_id = ? AND healthy = TRUE
+		   AND weight > 0 AND health_score > 0
+		   AND (circuit_open_until IS NULL OR circuit_open_until <= UTC_TIMESTAMP())
+		 ORDER BY proxy_id`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Proxy, 0)
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *MySQLStore) RecordProxyOutcome(ctx context.Context, tenantID, proxyID string, delta ProxyHealthDelta) error {
+	observedAt := delta.ObservedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	if delta.Success {
+		reward := delta.Reward
+		if reward <= 0 {
+			reward = 1
+		}
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE proxies
+			 SET consecutive_failures = 0,
+			     health_score = LEAST(100, health_score + ?),
+			     latency_ewma_ms = CASE
+			       WHEN ? <= 0 THEN latency_ewma_ms
+			       WHEN latency_ewma_ms IS NULL THEN ?
+			       ELSE CAST(latency_ewma_ms * 0.8 + ? * 0.2 AS UNSIGNED)
+			     END,
+			     last_checked_at = ?,
+			     last_success_at = ?,
+			     circuit_open_until = CASE
+			       WHEN circuit_open_until IS NOT NULL AND circuit_open_until <= ? THEN NULL
+			       ELSE circuit_open_until
+			     END,
+			     updated_at = UTC_TIMESTAMP()
+			 WHERE tenant_id = ? AND proxy_id = ?`,
+			reward, delta.LatencyMS, delta.LatencyMS, delta.LatencyMS, observedAt, observedAt, observedAt, tenantID, proxyID,
+		)
+		return err
+	}
+	penalty := delta.Penalty
+	if penalty <= 0 {
+		penalty = 10
+	}
+	threshold := delta.MaxConsecutiveFailure
+	if threshold <= 0 {
+		threshold = 3
+	}
+	baseCooldownSeconds := int(delta.BaseCooldown.Seconds())
+	if baseCooldownSeconds <= 0 {
+		baseCooldownSeconds = 30
+	}
+	maxCooldownSeconds := int(delta.MaxCooldown.Seconds())
+	if maxCooldownSeconds <= 0 {
+		maxCooldownSeconds = 300
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE proxies
+		 SET consecutive_failures = consecutive_failures + 1,
+		     health_score = GREATEST(0, health_score - ?),
+		     last_checked_at = ?,
+		     last_failure_at = ?,
+		     failure_hint = NULLIF(?,''),
+		     circuit_open_until = CASE
+		       WHEN consecutive_failures + 1 >= ?
+		       THEN DATE_ADD(?, INTERVAL LEAST(?, ? * (consecutive_failures + 1)) SECOND)
+		       ELSE circuit_open_until
+		     END,
+		     updated_at = UTC_TIMESTAMP()
+		 WHERE tenant_id = ? AND proxy_id = ?`,
+		penalty, observedAt, observedAt, delta.FailureHint, threshold, observedAt, maxCooldownSeconds, baseCooldownSeconds, tenantID, proxyID,
+	)
+	return err
+}
+
 func (s *MySQLStore) ListCatalogProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight, labels_json,
+		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
+			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
 		 FROM proxies WHERE tenant_id = ? ORDER BY proxy_id`,
 		tenantID,
@@ -587,16 +697,51 @@ func scanProvider(r rowScanner) (domain.Provider, error) {
 
 func scanProxy(r rowScanner) (domain.Proxy, error) {
 	var (
-		p          domain.Proxy
-		labelsJSON []byte
+		p                domain.Proxy
+		labelsJSON       []byte
+		circuitOpenUntil sql.NullTime
+		latencyEWMAms    sql.NullInt64
+		lastCheckedAt    sql.NullTime
+		lastSuccessAt    sql.NullTime
+		lastFailureAt    sql.NullTime
 	)
 	if err := r.Scan(&p.ID, &p.TenantID, &p.ProviderID, &p.Endpoint, &p.Healthy, &p.Weight,
-		&labelsJSON, &p.LastSeenAt, &p.FailureHint); err != nil {
+		&p.HealthScore, &p.ConsecutiveFailures, &circuitOpenUntil, &latencyEWMAms,
+		&lastCheckedAt, &lastSuccessAt, &lastFailureAt, &labelsJSON, &p.LastSeenAt, &p.FailureHint); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Proxy{}, domain.ErrNotFound
 		}
 		return domain.Proxy{}, err
 	}
+	if circuitOpenUntil.Valid {
+		p.CircuitOpenUntil = circuitOpenUntil.Time
+	}
+	if latencyEWMAms.Valid {
+		p.LatencyEWMAms = int(latencyEWMAms.Int64)
+	}
+	if lastCheckedAt.Valid {
+		p.LastCheckedAt = lastCheckedAt.Time
+	}
+	if lastSuccessAt.Valid {
+		p.LastSuccessAt = lastSuccessAt.Time
+	}
+	if lastFailureAt.Valid {
+		p.LastFailureAt = lastFailureAt.Time
+	}
 	_ = json.Unmarshal(labelsJSON, &p.Labels)
 	return p, nil
+}
+
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC()
+}
+
+func nullInt(n int) any {
+	if n <= 0 {
+		return nil
+	}
+	return n
 }

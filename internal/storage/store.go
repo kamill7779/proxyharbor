@@ -48,6 +48,8 @@ type CatalogStore interface {
 	GetProvider(context.Context, string, string) (domain.Provider, error)
 	UpsertProvider(context.Context, domain.Provider) (domain.Provider, error)
 	DeleteProvider(context.Context, string, string) error
+	ListSelectableProxies(context.Context, string) ([]domain.Proxy, error)
+	RecordProxyOutcome(context.Context, string, string, ProxyHealthDelta) error
 	ChooseHealthyProxy(context.Context, string) (domain.Proxy, error)
 	LatestCatalog(context.Context, string) (domain.Catalog, error)
 	GetProxy(context.Context, string, string) (domain.Proxy, error)
@@ -55,6 +57,19 @@ type CatalogStore interface {
 	DeleteProxy(context.Context, string, string) error
 	SaveCatalogSnapshot(context.Context, domain.Catalog) error
 	ListCatalogProxies(context.Context, string) ([]domain.Proxy, error)
+}
+
+type ProxyHealthDelta struct {
+	Success               bool
+	FailureKind           string
+	FailureHint           string
+	Penalty               int
+	Reward                int
+	LatencyMS             int
+	MaxConsecutiveFailure int
+	BaseCooldown          time.Duration
+	MaxCooldown           time.Duration
+	ObservedAt            time.Time
 }
 
 type AuditStore interface {

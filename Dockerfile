@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath

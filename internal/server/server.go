@@ -9,6 +9,7 @@ import (
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/control"
+	"github.com/kamill7779/proxyharbor/internal/control/health"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
@@ -24,10 +25,11 @@ const (
 )
 
 type Server struct {
-	mux   *http.ServeMux
-	svc   *control.Service
-	authn *auth.Authenticator
-	role  Role
+	mux            *http.ServeMux
+	svc            *control.Service
+	authn          *auth.Authenticator
+	role           Role
+	healthRecorder health.HealthRecorder
 }
 
 func New(svc *control.Service, authn *auth.Authenticator) http.Handler {
@@ -36,6 +38,12 @@ func New(svc *control.Service, authn *auth.Authenticator) http.Handler {
 
 func NewForRole(svc *control.Service, authn *auth.Authenticator, role Role) http.Handler {
 	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role}
+	s.routes()
+	return Recover(s)
+}
+
+func NewForRoleWithHealthRecorder(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder) http.Handler {
+	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder}
 	s.routes()
 	return Recover(s)
 }

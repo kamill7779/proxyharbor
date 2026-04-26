@@ -1,21 +1,13 @@
 # ProxyHarbor docker-compose
 #
-# 使用方式（按场景选 profile）：
+# Recommended local startup:
+#   docker compose --profile bundle up -d --build
 #
-#   场景 A：本地全家桶（mysql + redis + app 一键起）
-#     docker compose --profile bundle up -d
-#
-#   场景 B：你已有外部 MySQL / Redis，仅起 app
-#     先把连接信息写到 .env 文件（参考 .env.example），然后：
-#     docker compose --profile app up -d
-#
-#   场景 C：极致轻量 dev（不依赖任何外部组件，使用内存存储 + noop 缓存）
-#     docker compose --profile dev up -d
-#
-# 注意：内存存储仅供单进程开发使用，多副本下数据不一致。
+# Modes:
+#   bundle  Start MySQL + Redis + ProxyHarbor together.
+#   app     Start only ProxyHarbor and connect to external MySQL / Redis from .env.
 
 services:
-  # ----- 仅在 bundle profile 下启动，自带依赖 -----
   mysql:
     image: mysql:8.4
     profiles: ["bundle"]
@@ -48,7 +40,6 @@ services:
       timeout: 3s
       retries: 10
 
-  # ----- 应用本体：bundle 与 app 共用 -----
   proxyharbor:
     build:
       context: .
@@ -58,30 +49,32 @@ services:
       PROXYHARBOR_ROLE: ${PROXYHARBOR_ROLE:-all}
       PROXYHARBOR_ADDR: ":8080"
       PROXYHARBOR_GATEWAY_URL: ${PROXYHARBOR_GATEWAY_URL:-http://localhost:8080}
-      PROXYHARBOR_AUTH_KEY: ${PROXYHARBOR_AUTH_KEY:?需要设置 PROXYHARBOR_AUTH_KEY}
+      PROXYHARBOR_AUTH_KEY: ${PROXYHARBOR_AUTH_KEY:-change-me}
       PROXYHARBOR_STORAGE: ${PROXYHARBOR_STORAGE:-mysql}
       PROXYHARBOR_MYSQL_DSN: ${PROXYHARBOR_MYSQL_DSN:-proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC}
       PROXYHARBOR_REDIS_ADDR: ${PROXYHARBOR_REDIS_ADDR:-redis:6379}
       PROXYHARBOR_REDIS_PASSWORD: ${PROXYHARBOR_REDIS_PASSWORD:-}
       PROXYHARBOR_REDIS_DB: ${PROXYHARBOR_REDIS_DB:-0}
       PROXYHARBOR_CACHE_TTL: ${PROXYHARBOR_CACHE_TTL:-60s}
+      PROXYHARBOR_SELECTOR: ${PROXYHARBOR_SELECTOR:-zfair}
+      PROXYHARBOR_SELECTOR_REDIS_REQUIRED: ${PROXYHARBOR_SELECTOR_REDIS_REQUIRED:-true}
+      PROXYHARBOR_SCORING_PROFILE: ${PROXYHARBOR_SCORING_PROFILE:-default}
+      PROXYHARBOR_HEALTH_FLUSH_INTERVAL: ${PROXYHARBOR_HEALTH_FLUSH_INTERVAL:-5s}
+      PROXYHARBOR_HEALTH_BUFFER_MAX: ${PROXYHARBOR_HEALTH_BUFFER_MAX:-10000}
+      PROXYHARBOR_ZFAIR_QUANTUM: ${PROXYHARBOR_ZFAIR_QUANTUM:-1000}
+      PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS: ${PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS:-200}
+      PROXYHARBOR_ZFAIR_MAX_PROMOTE: ${PROXYHARBOR_ZFAIR_MAX_PROMOTE:-128}
+      PROXYHARBOR_STICKY_ENABLED: ${PROXYHARBOR_STICKY_ENABLED:-false}
+      PROXYHARBOR_STICKY_POLICY: ${PROXYHARBOR_STICKY_POLICY:-none}
     ports:
       - "${PROXYHARBOR_HOST_PORT:-8080}:8080"
-    restart: unless-stopped
-
-  # ----- 极致轻量 dev：内存存储 + noop 缓存 -----
-  proxyharbor-dev:
-    build:
-      context: .
-    image: proxyharbor:local
-    profiles: ["dev"]
-    environment:
-      PROXYHARBOR_ROLE: all
-      PROXYHARBOR_ADDR: ":8080"
-      PROXYHARBOR_AUTH_KEY: ${PROXYHARBOR_AUTH_KEY:-dev-key}
-      PROXYHARBOR_STORAGE: memory
-    ports:
-      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
 
 volumes:

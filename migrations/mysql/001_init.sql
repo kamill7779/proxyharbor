@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS proxies (
     endpoint TEXT NOT NULL,
     healthy BOOLEAN NOT NULL DEFAULT FALSE,
     weight INTEGER NOT NULL DEFAULT 1,
+    health_score INTEGER NOT NULL DEFAULT 100,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    circuit_open_until TIMESTAMP NULL,
+    latency_ewma_ms INTEGER NULL,
+    last_checked_at TIMESTAMP NULL,
+    last_success_at TIMESTAMP NULL,
+    last_failure_at TIMESTAMP NULL,
     labels_json JSON NOT NULL,
     last_seen_at TIMESTAMP NULL,
     failure_hint TEXT,
@@ -124,5 +131,6 @@ CREATE TABLE IF NOT EXISTS proxy_provider_runs (
 
 CREATE INDEX idx_policies_tenant ON policies (tenant_id);
 CREATE INDEX idx_proxies_tenant_health ON proxies (tenant_id, healthy);
+CREATE INDEX idx_proxies_selectable ON proxies (tenant_id, healthy, health_score);
 CREATE INDEX idx_proxy_leases_tenant_expiry ON proxy_leases (tenant_id, expires_at);
 CREATE INDEX idx_proxy_usage_events_tenant_time ON proxy_usage_events (tenant_id, occurred_at);
