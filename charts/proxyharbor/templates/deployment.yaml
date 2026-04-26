@@ -56,18 +56,63 @@ spec:
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
             # ----- 凭据：existingSecret 优先，否则取明文 -----
+            # ----- 认证配置 -----
+            - name: PROXYHARBOR_AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
+            {{- if eq .Values.auth.mode "legacy" }}
             - name: PROXYHARBOR_AUTH_KEY
               {{- if .Values.auth.existingSecret }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.auth.existingSecret }}
                   key: {{ .Values.auth.existingSecretKey }}
-              {{- else }}
+              {{- else if .Values.auth.key }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "proxyharbor.fullname" . }}-secret
                   key: auth-key
               {{- end }}
+            {{- else if eq .Values.auth.mode "tenant-keys" }}
+            - name: PROXYHARBOR_TENANT_KEYS
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: tenant-keys
+              {{- else if .Values.auth.tenantKeys }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: tenant-keys
+              {{- end }}
+            {{- else if eq .Values.auth.mode "dynamic-keys" }}
+            - name: PROXYHARBOR_ADMIN_KEY
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: admin-key
+              {{- else if .Values.auth.adminKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: admin-key
+              {{- end }}
+            - name: PROXYHARBOR_KEY_PEPPER
+              {{- if .Values.auth.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: pepper
+              {{- else if .Values.auth.pepper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxyharbor.fullname" . }}-secret
+                  key: pepper
+              {{- end }}
+            - name: PROXYHARBOR_AUTH_REFRESH_INTERVAL
+              value: {{ .Values.auth.refreshInterval | quote }}
+            {{- end }}
             - name: PROXYHARBOR_MYSQL_DSN
               {{- if .Values.mysql.existingSecret }}
               valueFrom:

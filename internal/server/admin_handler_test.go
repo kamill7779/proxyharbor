@@ -136,6 +136,7 @@ func TestAdminHandler_IssueKey(t *testing.T) {
 	if resp.KeyID == "" || resp.Key == "" {
 		t.Fatal("expected key_id and plaintext key in response")
 	}
+	assertAuditAction(t, store.events, "tenant_key.issued")
 }
 
 // List keys: 200, response does NOT contain plaintext key.
@@ -178,10 +179,7 @@ func TestAdminHandler_RevokeKey(t *testing.T) {
 		t.Fatalf("revoke status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	// Verify audit event.
-	if len(store.events) == 0 {
-		t.Fatal("expected audit event for revoke")
-	}
+	assertAuditAction(t, store.events, "tenant_key.revoked")
 }
 
 // Admin without On-Behalf-Of calling control plane -> 400.
@@ -209,4 +207,17 @@ func TestAdminHandler_TenantKeyForbidden(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
+}
+
+func assertAuditAction(t *testing.T, events []domain.AuditEvent, action string) {
+	t.Helper()
+	for _, event := range events {
+		if event.Action == action {
+			if event.EventID == "" || event.TenantID == "" || event.OccurredAt.IsZero() {
+				t.Fatalf("audit event %s missing required fields: %#v", action, event)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected audit action %s in %#v", action, events)
 }

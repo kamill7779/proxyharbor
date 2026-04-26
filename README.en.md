@@ -18,17 +18,17 @@ ProxyHarbor is a lightweight proxy pool service designed for small-business scen
 
 ## Features
 
-- **Control-plane API** â€” manage Providers, Proxies, Policies, and Leases; read the Catalog
-- **HTTP gateway** â€” supports both plain HTTP forward-proxy requests and CONNECT tunnels (HTTPS)
-- **zfair fair scheduling** â€” Redis ZSET + atomic Lua scripts for weight- and health-aware lease distribution
-- **Health scoring** â€” success +5, connection failure âˆ’10, timeout âˆ’15, auth/protocol failure âˆ’30; circuit breaker trips after 3 consecutive failures with 30 s â€“ 5 min exponential back-off cooldown
-- **Lease system** â€” time-limited credentials; plaintext password returned only once at creation, stored as an irreversible SHA-256 hash; idempotency key deduplication
-- **Redis caching** â€” Catalog and Lease dual-cache to reduce MySQL hot-path pressure
-- **Role separation** â€” `all` / `controller` / `gateway` startup roles for split deployment
+- **Control-plane API** â€?manage Providers, Proxies, Policies, and Leases; read the Catalog
+- **HTTP gateway** â€?supports both plain HTTP forward-proxy requests and CONNECT tunnels (HTTPS)
+- **zfair fair scheduling** â€?Redis ZSET + atomic Lua scripts for weight- and health-aware lease distribution
+- **Health scoring** â€?success +5, connection failure âˆ?0, timeout âˆ?5, auth/protocol failure âˆ?0; circuit breaker trips after 3 consecutive failures with 30 s â€?5 min exponential back-off cooldown
+- **Lease system** â€?time-limited credentials; plaintext password returned only once at creation, stored as an irreversible SHA-256 hash; idempotency key deduplication
+- **Redis caching** â€?Catalog and Lease dual-cache to reduce MySQL hot-path pressure
+- **Role separation** â€?`all` / `controller` / `gateway` startup roles for split deployment
 
 ## Quick Start
 
-> Docker Compose is the recommended local path â€” MySQL and Redis are bundled, no extra setup needed.
+> Docker Compose is the recommended local path â€?MySQL and Redis are bundled, no extra setup needed.
 
 ### 1. Start all services
 
@@ -37,9 +37,9 @@ docker compose --profile bundle up -d --build
 ```
 
 This starts:
-- `mysql` â€” proxy catalog and health-state persistence
-- `redis` â€” zfair scheduling state + Lease/Catalog cache
-- `proxyharbor` â€” combined controller and gateway process
+- `mysql` â€?proxy catalog and health-state persistence
+- `redis` â€?zfair scheduling state + Lease/Catalog cache
+- `proxyharbor` â€?combined controller and gateway process
 
 Default development API key:
 
@@ -59,6 +59,17 @@ PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseT
 PROXYHARBOR_REDIS_ADDR=redis:6379
 ```
 
+## Authentication Modes
+
+ProxyHarbor v0.1.5 supports three authentication modes:
+
+| Mode | Use case | Configuration | Behavior |
+| --- | --- | --- | --- |
+| `legacy-single-key` / `legacy` | Single-tenant development and rollback | `PROXYHARBOR_AUTH_KEY` | One shared key, compatible with v0.1.3 behavior |
+| `tenant-keys` | Static multi-tenant deployments | `PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` | Server maps each key to exactly one tenant; no online changes |
+| `dynamic-keys` | Recommended production mode | `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` | Tenant keys are issued/revoked via Admin API and refreshed from DB within the configured interval |
+
+Upgrade and rollback are configuration-only: keep `PROXYHARBOR_AUTH_KEY` for legacy mode, keep `PROXYHARBOR_TENANT_KEYS` for static tenant keys, or set `PROXYHARBOR_AUTH_MODE=dynamic-keys` with `PROXYHARBOR_ADMIN_KEY` and `PROXYHARBOR_KEY_PEPPER` for dynamic keys.
 ### 2. Check readiness
 
 ```bash
@@ -140,7 +151,7 @@ curl -H 'ProxyHarbor-Key: change-me' \
   http://localhost:8080/v1/leases
 ```
 
-Use the returned `lease_id` as the proxy username and `password` as the proxy password (**returned only once â€” save it immediately**).
+Use the returned `lease_id` as the proxy username and `password` as the proxy password (**returned only once â€?save it immediately**).
 
 ## Startup Modes
 
@@ -189,7 +200,7 @@ Describes a single upstream proxy endpoint:
 | `provider_id` | Owning provider |
 | `endpoint` | Upstream proxy URL |
 | `healthy` | Whether the proxy is eligible for scheduling |
-| `weight` | Relative scheduling weight for zfair â€” higher means more leases |
+| `weight` | Relative scheduling weight for zfair â€?higher means more leases |
 | `health_score` | Health score maintained automatically by gateway feedback |
 | `circuit_open_until` | Circuit-breaker recovery timestamp |
 | `latency_ewma_ms` | Latency exponential weighted moving average (ms) |
@@ -210,18 +221,18 @@ Each lease binds **one proxy node** and issues time-limited credentials for gate
 - Maintains **ready** and **delayed** queues as Redis ZSETs
 - All operations (candidate registration, cooldown promotion, proxy selection, virtual-runtime update) are atomic via Lua scripts
 - Distributes leases fairly under concurrency according to weight and health signals
-- **Refuses to start** when Redis is unavailable in production â€” no silent fallback
+- **Refuses to start** when Redis is unavailable in production â€?no silent fallback
 
 ### Health Scoring
 
 | Event | Score delta |
 | --- | --- |
 | Request success | +5 |
-| Unknown failure | âˆ’5 |
-| Connection failure | âˆ’10 |
-| Timeout | âˆ’15 |
-| Auth failure | âˆ’30 |
-| Protocol error | âˆ’30 |
+| Unknown failure | âˆ? |
+| Connection failure | âˆ?0 |
+| Timeout | âˆ?5 |
+| Auth failure | âˆ?0 |
+| Protocol error | âˆ?0 |
 
 Three consecutive failures trip the circuit breaker. Base cooldown is 30 s, maximum is 5 min (exponential back-off). Use `PROXYHARBOR_SCORING_PROFILE` to switch between `default`, `aggressive`, and `lenient` profiles.
 
@@ -229,8 +240,13 @@ Three consecutive failures trip the circuit breaker. Base cooldown is 30 s, maxi
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `PROXYHARBOR_AUTH_KEY` | Shared key for control-plane API calls | **required** |
-| `PROXYHARBOR_ROLE` | Process role: `all` / `controller` / `gateway` | `all` |
+| `PROXYHARBOR_AUTH_MODE` | Authentication mode: `legacy-single-key` / `tenant-keys` / `dynamic-keys`; `legacy` is accepted by Helm as chart shorthand | inferred from configured keys |
+| `PROXYHARBOR_AUTH_KEY` | Legacy single-key secret | empty |
+| `PROXYHARBOR_TENANT_KEYS` | Static tenant-key map: `tenant:key,tenant2:key2` | empty |
+| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key for dynamic mode (use at least 32 random characters) | empty |
+| `PROXYHARBOR_KEY_PEPPER` | Dynamic-key hashing pepper (use at least 32 random bytes) | empty |
+| `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | Dynamic-key cache refresh interval and revocation propagation target | `5s` |
+| PROXYHARBOR_ROLE | Process role: `all` / `controller` / `gateway` | `all` |
 | `PROXYHARBOR_LOG_FORMAT` | Standard-library slog output format: `json` / `text` | `json` |
 | `PROXYHARBOR_LOG_LEVEL` | Standard-library slog level: `info` / `debug` | `info` |
 | `PROXYHARBOR_STORAGE` | Storage driver: `mysql` / `memory` | `memory` |
@@ -250,10 +266,10 @@ See `.env.example` for a fully commented template.
 
 ## Packaging & Deployment
 
-- `Dockerfile` â€” builds a static Go binary
-- `docker-compose.yaml` â€” local all-in-one or app-only development
-- `charts/proxyharbor` â€” Helm chart for Kubernetes
-- `migrations/mysql/` â€” database initialization SQL
+- `Dockerfile` â€?builds a static Go binary
+- `docker-compose.yaml` â€?local all-in-one or app-only development
+- `charts/proxyharbor` â€?Helm chart for Kubernetes
+- `migrations/mysql/` â€?database initialization SQL
 
 ## Contributing
 
@@ -269,3 +285,5 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+

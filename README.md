@@ -41,7 +41,7 @@ docker compose --profile bundle up -d --build
 - `redis`：zfair 调度状态 + Lease/Catalog 缓存
 - `proxyharbor`：控制面 + 网关一体进程
 
-默认开发 API Key：
+默认开发 API Key（legacy 模式）：
 
 ```env
 PROXYHARBOR_AUTH_KEY=change-me
@@ -58,6 +58,22 @@ PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
 PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
 PROXYHARBOR_REDIS_ADDR=redis:6379
 ```
+
+## Authentication Modes
+
+ProxyHarbor v0.1.5 支持三种鉴权模式：
+
+| 模式 | 适用场景 | 配置 | 特点 |
+| --- | --- | --- | --- |
+| `legacy` | 单租户开发 | `PROXYHARBOR_AUTH_KEY` | 简单单 Key，零行为变化 |
+| `tenant-keys` | 多租户静态配置 | `PROXYHARBOR_TENANT_KEYS` | env 配置，不可在线变更 |
+| `dynamic-keys` | 生产多租户 | `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` | DB 驱动，可在线签发/撤销 |
+
+- **legacy**：v0.1.3 行为，单 `PROXYHARBOR_AUTH_KEY` 控制所有控制面访问。
+- **tenant-keys**：v0.1.4 行为，`PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` 静态映射租户与 Key。
+- **dynamic-keys**：v0.1.5 推荐生产模式，Admin Key 通过 env 注入，Tenant Key 由 `/admin/tenants/{id}/keys` 签发并持久化到 DB，支持 ≤5 秒撤销生效。
+
+升级路径：保留原有 `PROXYHARBOR_AUTH_KEY` 或 `PROXYHARBOR_TENANT_KEYS` 即可零行为变化；新增 `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` 即启用 dynamic-keys 模式。
 
 ### 2. 检查服务就绪状态
 
@@ -229,7 +245,12 @@ go run ./cmd/proxyharbor
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `PROXYHARBOR_AUTH_KEY` | 控制面 API 鉴权密钥 | **必填** |
+| `PROXYHARBOR_AUTH_MODE` | 鉴权模式：`legacy` / `tenant-keys` / `dynamic-keys` | `dynamic-keys` |
+| `PROXYHARBOR_AUTH_KEY` | legacy 模式专用密钥 | 空 |
+| `PROXYHARBOR_TENANT_KEYS` | tenant-keys 模式静态映射 `tnt:key,tnt2:key2` | 空 |
+| `PROXYHARBOR_ADMIN_KEY` | dynamic-keys 模式 Bootstrap Admin Key（≥32 字符） | 空 |
+| `PROXYHARBOR_KEY_PEPPER` | dynamic-keys 模式 Pepper（≥32 字节随机） | 空 |
+| `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | 缓存增量轮询间隔 | `5s` |
 | `PROXYHARBOR_ROLE` | 进程角色：`all` / `controller` / `gateway` | `all` |
 | `PROXYHARBOR_STORAGE` | 存储驱动：`mysql` / `memory` | `mysql` |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL 连接串 | 空 |
