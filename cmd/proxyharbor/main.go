@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -64,7 +65,12 @@ func main() {
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, auth.New(cfg.AuthKey), role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	authn, err := buildAuthenticator(ctx, cfg, store)
+	if err != nil {
+		logger.Error("configure auth", "err", err)
+		os.Exit(1)
+	}
+	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -93,6 +99,29 @@ func main() {
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer drainCancel()
 	healthRecorder.Close(drainCtx)
+}
+
+func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, error) {
+	switch cfg.AuthMode {
+	case "", auth.ModeLegacy:
+		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), nil
+	case auth.ModeTenantKeys:
+		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), nil
+	case auth.ModeDynamicKeys:
+		mysqlStore, ok := store.(interface{ DB() *sql.DB })
+		if !ok {
+			return nil, errors.New("dynamic-keys requires mysql storage")
+		}
+		keyStore := auth.NewMySQLKeyStore(mysqlStore.DB())
+		dynamicStore, err := auth.NewDynamicStore(keyStore, []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
+		if err != nil {
+			return nil, err
+		}
+		go dynamicStore.Run(ctx)
+		return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), nil
+	default:
+		return nil, errors.New("unsupported auth mode")
+	}
 }
 
 func newLogger(cfg config.Config) *slog.Logger {
