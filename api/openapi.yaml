@@ -76,12 +76,19 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
     post:
       summary: Issue tenant key; plaintext is returned once
+      description: Platform-created container keys should set `purpose=platform_container`; platform-api writes the returned plaintext key into a K8s Secret and injects it into the workload.
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/IssueTenantKeyRequest' }
+            examples:
+              platformContainer:
+                value:
+                  label: km-wiki-pod
+                  purpose: platform_container
+                  ttl_seconds: 86400
       responses:
         '201': { description: issued key, content: { application/json: { schema: { $ref: '#/components/schemas/IssuedTenantKey' } } } }
         '400': { $ref: '#/components/responses/Error' }
@@ -294,8 +301,11 @@ components:
       type: object
       properties:
         label: { type: string }
-        purpose: { type: string }
-        ttl_seconds: { type: integer }
+        purpose:
+          type: string
+          description: Use `platform_container` for keys issued by platform-api into container Secrets.
+          enum: [general, platform_container]
+        ttl_seconds: { type: integer, minimum: 1 }
     IssuedTenantKey:
       allOf:
         - $ref: '#/components/schemas/TenantKeyMetadata'

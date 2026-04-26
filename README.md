@@ -265,3 +265,8 @@ go run ./cmd/proxyharbor
 ## 许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
+
+
+## Platform Contract (v0.1.5 Milestone C)
+
+ProxyHarbor v0.1.5 defines a platform-container contract for dynamic tenant keys. The platform-api flow is: create an instance, call ProxyHarbor Admin API to create a tenant key with `purpose=platform_container`, write the returned one-time key into a Kubernetes Secret, then inject it into the workload as `PROXYHARBOR_KEY`. Container SDKs should read keys in this order: env `PROXYHARBOR_KEY`, mounted file `/var/run/proxyharbor/key`, then a future IMDS-like sidecar. See `docs/versions/v0.1.5.md` for the full contract and rollback notes.

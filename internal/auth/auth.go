@@ -71,6 +71,13 @@ func (a *Authenticator) WithAdminKey(adminKey string) *Authenticator {
 	return a
 }
 
+func (a *Authenticator) CacheEntries() int {
+	if a == nil || a.dynamic == nil {
+		return 0
+	}
+	return a.dynamic.Len()
+}
+
 func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) {
 	if a == nil || r == nil {
 		return domain.Principal{}, domain.ErrAuthFailed

@@ -71,6 +71,12 @@ func (d *DynamicStore) Lookup(presented string) (entry, bool) {
 	return e, true
 }
 
+func (d *DynamicStore) Len() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return len(d.byHash)
+}
+
 // Run starts the background refresh loop. It blocks until ctx is done.
 func (d *DynamicStore) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.refresh)
