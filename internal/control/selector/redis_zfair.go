@@ -169,6 +169,12 @@ func NewRedisZFair(ctx context.Context, cfg RedisZFairConfig) (*RedisZFair, erro
 
 func (s *RedisZFair) Close() error { return s.client.Close() }
 
+func (s *RedisZFair) Check(ctx context.Context) error {
+	pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	return s.client.Ping(pingCtx).Err()
+}
+
 func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	if len(candidates) == 0 {
 		return domain.Proxy{}, domain.ErrNoHealthyProxy
@@ -243,7 +249,7 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, tenantID string, cand
 		return err
 	}
 	if !locked {
-		return nil
+		return s.waitForRebuild(ctx, tenantID)
 	}
 	defer s.client.Del(context.Background(), lockKey)
 
@@ -270,6 +276,29 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, tenantID string, cand
 	}
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+func (s *RedisZFair) waitForRebuild(ctx context.Context, tenantID string) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(250 * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+			exists, err := s.client.Exists(ctx, rebuildLockKey(tenantID)).Result()
+			if err != nil {
+				return err
+			}
+			if exists == 0 {
+				return nil
+			}
+		}
+	}
 }
 
 func readyKey(tenantID string) string   { return "proxyharbor:{" + tenantID + "}:selector:ready" }

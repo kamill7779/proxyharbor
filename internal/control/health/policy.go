@@ -92,10 +92,12 @@ func ClassifyProxyHTTPStatus(statusCode int, header http.Header) (FailureKind, b
 			return FailureTimeout, true
 		}
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		if statusCode == http.StatusGatewayTimeout {
-			return FailureTimeout, true
+		if isProxyMarked(header) {
+			if statusCode == http.StatusGatewayTimeout {
+				return FailureTimeout, true
+			}
+			return FailureConn, true
 		}
-		return FailureConn, true
 	}
 	return FailureUnknown, false
 }
