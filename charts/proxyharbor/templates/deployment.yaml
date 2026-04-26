@@ -57,8 +57,8 @@ spec:
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
-            # ----- 凭据：existingSecret 优先，否则取明文 -----
-            # ----- 认证配置 -----
+            # ----- Credentials: existingSecret takes precedence; otherwise use generated plaintext secrets. -----
+            # ----- Auth config -----
             - name: PROXYHARBOR_AUTH_MODE
               value: {{ ternary "legacy-single-key" .Values.auth.mode (eq .Values.auth.mode "legacy") | quote }}
             {{- if or (eq .Values.auth.mode "legacy") (eq .Values.auth.mode "legacy-single-key") }}
