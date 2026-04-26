@@ -66,15 +66,22 @@ type Lease struct {
 }
 
 type Proxy struct {
-	ID          string            `json:"id"`
-	TenantID    string            `json:"tenant_id"`
-	ProviderID  string            `json:"provider_id,omitempty"`
-	Endpoint    string            `json:"endpoint"`
-	Healthy     bool              `json:"healthy"`
-	Weight      int               `json:"weight"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	LastSeenAt  time.Time         `json:"last_seen_at"`
-	FailureHint string            `json:"failure_hint,omitempty"`
+	ID                  string            `json:"id"`
+	TenantID            string            `json:"tenant_id"`
+	ProviderID          string            `json:"provider_id,omitempty"`
+	Endpoint            string            `json:"endpoint"`
+	Healthy             bool              `json:"healthy"`
+	Weight              int               `json:"weight"`
+	HealthScore         int               `json:"health_score"`
+	ConsecutiveFailures int               `json:"consecutive_failures"`
+	CircuitOpenUntil    time.Time         `json:"circuit_open_until,omitempty"`
+	LatencyEWMAms       int               `json:"latency_ewma_ms,omitempty"`
+	LastCheckedAt       time.Time         `json:"last_checked_at,omitempty"`
+	LastSuccessAt       time.Time         `json:"last_success_at,omitempty"`
+	LastFailureAt       time.Time         `json:"last_failure_at,omitempty"`
+	Labels              map[string]string `json:"labels,omitempty"`
+	LastSeenAt          time.Time         `json:"last_seen_at"`
+	FailureHint         string            `json:"failure_hint,omitempty"`
 }
 
 type Provider struct {

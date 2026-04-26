@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kamill7779/proxyharbor/internal/control/health"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
@@ -43,6 +44,7 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	proxyURL, err := url.Parse(proxy.Endpoint)
 	if err != nil {
+		s.recordProxyFailure(r.Context(), lease, health.FailureUnknown, "invalid_proxy_endpoint")
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
@@ -58,6 +60,7 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := transport.RoundTrip(out)
 	if err != nil {
 		s.recordGatewayAudit(r.Context(), lease, "gateway_http_error", target, err.Error())
+		s.recordProxyFailure(r.Context(), lease, classifyHTTPProxyError(err), err.Error())
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
@@ -67,6 +70,7 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 	written, _ := io.Copy(w, resp.Body)
 	s.recordGatewayUsage(r.Context(), lease, 0, written)
 	s.recordGatewayAudit(r.Context(), lease, "gateway_http_forward", target, time.Since(started).String())
+	s.recordProxySuccess(r.Context(), lease, time.Since(started), "http_forward")
 }
 
 func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +86,15 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	proxyURL, err := url.Parse(proxy.Endpoint)
 	if err != nil {
+		s.recordProxyFailure(r.Context(), lease, health.FailureUnknown, "invalid_proxy_endpoint")
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
+	started := time.Now()
 	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 10*time.Second)
 	if err != nil {
 		s.recordGatewayAudit(r.Context(), lease, "gateway_connect_error", r.Host, err.Error())
+		s.recordProxyFailure(r.Context(), lease, classifyNetError(err), err.Error())
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
@@ -101,6 +108,7 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 	proxyResp, err := http.ReadResponse(proxyReader, r)
 	if err != nil || proxyResp.StatusCode/100 != 2 {
 		s.recordGatewayAudit(r.Context(), lease, "gateway_connect_error", r.Host, "upstream_connect_failed")
+		s.recordProxyFailure(r.Context(), lease, classifyConnectResponse(err, proxyResp), "upstream_connect_failed")
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
@@ -121,6 +129,7 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 	<-done
 	s.recordGatewayUsage(r.Context(), lease, 0, 0)
 	s.recordGatewayAudit(r.Context(), lease, "gateway_connect_forward", r.Host, "ok")
+	s.recordProxySuccess(r.Context(), lease, time.Since(started), "connect_forward")
 }
 
 func gatewayCredentials(r *http.Request) (string, string, string, bool) {
@@ -173,6 +182,44 @@ func copyHeader(dst, src http.Header) {
 func proxyCopy(done chan<- struct{}, dst io.Writer, src io.Reader) {
 	_, _ = io.Copy(dst, src)
 	done <- struct{}{}
+}
+
+func (s *Server) recordProxySuccess(ctx context.Context, lease domain.Lease, latency time.Duration, hint string) {
+	if s.healthRecorder == nil {
+		return
+	}
+	s.healthRecorder.RecordProxyResult(ctx, lease.TenantID, lease.ProxyID, health.ProxyHealthResult{Success: true, LatencyMS: int(latency.Milliseconds()), Hint: hint})
+}
+
+func (s *Server) recordProxyFailure(ctx context.Context, lease domain.Lease, kind health.FailureKind, hint string) {
+	if s.healthRecorder == nil {
+		return
+	}
+	s.healthRecorder.RecordProxyResult(ctx, lease.TenantID, lease.ProxyID, health.ProxyHealthResult{Success: false, Kind: kind, Hint: hint})
+}
+
+func classifyHTTPProxyError(err error) health.FailureKind {
+	return classifyNetError(err)
+}
+
+func classifyNetError(err error) health.FailureKind {
+	if err == nil {
+		return health.FailureUnknown
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return health.FailureTimeout
+	}
+	return health.FailureConn
+}
+
+func classifyConnectResponse(err error, resp *http.Response) health.FailureKind {
+	if err != nil {
+		return health.FailureProtocol
+	}
+	if resp != nil && resp.StatusCode == http.StatusProxyAuthRequired {
+		return health.FailureAuth
+	}
+	return health.FailureProtocol
 }
 
 func (s *Server) recordGatewayUsage(ctx context.Context, lease domain.Lease, sent, recv int64) {

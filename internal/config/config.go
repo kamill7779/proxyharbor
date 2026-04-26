@@ -1,11 +1,11 @@
-// Package config 加载 proxyharbor 运行配置。
+// Package config loads ProxyHarbor runtime configuration.
 //
-// 加载顺序（后者覆盖前者）：
-//  1. 内置默认值
-//  2. 环境变量
-//  3. 命令行 flag
+// Load order, later values override earlier values:
+//  1. built-in defaults
+//  2. environment variables
+//  3. command-line flags
 //
-// 环境变量统一前缀 PROXYHARBOR_*。
+// Environment variables use the PROXYHARBOR_* prefix.
 package config
 
 import (
@@ -18,34 +18,44 @@ import (
 	"time"
 )
 
-// StorageDriver 决定底层 Store 实现。
 type StorageDriver string
 
 const (
-	DriverMemory StorageDriver = "memory" // 仅供本地开发与测试
-	DriverMySQL  StorageDriver = "mysql"  // 生产推荐
+	DriverMemory StorageDriver = "memory"
+	DriverMySQL  StorageDriver = "mysql"
 )
 
-// Config 是 proxyharbor 进程启动所需的全部配置。
 type Config struct {
-	Role                       string        // all | controller | gateway
-	Addr                       string        // HTTP 监听地址
-	GatewayURL                 string        // Lease 中回填的网关地址
-	AuthKey                    string        // ProxyHarbor-Key 头校验值
-	StorageDriver              StorageDriver // memory | mysql
-	MySQLDSN                   string        // 形如 user:pass@tcp(host:3306)/db?parseTime=true
+	Role                       string
+	Addr                       string
+	GatewayURL                 string
+	AuthKey                    string
+	StorageDriver              StorageDriver
+	MySQLDSN                   string
 	MySQLMaxOpen               int
 	MySQLMaxIdle               int
 	MySQLConnMaxAge            time.Duration
-	RedisAddr                  string // 例如 redis:6379；为空时禁用缓存
+	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
-	CacheTTL                   time.Duration // Catalog/Lease 默认缓存时长
+	CacheTTL                   time.Duration
 	ShutdownTimeout            time.Duration
-	AllowInternalProxyEndpoint bool // 仅 dev/本地：允许上游代理指向 loopback/私网
+	AllowInternalProxyEndpoint bool
+	Selector                   string
+	SelectorRedisRequired      bool
+	ScoringProfile             string
+	HealthFlushInterval        time.Duration
+	HealthBufferMax            int
+	ZFairQuantum               int
+	ZFairDefaultLatencyMS      int
+	ZFairMaxPromote            int
+	HealthcheckURL             string
+	HealthcheckInterval        time.Duration
+	HealthcheckTimeout         time.Duration
+	StickyEnabled              bool
+	StickyPolicy               string
 }
 
-// Load 解析环境变量与命令行 flag 后返回配置。
 func Load(args []string) (Config, error) {
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
@@ -63,16 +73,42 @@ func Load(args []string) (Config, error) {
 		CacheTTL:                   envDur("PROXYHARBOR_CACHE_TTL", 60*time.Second),
 		ShutdownTimeout:            envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		AllowInternalProxyEndpoint: envBool("PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT", false),
+		Selector:                   envStr("PROXYHARBOR_SELECTOR", "zfair"),
+		SelectorRedisRequired:      envBool("PROXYHARBOR_SELECTOR_REDIS_REQUIRED", true),
+		ScoringProfile:             envStr("PROXYHARBOR_SCORING_PROFILE", "default"),
+		HealthFlushInterval:        envDur("PROXYHARBOR_HEALTH_FLUSH_INTERVAL", 5*time.Second),
+		HealthBufferMax:            envInt("PROXYHARBOR_HEALTH_BUFFER_MAX", 10000),
+		ZFairQuantum:               envInt("PROXYHARBOR_ZFAIR_QUANTUM", 1000),
+		ZFairDefaultLatencyMS:      envInt("PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS", 200),
+		ZFairMaxPromote:            envInt("PROXYHARBOR_ZFAIR_MAX_PROMOTE", 128),
+		HealthcheckURL:             os.Getenv("PROXYHARBOR_HEALTHCHECK_URL"),
+		HealthcheckInterval:        envDur("PROXYHARBOR_HEALTHCHECK_INTERVAL", 30*time.Second),
+		HealthcheckTimeout:         envDur("PROXYHARBOR_HEALTHCHECK_TIMEOUT", 5*time.Second),
+		StickyEnabled:              envBool("PROXYHARBOR_STICKY_ENABLED", false),
+		StickyPolicy:               envStr("PROXYHARBOR_STICKY_POLICY", "none"),
 	}
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
-	fs.StringVar(&cfg.Role, "role", cfg.Role, "进程角色：all | controller | gateway")
-	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP 监听地址")
-	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "lease 中回填的 gateway URL")
-	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key 头校验值")
-	storageStr := fs.String("storage", string(cfg.StorageDriver), "存储驱动：memory | mysql")
+	fs.StringVar(&cfg.Role, "role", cfg.Role, "process role: all | controller | gateway")
+	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
+	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
+	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
+	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
 	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
-	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis 地址，为空禁用缓存")
+	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
+	fs.StringVar(&cfg.Selector, "selector", cfg.Selector, "proxy selector")
+	fs.BoolVar(&cfg.SelectorRedisRequired, "selector-redis-required", cfg.SelectorRedisRequired, "require Redis for selector")
+	fs.StringVar(&cfg.ScoringProfile, "scoring-profile", cfg.ScoringProfile, "health scoring profile")
+	fs.DurationVar(&cfg.HealthFlushInterval, "health-flush-interval", cfg.HealthFlushInterval, "health flush interval")
+	fs.IntVar(&cfg.HealthBufferMax, "health-buffer-max", cfg.HealthBufferMax, "health event buffer size")
+	fs.IntVar(&cfg.ZFairQuantum, "zfair-quantum", cfg.ZFairQuantum, "zfair scheduler quantum")
+	fs.IntVar(&cfg.ZFairDefaultLatencyMS, "zfair-default-latency-ms", cfg.ZFairDefaultLatencyMS, "zfair default latency ms")
+	fs.IntVar(&cfg.ZFairMaxPromote, "zfair-max-promote", cfg.ZFairMaxPromote, "zfair max delayed promotions")
+	fs.StringVar(&cfg.HealthcheckURL, "healthcheck-url", cfg.HealthcheckURL, "active healthcheck URL")
+	fs.DurationVar(&cfg.HealthcheckInterval, "healthcheck-interval", cfg.HealthcheckInterval, "active healthcheck interval")
+	fs.DurationVar(&cfg.HealthcheckTimeout, "healthcheck-timeout", cfg.HealthcheckTimeout, "active healthcheck timeout")
+	fs.BoolVar(&cfg.StickyEnabled, "sticky-enabled", cfg.StickyEnabled, "enable sticky affinity placeholder")
+	fs.StringVar(&cfg.StickyPolicy, "sticky-policy", cfg.StickyPolicy, "sticky affinity policy")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -82,21 +118,36 @@ func Load(args []string) (Config, error) {
 
 func (c Config) validate() error {
 	if c.AuthKey == "" {
-		return errors.New("auth key 必须提供：设置 -auth-key 或环境变量 PROXYHARBOR_AUTH_KEY")
+		return errors.New("auth key is required: set -auth-key or PROXYHARBOR_AUTH_KEY")
 	}
 	switch c.Role {
 	case "all", "controller", "gateway":
 	default:
-		return fmt.Errorf("非法 role: %q", c.Role)
+		return fmt.Errorf("invalid role: %q", c.Role)
 	}
 	switch c.StorageDriver {
 	case DriverMemory:
 	case DriverMySQL:
 		if strings.TrimSpace(c.MySQLDSN) == "" {
-			return errors.New("storage=mysql 需要 -mysql-dsn 或 PROXYHARBOR_MYSQL_DSN")
+			return errors.New("storage=mysql requires -mysql-dsn or PROXYHARBOR_MYSQL_DSN")
 		}
 	default:
-		return fmt.Errorf("不支持的 storage 驱动: %q", c.StorageDriver)
+		return fmt.Errorf("unsupported storage driver: %q", c.StorageDriver)
+	}
+	if c.Selector != "zfair" {
+		return fmt.Errorf("unsupported selector: %q", c.Selector)
+	}
+	if c.SelectorRedisRequired && strings.TrimSpace(c.RedisAddr) == "" {
+		return errors.New("selector=zfair requires PROXYHARBOR_REDIS_ADDR when selector redis is required")
+	}
+	if c.HealthBufferMax <= 0 {
+		return errors.New("health buffer max must be positive")
+	}
+	if c.ZFairQuantum <= 0 || c.ZFairDefaultLatencyMS <= 0 || c.ZFairMaxPromote <= 0 {
+		return errors.New("zfair numeric settings must be positive")
+	}
+	if c.StickyPolicy == "" {
+		return errors.New("sticky policy must not be empty")
 	}
 	return nil
 }

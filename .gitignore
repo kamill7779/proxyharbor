@@ -2,3 +2,10 @@
 *.test
 coverage.out
 
+
+.worktree/
+# local perf/load-test assets
+/cmd/fakeproxy/
+/cmd/loadgen/
+/perf/
+/docker-compose.perf.yaml
