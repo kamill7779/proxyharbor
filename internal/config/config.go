@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/auth"
 )
 
 type StorageDriver string
@@ -30,6 +32,11 @@ type Config struct {
 	Addr                       string
 	GatewayURL                 string
 	AuthKey                    string
+	AuthMode                   auth.AuthMode
+	AdminKey                   string
+	KeyPepper                  string
+	AuthRefreshInterval        time.Duration
+	TenantKeys                 string
 	LogFormat                  string
 	LogLevel                   string
 	StorageDriver              StorageDriver
@@ -59,11 +66,17 @@ type Config struct {
 }
 
 func Load(args []string) (Config, error) {
+	authModeStr := envStr("PROXYHARBOR_AUTH_MODE", "")
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
 		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
+		AuthMode:                   auth.AuthMode(authModeStr),
+		AdminKey:                   os.Getenv("PROXYHARBOR_ADMIN_KEY"),
+		KeyPepper:                  os.Getenv("PROXYHARBOR_KEY_PEPPER"),
+		AuthRefreshInterval:        envDur("PROXYHARBOR_AUTH_REFRESH_INTERVAL", 5*time.Second),
+		TenantKeys:                 os.Getenv("PROXYHARBOR_TENANT_KEYS"),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
 		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
@@ -97,6 +110,11 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
 	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
+	authModeFlag := fs.String("auth-mode", authModeStr, "auth mode: legacy-single-key | tenant-keys | dynamic-keys")
+	fs.StringVar(&cfg.AdminKey, "admin-key", cfg.AdminKey, "bootstrap admin key")
+	fs.StringVar(&cfg.KeyPepper, "key-pepper", cfg.KeyPepper, "key hashing pepper for dynamic mode")
+	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
+	fs.StringVar(&cfg.TenantKeys, "tenant-keys", cfg.TenantKeys, "static tenant keys: tenant_id:key,tenant_id:key")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
@@ -119,13 +137,14 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if *authModeFlag != "" {
+		cfg.AuthMode = auth.AuthMode(*authModeFlag)
+	}
+	cfg.AuthMode = resolveAuthMode(cfg)
 	return cfg, cfg.validate()
 }
 
 func (c Config) validate() error {
-	if c.AuthKey == "" {
-		return errors.New("auth key is required: set -auth-key or PROXYHARBOR_AUTH_KEY")
-	}
 	switch c.Role {
 	case "all", "controller", "gateway":
 	default:
@@ -165,7 +184,49 @@ func (c Config) validate() error {
 	if c.StickyPolicy == "" {
 		return errors.New("sticky policy must not be empty")
 	}
+
+	mode := resolveAuthMode(c)
+	switch mode {
+	case auth.ModeDynamicKeys:
+		if c.AdminKey == "" {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_ADMIN_KEY")
+		}
+		if c.KeyPepper == "" {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_KEY_PEPPER")
+		}
+		if len(c.KeyPepper) < 32 {
+			return errors.New("PROXYHARBOR_KEY_PEPPER must be at least 32 bytes")
+		}
+	case auth.ModeTenantKeys:
+		if c.TenantKeys == "" {
+			return errors.New("auth mode tenant-keys requires PROXYHARBOR_TENANT_KEYS")
+		}
+	case auth.ModeLegacy:
+		if c.AuthKey == "" {
+			return errors.New("auth mode legacy-single-key requires -auth-key or PROXYHARBOR_AUTH_KEY")
+		}
+	case "":
+		return errors.New("auth configuration requires PROXYHARBOR_TENANT_KEYS, PROXYHARBOR_AUTH_KEY, or PROXYHARBOR_ADMIN_KEY")
+	default:
+		return fmt.Errorf("unsupported auth mode: %q", mode)
+	}
 	return nil
+}
+
+func resolveAuthMode(c Config) auth.AuthMode {
+	if c.AuthMode != "" {
+		return c.AuthMode
+	}
+	if c.TenantKeys != "" {
+		return auth.ModeTenantKeys
+	}
+	if c.AuthKey != "" {
+		return auth.ModeLegacy
+	}
+	if c.AdminKey != "" {
+		return auth.ModeDynamicKeys
+	}
+	return ""
 }
 
 func envStr(key, fallback string) string {
