@@ -176,6 +176,19 @@ func ValidTenantID(tenantID string) bool {
 
 func ParseTenantKeys(raw string) map[string]string {
 	out := make(map[string]string)
+	for _, mapping := range parseTenantKeyMappings(raw) {
+		out[mapping.key] = mapping.tenantID
+	}
+	return out
+}
+
+type tenantKeyMapping struct {
+	tenantID string
+	key      string
+}
+
+func parseTenantKeyMappings(raw string) []tenantKeyMapping {
+	var out []tenantKeyMapping
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -190,9 +203,34 @@ func ParseTenantKeys(raw string) map[string]string {
 		if tenantID == "" || key == "" {
 			continue
 		}
-		out[key] = tenantID
+		out = append(out, tenantKeyMapping{tenantID: tenantID, key: key})
 	}
 	return out
+}
+
+func ValidateTenantKeys(raw string) error {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			return fmt.Errorf("invalid tenant key mapping %q: expected tenant_id:key", part)
+		}
+		tenantID := strings.TrimSpace(kv[0])
+		key := strings.TrimSpace(kv[1])
+		if tenantID == "" || key == "" {
+			return fmt.Errorf("invalid tenant key mapping %q: tenant_id and key are required", part)
+		}
+		if !ValidTenantID(tenantID) {
+			return fmt.Errorf("invalid tenant key mapping %q: invalid tenant_id", part)
+		}
+	}
+	if len(parseTenantKeyMappings(raw)) == 0 {
+		return fmt.Errorf("invalid tenant key mappings: at least one tenant_id:key mapping is required")
+	}
+	return nil
 }
 
 func Fingerprint(key string) string {

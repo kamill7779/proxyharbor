@@ -131,3 +131,24 @@ func TestAuthenticator_ModeSwitching(t *testing.T) {
 		t.Fatalf("dynamic-keys mode failed: %+v %v", p, err)
 	}
 }
+
+func TestValidateTenantKeysRejectsMalformedMappings(t *testing.T) {
+	cases := []string{
+		"broken",
+		"tenant:",
+		":key",
+		"Tenant:key",
+		",",
+	}
+	for _, raw := range cases {
+		if err := ValidateTenantKeys(raw); err == nil {
+			t.Fatalf("ValidateTenantKeys(%q) expected error", raw)
+		}
+	}
+}
+
+func TestValidateTenantKeysAcceptsValidMappings(t *testing.T) {
+	if err := ValidateTenantKeys("tenant_a:key_a, tenant-b:key-b"); err != nil {
+		t.Fatalf("ValidateTenantKeys returned error: %v", err)
+	}
+}

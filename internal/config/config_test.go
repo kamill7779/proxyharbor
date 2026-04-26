@@ -137,6 +137,24 @@ func TestResolveAuthModeLegacyOK(t *testing.T) {
 	}
 }
 
+func TestTenantKeysModeRejectsMalformedConfig(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeTenantKeys,
+		TenantKeys:            "broken",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
+	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "invalid PROXYHARBOR_TENANT_KEYS") {
+		t.Fatalf("expected invalid tenant keys error, got %v", err)
+	}
+}
+
 func TestResolveAuthModeDefault(t *testing.T) {
 	// AdminKey only -> dynamic
 	cfg := validTestConfig(Config{

@@ -210,6 +210,9 @@ func (c Config) validate() error {
 		if c.TenantKeys == "" {
 			return errors.New("auth mode tenant-keys requires PROXYHARBOR_TENANT_KEYS")
 		}
+		if err := auth.ValidateTenantKeys(c.TenantKeys); err != nil {
+			return fmt.Errorf("invalid PROXYHARBOR_TENANT_KEYS: %w", err)
+		}
 	case auth.ModeLegacy:
 		if c.AuthKey == "" {
 			return errors.New("auth mode legacy-single-key requires -auth-key or PROXYHARBOR_AUTH_KEY")

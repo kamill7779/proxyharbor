@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -166,12 +167,21 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 			if req.Purpose == "" {
 				req.Purpose = "general"
 			}
-			plaintext := generateKey()
+			plaintext, err := generateKey()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+				return
+			}
 			keyHash := hashWithPepper(h.pepper, plaintext)
 			keyFP := fingerprint(plaintext)
 			now := time.Now().UTC()
+			keyID, err := randomKeyID()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+				return
+			}
 			tk := auth.TenantKey{
-				ID:        "k_" + randomKeyID(),
+				ID:        "k_" + keyID,
 				TenantID:  id,
 				KeyHash:   keyHash,
 				KeyFP:     keyFP,
@@ -273,12 +283,16 @@ func (h *adminHandler) revokeTenantKeys(ctx context.Context, tenantID string) er
 	return nil
 }
 
-func generateKey() string {
+func generateKey() (string, error) {
 	env := os.Getenv("PROXYHARBOR_ENV")
 	if env == "" {
 		env = "live"
 	}
-	return "phk_" + env + "_" + randomHex(32)
+	random, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	return "phk_" + env + "_" + random, nil
 }
 
 func hashWithPepper(pepper, key string) string {
@@ -291,14 +305,16 @@ func fingerprint(key string) string {
 	return hex.EncodeToString(h[:4])
 }
 
-func randomKeyID() string {
+func randomKeyID() (string, error) {
 	return randomHex(8)
 }
 
-func randomHex(n int) string {
+var cryptoRandReader io.Reader = rand.Reader
+
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return strings.Repeat("0", n*2)
+	if _, err := io.ReadFull(cryptoRandReader, b); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
