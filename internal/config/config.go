@@ -30,6 +30,8 @@ type Config struct {
 	Addr                       string
 	GatewayURL                 string
 	AuthKey                    string
+	AuthMode                   string
+	AuthCacheEntries           int
 	LogFormat                  string
 	LogLevel                   string
 	StorageDriver              StorageDriver
@@ -64,6 +66,8 @@ func Load(args []string) (Config, error) {
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
 		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
+		AuthMode:                   envStr("PROXYHARBOR_AUTH_MODE", "legacy-single-key"),
+		AuthCacheEntries:           envInt("PROXYHARBOR_AUTH_CACHE_ENTRIES", 0),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
 		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
@@ -97,6 +101,8 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
 	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
+	fs.StringVar(&cfg.AuthMode, "auth-mode", cfg.AuthMode, "auth mode for startup log: legacy-single-key | tenant-keys | dynamic-keys")
+	fs.IntVar(&cfg.AuthCacheEntries, "auth-cache-entries", cfg.AuthCacheEntries, "dynamic auth cache entries for startup log; 0 when unavailable")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")

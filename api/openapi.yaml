@@ -180,6 +180,35 @@ paths:
       responses:
         '200': { description: valid lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
         '400': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{tenant_id}/keys:
+    post:
+      summary: Create a tenant key for platform-managed containers
+      description: Milestone C platform contract. Implementations may depend on Milestone B; clients must send purpose=platform_container for container workloads.
+      security:
+        - headerKey: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminCreateTenantKeyRequest' }
+            examples:
+              platformContainer:
+                value:
+                  label: km-wiki-pod
+                  purpose: platform_container
+                  ttl_seconds: 86400
+      responses:
+        '201':
+          description: created; plaintext key is returned once for K8s Secret injection
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminCreateTenantKeyResponse' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     headerKey: { type: apiKey, in: header, name: ProxyHarbor-Key }
@@ -196,6 +225,35 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   schemas:
+    AdminCreateTenantKeyRequest:
+      type: object
+      required: [purpose]
+      properties:
+        label:
+          type: string
+          description: Human-readable workload or instance label.
+        purpose:
+          type: string
+          enum: [platform_container]
+          description: Required by Milestone C for platform-created container keys.
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          description: Optional platform-managed key TTL.
+    AdminCreateTenantKeyResponse:
+      type: object
+      properties:
+        key_id: { type: string }
+        tenant_id: { type: string }
+        key:
+          type: string
+          description: Plaintext key returned once; platform-api writes it into a K8s Secret.
+        key_fp: { type: string }
+        purpose:
+          type: string
+          enum: [platform_container]
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
     Error:
       type: object
       properties:

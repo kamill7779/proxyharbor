@@ -75,7 +75,8 @@ func main() {
 	go func() {
 		logger.Info("proxyharbor listening",
 			"role", cfg.Role, "addr", cfg.Addr, "storage", cfg.StorageDriver,
-			"redis", cfg.RedisAddr != "", "selector", cfg.Selector)
+			"redis", cfg.RedisAddr != "", "selector", cfg.Selector,
+			"auth_mode", cfg.AuthMode, "auth_cache_entries", cfg.AuthCacheEntries)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("listen", "err", err)
 			stop()
