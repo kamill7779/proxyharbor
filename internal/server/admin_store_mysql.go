@@ -80,13 +80,21 @@ func (s *MySQLAdminStore) UpdateTenant(ctx context.Context, id string, displayNa
 		return err
 	}
 	if displayName != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE tenants SET display_name = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, *displayName, time.Now().UTC(), id); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE tenants SET display_name = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, *displayName, time.Now().UTC(), id)
+		if err != nil {
 			return err
+		}
+		if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+			return domain.ErrTenantNotFound
 		}
 	}
 	if status != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE tenants SET status = ?, deleted_at = CASE WHEN ? = 'deleted' THEN ? ELSE deleted_at END, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, *status, *status, time.Now().UTC(), time.Now().UTC(), id); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE tenants SET status = ?, deleted_at = CASE WHEN ? = 'deleted' THEN ? ELSE deleted_at END, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, *status, *status, time.Now().UTC(), time.Now().UTC(), id)
+		if err != nil {
 			return err
+		}
+		if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+			return domain.ErrTenantNotFound
 		}
 		if *status == "disabled" || *status == "deleted" {
 			if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE tenant_id = ? AND revoked_at IS NULL`, time.Now().UTC(), time.Now().UTC(), id); err != nil {

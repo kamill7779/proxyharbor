@@ -194,6 +194,9 @@ func (c Config) validate() error {
 		if c.AdminKey == "" {
 			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_ADMIN_KEY")
 		}
+		if len(c.AdminKey) < 32 {
+			return errors.New("PROXYHARBOR_ADMIN_KEY must be at least 32 bytes")
+		}
 		if c.KeyPepper == "" {
 			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_KEY_PEPPER")
 		}

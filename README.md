@@ -73,7 +73,7 @@ ProxyHarbor v0.1.5 支持三种鉴权模式：
 - **tenant-keys**：v0.1.4 行为，`PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` 静态映射租户与 Key。
 - **dynamic-keys**：v0.1.5 推荐生产模式，Admin Key 通过 env 注入，Tenant Key 由 `/admin/tenants/{id}/keys` 签发并持久化到 DB，支持 ≤5 秒撤销生效。
 
-升级路径：保留原有 `PROXYHARBOR_AUTH_KEY` 或 `PROXYHARBOR_TENANT_KEYS` 即可零行为变化；新增 `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` 即启用 dynamic-keys 模式。
+升级路径：保留原有 `PROXYHARBOR_AUTH_KEY` 或 `PROXYHARBOR_TENANT_KEYS` 即可零行为变化；设置 `PROXYHARBOR_AUTH_MODE=dynamic-keys` 并提供 `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` 即启用 dynamic-keys 模式。
 
 ### 2. 检查服务就绪状态
 
@@ -291,5 +291,6 @@ go run ./cmd/proxyharbor
 ## Platform Contract (v0.1.5 Milestone C)
 
 ProxyHarbor v0.1.5 defines a platform-container contract for dynamic tenant keys. The platform-api flow is: create an instance, call ProxyHarbor Admin API to create a tenant key with `purpose=platform_container`, write the returned one-time key into a Kubernetes Secret, then inject it into the workload as `PROXYHARBOR_KEY`. Container SDKs should read keys in this order: env `PROXYHARBOR_KEY`, mounted file `/var/run/proxyharbor/key`, then a future IMDS-like sidecar. See `docs/versions/v0.1.5.md` for the full contract and rollback notes.
+
 
 
