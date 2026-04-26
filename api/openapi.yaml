@@ -1,4 +1,4 @@
-openapi: 3.1.0
+﻿openapi: 3.1.0
 info:
   title: ProxyHarbor API
   version: 0.1.0-alpha
@@ -23,6 +23,82 @@ paths:
       security: []
       responses:
         '200': { description: version }
+  /admin/tenants:
+    get:
+      summary: List tenants
+      responses:
+        '200': { description: tenants, content: { application/json: { schema: { type: object, properties: { tenants: { type: array, items: { $ref: '#/components/schemas/Tenant' } } } } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Create tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTenantRequest' }
+      responses:
+        '201': { description: tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{id}:
+    patch:
+      summary: Update tenant metadata/status
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTenantRequest' }
+      responses:
+        '200': { description: tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Soft delete tenant
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: soft deleted }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{id}/keys:
+    get:
+      summary: List tenant key metadata only
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: key metadata, content: { application/json: { schema: { type: object, properties: { keys: { type: array, items: { $ref: '#/components/schemas/TenantKeyMetadata' } } } } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Issue tenant key; plaintext is returned once
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueTenantKeyRequest' }
+      responses:
+        '201': { description: issued key, content: { application/json: { schema: { $ref: '#/components/schemas/IssuedTenantKey' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/tenants/{id}/keys/{kid}:
+    delete:
+      summary: Revoke tenant key and bump tenant key version
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: kid, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: revoked }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /v1/leases:
     post:
       parameters:
@@ -196,6 +272,47 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   schemas:
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    CreateTenantRequest:
+      type: object
+      required: [id, display_name]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+    UpdateTenantRequest:
+      type: object
+      properties:
+        display_name: { type: string }
+        status: { type: string, enum: [active, enabled, disabled, deleted] }
+    IssueTenantKeyRequest:
+      type: object
+      properties:
+        label: { type: string }
+        purpose: { type: string }
+        ttl_seconds: { type: integer }
+    IssuedTenantKey:
+      allOf:
+        - $ref: '#/components/schemas/TenantKeyMetadata'
+        - type: object
+          properties:
+            key: { type: string, description: Plaintext key returned only on issue }
+    TenantKeyMetadata:
+      type: object
+      properties:
+        key_id: { type: string }
+        tenant_id: { type: string }
+        key_fp: { type: string }
+        label: { type: string }
+        purpose: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
     Error:
       type: object
       properties:
@@ -286,3 +403,5 @@ components:
         renew_before: { type: string, format: date-time }
         catalog_version: { type: string }
         candidate_set_id: { type: string }
+
+
