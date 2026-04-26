@@ -64,7 +64,12 @@ func main() {
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, auth.New(cfg.AuthKey), role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	authn := newAuthenticator(cfg)
+	logger.Info("auth initialised",
+		"mode", string(authn.Mode()),
+		"tenants", authn.Tenants(),
+		"keys", len(cfg.TenantKeys))
+	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -105,6 +110,16 @@ func newLogger(cfg config.Config) *slog.Logger {
 		return slog.New(slog.NewTextHandler(os.Stdout, options))
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, options))
+}
+
+// newAuthenticator selects between strict tenant-key auth and legacy
+// single-key auth based on configuration. Mutual exclusion has already been
+// validated by config.Load.
+func newAuthenticator(cfg config.Config) *auth.Authenticator {
+	if len(cfg.TenantKeys) > 0 {
+		return auth.NewWithTenantKeys(cfg.TenantKeys)
+	}
+	return auth.New(cfg.AuthKey)
 }
 
 type checker interface {

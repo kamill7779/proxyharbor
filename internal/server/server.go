@@ -406,6 +406,8 @@ func respond(w http.ResponseWriter, body any, err error, okStatus int) {
 		status := http.StatusBadRequest
 		if errors.Is(err, domain.ErrAuthFailed) {
 			status = http.StatusUnauthorized
+		} else if errors.Is(err, domain.ErrTenantMismatch) {
+			status = http.StatusForbidden
 		} else if errors.Is(err, domain.ErrNotFound) {
 			status = http.StatusNotFound
 		}

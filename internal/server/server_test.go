@@ -258,3 +258,168 @@ func basicAuth(username, password string) string {
 func bufioNewReader(conn net.Conn) *bufio.Reader {
 	return bufio.NewReader(conn)
 }
+
+// --- v0.1.4 tenant-key auth coverage --------------------------------------
+
+func tenantKeyHandler(t *testing.T, keys map[string]string) http.Handler {
+	t.Helper()
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	return server.New(svc, auth.NewWithTenantKeys(keys))
+}
+
+// raw issues an HTTP request with explicit headers, used for cases where the
+// existing `request` helper cannot vary the key / tenant header.
+func raw(t *testing.T, handler http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestTenantKeyAuth_IsolationAndOverrides(t *testing.T) {
+	const (
+		keyA = "tenantAkeyAAAAAAAA"
+		keyB = "tenantBkeyBBBBBBBB"
+	)
+	handler := tenantKeyHandler(t, map[string]string{keyA: "tenanta", keyB: "tenantb"})
+
+	policyBody := `{"id":"p1","name":"p1","enabled":true}`
+
+	// A1: tenantA creates a policy; readable by tenantA.
+	create := raw(t, handler, http.MethodPost, "/v1/policies", policyBody, map[string]string{auth.HeaderName: keyA})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("A1 create status=%d body=%s", create.Code, create.Body.String())
+	}
+	listA := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyA})
+	if listA.Code != http.StatusOK || !strings.Contains(listA.Body.String(), `"p1"`) {
+		t.Fatalf("A1 list status=%d body=%s", listA.Code, listA.Body.String())
+	}
+
+	// A2: tenantB cannot see tenantA's policy.
+	listB := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyB})
+	if listB.Code != http.StatusOK {
+		t.Fatalf("A2 list status=%d body=%s", listB.Code, listB.Body.String())
+	}
+	if strings.Contains(listB.Body.String(), `"p1"`) {
+		t.Fatalf("A2 cross-tenant leak: %s", listB.Body.String())
+	}
+
+	// A3: tenantA key + tenantB header asserts mismatch -> 403.
+	mismatch := raw(t, handler, http.MethodPost, "/v1/policies", policyBody, map[string]string{
+		auth.HeaderName:       keyA,
+		auth.TenantHeaderName: "tenantb",
+	})
+	if mismatch.Code != http.StatusForbidden {
+		t.Fatalf("A3 mismatch status=%d body=%s", mismatch.Code, mismatch.Body.String())
+	}
+	if !strings.Contains(mismatch.Body.String(), "tenant_mismatch") {
+		t.Fatalf("A3 expected tenant_mismatch error, got %s", mismatch.Body.String())
+	}
+
+	// A4: tenantA key + matching tenant header is accepted.
+	match := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"p2","name":"p2","enabled":true}`, map[string]string{
+		auth.HeaderName:       keyA,
+		auth.TenantHeaderName: "tenanta",
+	})
+	if match.Code != http.StatusCreated {
+		t.Fatalf("A4 match status=%d body=%s", match.Code, match.Body.String())
+	}
+
+	// A5: unknown key -> 401.
+	unknown := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: "doesnotexistAAAAAA"})
+	if unknown.Code != http.StatusUnauthorized {
+		t.Fatalf("A5 unknown key status=%d", unknown.Code)
+	}
+
+	// A6: missing key header -> 401.
+	missing := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{})
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("A6 missing key status=%d", missing.Code)
+	}
+
+	// A7: body-asserted tenant_id is ignored; principal.TenantID wins.
+	bodyWithCrossTenant := `{"id":"p3","name":"p3","enabled":true,"tenant_id":"tenantb"}`
+	create7 := raw(t, handler, http.MethodPost, "/v1/policies", bodyWithCrossTenant, map[string]string{auth.HeaderName: keyA})
+	if create7.Code != http.StatusCreated {
+		t.Fatalf("A7 create status=%d body=%s", create7.Code, create7.Body.String())
+	}
+	listAAfter := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyA})
+	if !strings.Contains(listAAfter.Body.String(), `"p3"`) {
+		t.Fatalf("A7 expected p3 under tenantA, got %s", listAAfter.Body.String())
+	}
+	listBAfter := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: keyB})
+	if strings.Contains(listBAfter.Body.String(), `"p3"`) {
+		t.Fatalf("A7 leaked into tenantB: %s", listBAfter.Body.String())
+	}
+
+	// A3b: query param tenant_id mismatch -> 403.
+	queryMismatch := raw(t, handler, http.MethodGet, "/v1/catalog/latest?tenant_id=tenantb", "", map[string]string{auth.HeaderName: keyA})
+	if queryMismatch.Code != http.StatusForbidden {
+		t.Fatalf("A3b query mismatch status=%d body=%s", queryMismatch.Code, queryMismatch.Body.String())
+	}
+}
+
+func TestLegacySingleKeyAuth_BackwardCompat(t *testing.T) {
+	// L1 / L2: legacy mode preserves v0.1.3 semantics: client-asserted tenant
+	// is honoured; absence defaults to "default".
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	handler := server.New(svc, auth.New("legacy-key"))
+
+	createDefault := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"plegacy","name":"plegacy","enabled":true}`, map[string]string{
+		auth.HeaderName: "legacy-key",
+	})
+	if createDefault.Code != http.StatusCreated {
+		t.Fatalf("L1 create status=%d body=%s", createDefault.Code, createDefault.Body.String())
+	}
+
+	// L2: explicit tenant header still drives tenancy in legacy mode.
+	createTeam := raw(t, handler, http.MethodPost, "/v1/policies", `{"id":"pteam","name":"pteam","enabled":true}`, map[string]string{
+		auth.HeaderName:       "legacy-key",
+		auth.TenantHeaderName: "team-a",
+	})
+	if createTeam.Code != http.StatusCreated {
+		t.Fatalf("L2 create status=%d body=%s", createTeam.Code, createTeam.Body.String())
+	}
+
+	listDefault := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{
+		auth.HeaderName: "legacy-key",
+	})
+	if !strings.Contains(listDefault.Body.String(), `"plegacy"`) || strings.Contains(listDefault.Body.String(), `"pteam"`) {
+		t.Fatalf("L1/L2 default tenant view wrong: %s", listDefault.Body.String())
+	}
+
+	listTeam := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{
+		auth.HeaderName:       "legacy-key",
+		auth.TenantHeaderName: "team-a",
+	})
+	if !strings.Contains(listTeam.Body.String(), `"pteam"`) || strings.Contains(listTeam.Body.String(), `"plegacy"`) {
+		t.Fatalf("L2 team-a view wrong: %s", listTeam.Body.String())
+	}
+
+	// Bad key still rejected.
+	bad := raw(t, handler, http.MethodGet, "/v1/policies", "", map[string]string{auth.HeaderName: "nope"})
+	if bad.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy bad key status=%d", bad.Code)
+	}
+}
+
+func TestAuth_FingerprintIsStableAndShort(t *testing.T) {
+	if got := auth.Fingerprint(""); got != "" {
+		t.Fatalf("empty key fingerprint should be empty, got %q", got)
+	}
+	a := auth.Fingerprint("tenantAkeyAAAAAAAA")
+	b := auth.Fingerprint("tenantAkeyAAAAAAAA")
+	if a != b || len(a) != 8 {
+		t.Fatalf("fingerprint not stable/short: a=%q b=%q", a, b)
+	}
+	if auth.Fingerprint("other") == a {
+		t.Fatalf("fingerprint collided unexpectedly")
+	}
+}
