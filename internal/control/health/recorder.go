@@ -53,10 +53,11 @@ type deltaKey struct {
 
 type proxyBucket struct {
 	successCount int
-	failureKinds []FailureKind
 	latencySumMS int
 	latencyCount int
-	lastHint     string
+	hasFailure   bool
+	failureKind  FailureKind
+	failureHint  string
 }
 
 func NewCoalescingRecorder(store OutcomeStore, options RecorderOptions) *CoalescingRecorder {
@@ -108,7 +109,9 @@ func (r *CoalescingRecorder) Flush(ctx context.Context) {
 	if len(events) == 0 {
 		return
 	}
-	for key, bucket := range r.coalesce(events) {
+	for _, delta := range r.coalesce(events) {
+		key := delta.key
+		bucket := delta.bucket
 		if bucket.successCount > 0 {
 			latencyMS := 0
 			if bucket.latencyCount > 0 {
@@ -121,15 +124,15 @@ func (r *CoalescingRecorder) Flush(ctx context.Context) {
 				ObservedAt: time.Now().UTC(),
 			})
 		}
-		for _, kind := range bucket.failureKinds {
-			penalty := r.policy.FailurePenalty[kind]
+		if bucket.hasFailure {
+			penalty := r.policy.FailurePenalty[bucket.failureKind]
 			if penalty <= 0 {
 				penalty = r.policy.FailurePenalty[FailureUnknown]
 			}
 			_ = r.store.RecordProxyOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
 				Success:               false,
-				FailureKind:           kind.String(),
-				FailureHint:           bucket.lastHint,
+				FailureKind:           bucket.failureKind.String(),
+				FailureHint:           bucket.failureHint,
 				Penalty:               penalty,
 				MaxConsecutiveFailure: r.policy.CircuitOpenThreshold,
 				BaseCooldown:          r.policy.CircuitBaseCooldown,
@@ -176,24 +179,41 @@ func (r *CoalescingRecorder) drain() []proxyEvent {
 	return events
 }
 
-func (r *CoalescingRecorder) coalesce(events []proxyEvent) map[deltaKey]proxyBucket {
-	buckets := make(map[deltaKey]proxyBucket)
+type orderedProxyDelta struct {
+	key    deltaKey
+	bucket proxyBucket
+}
+
+func (r *CoalescingRecorder) coalesce(events []proxyEvent) []orderedProxyDelta {
+	deltas := make([]orderedProxyDelta, 0, len(events))
+	open := make(map[deltaKey]int)
 	for _, event := range events {
 		key := deltaKey{tenantID: event.tenantID, proxyID: event.proxyID}
-		bucket := buckets[key]
 		if event.result.Success {
+			idx, ok := open[key]
+			if !ok {
+				deltas = append(deltas, orderedProxyDelta{key: key})
+				idx = len(deltas) - 1
+				open[key] = idx
+			}
+			bucket := deltas[idx].bucket
 			bucket.successCount++
 			if event.result.LatencyMS > 0 {
 				bucket.latencySumMS += event.result.LatencyMS
 				bucket.latencyCount++
 			}
+			deltas[idx].bucket = bucket
 		} else {
-			bucket.failureKinds = append(bucket.failureKinds, event.result.Kind)
+			delete(open, key)
+			deltas = append(deltas, orderedProxyDelta{
+				key: key,
+				bucket: proxyBucket{
+					hasFailure:  true,
+					failureKind: event.result.Kind,
+					failureHint: event.result.Hint,
+				},
+			})
 		}
-		if event.result.Hint != "" {
-			bucket.lastHint = event.result.Hint
-		}
-		buckets[key] = bucket
 	}
-	return buckets
+	return deltas
 }

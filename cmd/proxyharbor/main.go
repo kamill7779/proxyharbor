@@ -96,6 +96,12 @@ func openSelector(ctx context.Context, cfg config.Config) (selector.ProxySelecto
 	if cfg.Selector != selector.NameZFair {
 		return nil, func() {}, errors.New("unsupported selector")
 	}
+	if cfg.RedisAddr == "" {
+		if cfg.SelectorRedisRequired {
+			return nil, func() {}, errors.New("selector=zfair requires redis addr")
+		}
+		return nil, func() {}, nil
+	}
 	sel, err := selector.NewRedisZFair(ctx, selector.RedisZFairConfig{
 		Addr:             cfg.RedisAddr,
 		Password:         cfg.RedisPassword,
