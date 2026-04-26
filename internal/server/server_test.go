@@ -3,6 +3,7 @@ package server_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -362,6 +363,40 @@ func TestTenantKeyAuth_IsolationAndOverrides(t *testing.T) {
 	queryMismatch := raw(t, handler, http.MethodGet, "/v1/catalog/latest?tenant_id=tenantb", "", map[string]string{auth.HeaderName: keyA})
 	if queryMismatch.Code != http.StatusForbidden {
 		t.Fatalf("A3b query mismatch status=%d body=%s", queryMismatch.Code, queryMismatch.Body.String())
+	}
+}
+
+func TestTenantKeyAuth_InternalEventTenantOverride(t *testing.T) {
+	const keyA = "tenantAkeyAAAAAAAA"
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://gateway.local")
+	handler := server.New(svc, auth.NewWithTenantKeys(map[string]string{keyA: "tenanta"}))
+
+	usageBody := `{"events":[{"event_id":"u1","tenant_id":"tenantb","lease_id":"l1","bytes_sent":1,"bytes_received":2}]}`
+	usage := raw(t, handler, http.MethodPost, "/v1/internal/usage-events:batch", usageBody, map[string]string{auth.HeaderName: keyA})
+	if usage.Code != http.StatusAccepted {
+		t.Fatalf("usage status=%d body=%s", usage.Code, usage.Body.String())
+	}
+
+	auditBody := `{"events":[{"event_id":"a1","tenant_id":"tenantb","action":"x","resource":"r"}]}`
+	audit := raw(t, handler, http.MethodPost, "/v1/internal/gateway-feedback:batch", auditBody, map[string]string{auth.HeaderName: keyA})
+	if audit.Code != http.StatusAccepted {
+		t.Fatalf("audit status=%d body=%s", audit.Code, audit.Body.String())
+	}
+
+	tenantAEvents, err := store.ListAuditEvents(context.Background(), "tenanta", 10)
+	if err != nil {
+		t.Fatalf("list tenantA audit: %v", err)
+	}
+	if len(tenantAEvents) != 1 || tenantAEvents[0].TenantID != "tenanta" || tenantAEvents[0].EventID != "a1" {
+		t.Fatalf("expected audit under tenantA, got %+v", tenantAEvents)
+	}
+	tenantBEvents, err := store.ListAuditEvents(context.Background(), "tenantb", 10)
+	if err != nil {
+		t.Fatalf("list tenantB audit: %v", err)
+	}
+	if len(tenantBEvents) != 0 {
+		t.Fatalf("expected no audit pollution under tenantB, got %+v", tenantBEvents)
 	}
 }
 

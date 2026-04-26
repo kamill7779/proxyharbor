@@ -81,9 +81,9 @@ spec:
             - name: PROXYHARBOR_AUTH_KEY
               valueFrom:
                 secretKeyRef:
-                  {{ if .Values.auth.legacyExistingSecret }}
-                  name: {{ .Values.auth.legacyExistingSecret }}
-                  key: {{ .Values.auth.legacyExistingSecretKey }}
+                  {{ if (default .Values.auth.existingSecret .Values.auth.legacyExistingSecret) }}
+                  name: {{ (default .Values.auth.existingSecret .Values.auth.legacyExistingSecret) }}
+                  key: {{ (default .Values.auth.existingSecretKey .Values.auth.legacyExistingSecretKey) }}
                   {{ else }}
                   name: {{ include "proxyharbor.fullname" . }}-secret
                   key: auth-key

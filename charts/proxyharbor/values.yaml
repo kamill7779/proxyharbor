@@ -48,8 +48,10 @@ auth:
   tenantKeysExistingSecret: ""
   tenantKeysExistingSecretKey: "tenant-keys"
   legacySingleKey: ""
-  # Deprecated alias for legacySingleKey; kept for old CI and values files.
+  # Deprecated aliases for legacy fields; kept for old CI and values files.
   key: ""
+  existingSecret: ""
+  existingSecretKey: "auth-key"
   legacyExistingSecret: ""
   legacyExistingSecretKey: "auth-key"
 
