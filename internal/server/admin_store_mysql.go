@@ -73,6 +73,12 @@ func (s *MySQLAdminStore) UpdateTenant(ctx context.Context, id string, displayNa
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id = ? AND deleted_at IS NULL FOR UPDATE`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrTenantNotFound
+	} else if err != nil {
+		return err
+	}
 	if displayName != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE tenants SET display_name = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, *displayName, time.Now().UTC(), id); err != nil {
 			return err
@@ -133,6 +139,12 @@ func (s *MySQLAdminStore) CreateTenantKey(ctx context.Context, key auth.TenantKe
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id = ? AND deleted_at IS NULL AND status IN ('active', 'enabled') FOR UPDATE`, key.TenantID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrTenantNotFound
+	} else if err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO tenant_keys (id, tenant_id, key_hash, key_fp, label, purpose, created_by, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, key.ID, key.TenantID, hash[:], key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt.UTC(), nullTime(key.ExpiresAt), nullTime(key.RevokedAt))
 	if err != nil {
 		return err
@@ -163,8 +175,7 @@ func (s *MySQLAdminStore) RevokeTenantKey(ctx context.Context, tenantID, keyID s
 }
 
 func (s *MySQLAdminStore) IncrementTenantKeysVersion(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`)
-	return err
+	return bumpTenantKeysVersion(ctx, s.db)
 }
 
 func (s *MySQLAdminStore) AppendAuditEvents(ctx context.Context, events []domain.AuditEvent) error {
@@ -195,8 +206,14 @@ type txExecer interface {
 }
 
 func bumpTenantKeysVersion(ctx context.Context, tx txExecer) error {
-	_, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`)
-	return err
+	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return errors.New("tenant_keys_version_missing")
+	}
+	return nil
 }
 
 func nullTime(t *time.Time) any {

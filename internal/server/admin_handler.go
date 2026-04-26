@@ -112,6 +112,10 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 					respond(w, nil, err, http.StatusOK)
 					return
 				}
+				if *req.Status == "deleted" {
+					writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+					return
+				}
 			}
 			tenant, err := h.store.GetTenant(r.Context(), id)
 			if err != nil {
@@ -143,6 +147,11 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 		keyID := parts[2]
 		if keyID == "" && r.Method == http.MethodPost {
 			// POST /admin/tenants/{id}/keys
+			tenant, err := h.store.GetTenant(r.Context(), id)
+			if err != nil || !tenant.Enabled {
+				respond(w, nil, domain.ErrTenantNotFound, http.StatusOK)
+				return
+			}
 			var req struct {
 				Label      string `json:"label"`
 				Purpose    string `json:"purpose"`
@@ -193,7 +202,10 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				"tenant_id":  id,
 				"key":        plaintext,
 				"key_fp":     keyFP,
+				"label":      tk.Label,
+				"purpose":    tk.Purpose,
 				"expires_at": tk.ExpiresAt,
+				"revoked_at": tk.RevokedAt,
 				"created_at": tk.CreatedAt.Format(time.RFC3339),
 			})
 			return

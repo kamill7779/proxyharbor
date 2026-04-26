@@ -51,8 +51,9 @@ func NewMySQLKeyStore(db *sql.DB) KeyStore {
 
 func (s *MySQLKeyStore) GetTenantKeys(ctx context.Context) ([]TenantKeyRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tenant_id, key_hash, key_fp, label, purpose, created_by, created_at, expires_at, revoked_at, last_seen_at
-		 FROM tenant_keys WHERE revoked_at IS NULL`)
+		`SELECT tk.id, tk.tenant_id, tk.key_hash, tk.key_fp, tk.label, tk.purpose, tk.created_by, tk.created_at, tk.expires_at, tk.revoked_at, tk.last_seen_at
+		 FROM tenant_keys tk JOIN tenants t ON t.id = tk.tenant_id
+		 WHERE tk.revoked_at IS NULL AND t.deleted_at IS NULL AND t.status IN ('active', 'enabled')`)
 	if err != nil {
 		return nil, err
 	}
@@ -62,8 +63,9 @@ func (s *MySQLKeyStore) GetTenantKeys(ctx context.Context) ([]TenantKeyRow, erro
 
 func (s *MySQLKeyStore) GetTenantKeysSince(ctx context.Context, since time.Time) ([]TenantKeyRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tenant_id, key_hash, key_fp, label, purpose, created_by, created_at, expires_at, revoked_at, last_seen_at
-		 FROM tenant_keys WHERE updated_at > ?`, since)
+		`SELECT tk.id, tk.tenant_id, tk.key_hash, tk.key_fp, tk.label, tk.purpose, tk.created_by, tk.created_at, tk.expires_at, tk.revoked_at, tk.last_seen_at
+		 FROM tenant_keys tk JOIN tenants t ON t.id = tk.tenant_id
+		 WHERE tk.updated_at > ? AND t.deleted_at IS NULL AND t.status IN ('active', 'enabled')`, since)
 	if err != nil {
 		return nil, err
 	}

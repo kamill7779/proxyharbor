@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
 )
@@ -215,9 +216,33 @@ func TestPepperTooShort(t *testing.T) {
 	}
 }
 
+func TestDynamicRefreshIntervalMustSatisfyRevocationSLO(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "pepper-1234567890123456789012345678",
+		AuthRefreshInterval:   10 * time.Second,
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "<= 5s") {
+		t.Fatalf("expected refresh interval validation error, got %v", err)
+	}
+}
+
 func validTestConfig(cfg Config) Config {
 	cfg.LogFormat = "json"
 	cfg.LogLevel = "info"
+	if cfg.AuthRefreshInterval == 0 {
+		cfg.AuthRefreshInterval = 5 * time.Second
+	}
 	return cfg
 }
 

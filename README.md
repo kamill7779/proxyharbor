@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
   <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
 </div>
 
@@ -245,7 +245,7 @@ go run ./cmd/proxyharbor
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `PROXYHARBOR_AUTH_MODE` | 鉴权模式：`legacy` / `tenant-keys` / `dynamic-keys` | `dynamic-keys` |
+| `PROXYHARBOR_AUTH_MODE` | 鉴权模式：`legacy-single-key`（`legacy` alias）/ `tenant-keys` / `dynamic-keys`；未设置时根据已配置 Key 推断 | 推断 |
 | `PROXYHARBOR_AUTH_KEY` | legacy 模式专用密钥 | 空 |
 | `PROXYHARBOR_TENANT_KEYS` | tenant-keys 模式静态映射 `tnt:key,tnt2:key2` | 空 |
 | `PROXYHARBOR_ADMIN_KEY` | dynamic-keys 模式 Bootstrap Admin Key（≥32 字符） | 空 |
@@ -256,7 +256,7 @@ go run ./cmd/proxyharbor
 | `PROXYHARBOR_MYSQL_DSN` | MySQL 连接串 | 空 |
 | `PROXYHARBOR_REDIS_ADDR` | Redis 地址 | 空 |
 | `PROXYHARBOR_SELECTOR` | 调度器名称 | `zfair` |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | zfair 无 Redis 时拒绝启动 | `true` |
+| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | zfair 无 Redis 时拒绝启动；Helm 默认关闭以便轻量安装 | `true`（Helm: `false`） |
 | `PROXYHARBOR_SCORING_PROFILE` | 健康评分档位：`default` / `aggressive` / `lenient` | `default` |
 | `PROXYHARBOR_ZFAIR_QUANTUM` | 虚拟运行时基础增量 | `1000` |
 | `PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS` | 无 EWMA 数据时的默认延迟（ms） | `200` |
@@ -291,3 +291,5 @@ go run ./cmd/proxyharbor
 ## Platform Contract (v0.1.5 Milestone C)
 
 ProxyHarbor v0.1.5 defines a platform-container contract for dynamic tenant keys. The platform-api flow is: create an instance, call ProxyHarbor Admin API to create a tenant key with `purpose=platform_container`, write the returned one-time key into a Kubernetes Secret, then inject it into the workload as `PROXYHARBOR_KEY`. Container SDKs should read keys in this order: env `PROXYHARBOR_KEY`, mounted file `/var/run/proxyharbor/key`, then a future IMDS-like sidecar. See `docs/versions/v0.1.5.md` for the full contract and rollback notes.
+
+

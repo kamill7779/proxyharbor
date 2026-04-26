@@ -67,6 +67,7 @@ mysql:
 #   密码可走 redis.password 明文，或 existingSecret
 redis:
   addr: ""
+  selectorRedisRequired: false
   password: ""
   existingSecret: ""
   existingSecretKey: "redis-password"

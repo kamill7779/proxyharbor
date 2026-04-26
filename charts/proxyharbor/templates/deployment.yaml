@@ -49,6 +49,8 @@ spec:
               value: {{ .Values.mysql.connMaxAge | quote }}
             - name: PROXYHARBOR_REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
+            - name: PROXYHARBOR_SELECTOR_REDIS_REQUIRED
+              value: {{ .Values.redis.selectorRedisRequired | quote }}
             - name: PROXYHARBOR_REDIS_DB
               value: {{ .Values.redis.db | quote }}
             - name: PROXYHARBOR_CACHE_TTL
@@ -59,7 +61,7 @@ spec:
             # ----- »œ÷§≈‰÷√ -----
             - name: PROXYHARBOR_AUTH_MODE
               value: {{ ternary "legacy-single-key" .Values.auth.mode (eq .Values.auth.mode "legacy") | quote }}
-            {{- if eq .Values.auth.mode "legacy" }}
+            {{- if or (eq .Values.auth.mode "legacy") (eq .Values.auth.mode "legacy-single-key") }}
             - name: PROXYHARBOR_AUTH_KEY
               {{- if .Values.auth.existingSecret }}
               valueFrom:

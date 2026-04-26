@@ -200,6 +200,9 @@ func (c Config) validate() error {
 		if len(c.KeyPepper) < 32 {
 			return errors.New("PROXYHARBOR_KEY_PEPPER must be at least 32 bytes")
 		}
+		if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
+			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_AUTH_REFRESH_INTERVAL <= 5s and > 0")
+		}
 	case auth.ModeTenantKeys:
 		if c.TenantKeys == "" {
 			return errors.New("auth mode tenant-keys requires PROXYHARBOR_TENANT_KEYS")
