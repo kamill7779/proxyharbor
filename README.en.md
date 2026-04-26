@@ -41,20 +41,20 @@ This starts:
 - `redis` — zfair scheduling state + Lease/Catalog cache
 - `proxyharbor` — combined controller and gateway process
 
-Default development API key:
+Default development tenant key (the key is the tenant identity; control-plane requests do not need a tenant ID):
 
 ```env
-PROXYHARBOR_AUTH_KEY=change-me
+PROXYHARBOR_TENANT_KEYS=default:changeme1234567890abcdef
 ```
 
-**Before exposing the service externally, set a strong key:**
+**Before exposing the service externally, configure a strong key per tenant:**
 
 ```bash
 cp .env.example .env
 ```
 
 ```env
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
+PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001
 PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
 PROXYHARBOR_REDIS_ADDR=redis:6379
 ```
@@ -72,7 +72,7 @@ curl http://localhost:8080/readyz
 ### 3. Register a provider
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"static-main","type":"static","name":"My proxy pool","enabled":true}' \
   http://localhost:8080/v1/providers
@@ -81,7 +81,7 @@ curl -H 'ProxyHarbor-Key: change-me' \
 ### 4. Add a proxy
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"proxy-1","provider_id":"static-main","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
   http://localhost:8080/v1/proxies
@@ -98,7 +98,7 @@ for item in \
   'proxy-3 http://proxy3.example.com:8080 50'
 do
   set -- $item
-  curl -H 'ProxyHarbor-Key: change-me' \
+  curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
     -H 'Content-Type: application/json' \
     -d "{\"id\":\"$1\",\"provider_id\":\"static-main\",\"endpoint\":\"$2\",\"healthy\":true,\"weight\":$3}" \
     http://localhost:8080/v1/proxies
@@ -115,7 +115,7 @@ $proxies = @(
 )
 foreach ($proxy in $proxies) {
   $body = @{ id=$proxy.id; provider_id='static-main'; endpoint=$proxy.endpoint; healthy=$true; weight=$proxy.weight } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='change-me'} -ContentType 'application/json' -Body $body
+  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='changeme1234567890abcdef'} -ContentType 'application/json' -Body $body
 }
 ```
 
@@ -124,7 +124,7 @@ foreach ($proxy in $proxies) {
 A lease requires at least one enabled policy:
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -d '{"id":"default","name":"Default policy","enabled":true,"ttl_seconds":1800}' \
   http://localhost:8080/v1/policies
@@ -133,7 +133,7 @@ curl -H 'ProxyHarbor-Key: change-me' \
 ### 6. Create a lease
 
 ```bash
-curl -H 'ProxyHarbor-Key: change-me' \
+curl -H 'ProxyHarbor-Key: changeme1234567890abcdef' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-lease-1' \
   -d '{"subject":{"subject_type":"user","subject_id":"local-dev"},"resource_ref":{"kind":"url","id":"https://example.com"},"ttl_seconds":600}' \
@@ -161,13 +161,21 @@ docker compose --profile app up -d --build
 ### Local binary
 
 ```bash
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret \
+PROXYHARBOR_TENANT_KEYS=default:replace-with-a-random-secret-0001 \
 PROXYHARBOR_STORAGE=mysql \
 PROXYHARBOR_MYSQL_DSN='proxyharbor:proxyharbor@tcp(127.0.0.1:3306)/proxyharbor?parseTime=true&loc=UTC' \
 PROXYHARBOR_REDIS_ADDR='127.0.0.1:6379' \
 PROXYHARBOR_SELECTOR=zfair \
 go run ./cmd/proxyharbor
 ```
+
+## Tenant Identity Model
+
+ProxyHarbor v0.1.4 recommends `PROXYHARBOR_TENANT_KEYS`. Each entry is `tenant_id:key`; after receiving `ProxyHarbor-Key`, the server reverse-lookups the trusted `principal.TenantID`.
+
+- Control-plane calls only need `ProxyHarbor-Key`; they do not need `ProxyHarbor-Tenant` or `tenant_id`.
+- If an old client still sends `ProxyHarbor-Tenant` or query `tenant_id`, it must match the tenant bound to the key, otherwise the server returns `403 tenant_mismatch`.
+- `PROXYHARBOR_AUTH_KEY` remains only for legacy single-key deployments; do not set it together with `PROXYHARBOR_TENANT_KEYS`.
 
 ## Data Model
 
@@ -229,7 +237,9 @@ Three consecutive failures trip the circuit breaker. Base cooldown is 30 s, maxi
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `PROXYHARBOR_AUTH_KEY` | Shared key for control-plane API calls | **required** |
+| `PROXYHARBOR_TENANT_KEYS` | Recommended mode: `tenant:key,tenant:key`; the key carries both control-plane auth and tenant identity | **recommended required** |
+| `PROXYHARBOR_TENANT_KEY_MIN_LEN` | Minimum tenant key length | `16` |
+| `PROXYHARBOR_AUTH_KEY` | Legacy single-key mode; only valid when `PROXYHARBOR_TENANT_KEYS` is unset | Backward compatibility |
 | `PROXYHARBOR_ROLE` | Process role: `all` / `controller` / `gateway` | `all` |
 | `PROXYHARBOR_LOG_FORMAT` | Standard-library slog output format: `json` / `text` | `json` |
 | `PROXYHARBOR_LOG_LEVEL` | Standard-library slog level: `info` / `debug` | `info` |

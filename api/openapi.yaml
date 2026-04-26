@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.1.0-alpha
+  version: 0.1.4-alpha
   x-stability: alpha
 servers:
   - url: http://localhost:8080
@@ -182,7 +182,11 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
-    headerKey: { type: apiKey, in: header, name: ProxyHarbor-Key }
+    headerKey:
+      type: apiKey
+      in: header
+      name: ProxyHarbor-Key
+      description: Tenant-bound API key. In tenant-keys mode, the key is the tenant identity; clients do not need to send ProxyHarbor-Tenant or tenant_id.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -201,7 +205,7 @@ components:
       properties:
         error:
           type: string
-          enum: [policy_denied, subject_not_eligible, idempotency_conflict, no_healthy_proxy, lease_revoked, unsafe_destination, catalog_stale, auth_failed, tenant_disabled, not_found, unsupported]
+          enum: [policy_denied, subject_not_eligible, idempotency_conflict, no_healthy_proxy, lease_revoked, unsafe_destination, catalog_stale, auth_failed, tenant_mismatch, tenant_disabled, not_found, unsupported]
     CreateLeaseRequest:
       type: object
       required: [subject, resource_ref]
