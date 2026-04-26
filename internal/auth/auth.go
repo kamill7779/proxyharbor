@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
@@ -12,28 +15,118 @@ const (
 	TenantHeaderName = "ProxyHarbor-Tenant"
 	TenantQueryName  = "tenant_id"
 	DefaultTenantID  = "default"
+	OnBehalfOfHeader = "X-On-Behalf-Of"
 )
 
+type AuthMode string
+
+const (
+	ModeLegacy      AuthMode = "legacy-single-key"
+	ModeTenantKeys  AuthMode = "tenant-keys"
+	ModeDynamicKeys AuthMode = "dynamic-keys"
+)
+
+type TenantKey struct {
+	ID        string
+	TenantID  string
+	KeyHash   string
+	KeyFP     string
+	Label     string
+	Purpose   string
+	CreatedBy string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+}
+
 type Authenticator struct {
-	Key string
+	mode     AuthMode
+	legacy   string
+	static   map[string]string
+	dynamic  *DynamicStore
+	adminKey string
 }
 
 func New(key string) *Authenticator {
-	return &Authenticator{Key: key}
+	return NewLegacy(key)
+}
+
+func NewLegacy(key string) *Authenticator {
+	return &Authenticator{mode: ModeLegacy, legacy: key}
+}
+
+func NewTenantKeys(keys map[string]string) *Authenticator {
+	return &Authenticator{mode: ModeTenantKeys, static: keys}
+}
+
+func NewDynamicKeys(dynamic *DynamicStore) *Authenticator {
+	return &Authenticator{mode: ModeDynamicKeys, dynamic: dynamic}
+}
+
+func (a *Authenticator) WithAdminKey(adminKey string) *Authenticator {
+	if a == nil {
+		return nil
+	}
+	a.adminKey = adminKey
+	return a
 }
 
 func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) {
-	if a == nil || a.Key == "" {
+	if a == nil || r == nil {
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
-	if r.Header.Get(HeaderName) != a.Key {
+	presented := r.Header.Get(HeaderName)
+	if presented == "" {
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
-	tenantID, ok := ResolveTenantID(r)
-	if !ok {
+	if a.adminKey != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(a.adminKey)) == 1 {
+		return domain.Principal{ID: "admin:" + Fingerprint(presented), Type: "admin"}, nil
+	}
+
+	switch a.mode {
+	case ModeDynamicKeys:
+		if a.dynamic == nil {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		key, ok := a.dynamic.Lookup(presented)
+		if !ok {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		if claimed := claimedTenant(r); claimed != "" && claimed != key.tenantID {
+			return domain.Principal{}, domain.ErrTenantMismatch
+		}
+		return domain.Principal{ID: "tenant-key:" + key.keyID, Type: "tenant_key", TenantID: key.tenantID}, nil
+	case ModeTenantKeys:
+		tenantID, ok := a.static[presented]
+		if !ok {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		if claimed := claimedTenant(r); claimed != "" && claimed != tenantID {
+			return domain.Principal{}, domain.ErrTenantMismatch
+		}
+		return domain.Principal{ID: "tenant-key:" + Fingerprint(presented), Type: "tenant_key", TenantID: tenantID}, nil
+	case ModeLegacy:
+		if a.legacy == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(a.legacy)) != 1 {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		tenantID, ok := ResolveTenantID(r)
+		if !ok {
+			return domain.Principal{}, domain.ErrAuthFailed
+		}
+		return domain.Principal{ID: "configured-key", Type: "header_key", TenantID: tenantID}, nil
+	default:
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
-	return domain.Principal{ID: "configured-key", Type: "header_key", TenantID: tenantID}, nil
+}
+
+func claimedTenant(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if tenantID := strings.TrimSpace(r.Header.Get(OnBehalfOfHeader)); tenantID != "" {
+		return tenantID
+	}
+	return strings.TrimSpace(r.Header.Get(TenantHeaderName))
 }
 
 func TenantIDFromRequest(r *http.Request) string {
@@ -72,4 +165,30 @@ func ValidTenantID(tenantID string) bool {
 		return false
 	}
 	return true
+}
+
+func ParseTenantKeys(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		tenantID := strings.TrimSpace(kv[0])
+		key := strings.TrimSpace(kv[1])
+		if tenantID == "" || key == "" {
+			continue
+		}
+		out[key] = tenantID
+	}
+	return out
+}
+
+func Fingerprint(key string) string {
+	h := sha256Pepper(nil, key)
+	return fmt.Sprintf("%x", h[:4])
 }
