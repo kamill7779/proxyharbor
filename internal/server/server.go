@@ -17,6 +17,8 @@ import (
 
 const Version = "0.1.0-alpha"
 
+const OnBehalfOfHeader = "X-On-Behalf-Of"
+
 type Role string
 
 const (
@@ -29,6 +31,8 @@ type Server struct {
 	mux            *http.ServeMux
 	svc            *control.Service
 	authn          *auth.Authenticator
+	adminStore     AdminStore
+	pepper         string
 	role           Role
 	healthRecorder health.HealthRecorder
 	dependency     storage.DependencyChecker
@@ -52,6 +56,26 @@ func NewForRoleWithHealthRecorderAndDependencies(svc *control.Service, authn *au
 	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder, dependency: dependency}
 	s.routes()
 	return Recover(s)
+}
+
+func NewForRoleWithHealthRecorderDependenciesAndAdmin(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder, dependency storage.DependencyChecker, store AdminStore, pepper string) http.Handler {
+	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder, dependency: dependency, adminStore: store, pepper: pepper}
+	s.routes()
+	return Recover(s)
+}
+
+// NewWithAdminStore creates a server with admin store configured.
+func NewWithAdminStore(svc *control.Service, authn *auth.Authenticator, store AdminStore, pepper string) http.Handler {
+	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, adminStore: store, pepper: pepper, role: RoleAll}
+	s.routes()
+	return Recover(s)
+}
+
+// SetAdminStore injects the admin store and pepper for /admin/* handlers.
+func (s *Server) SetAdminStore(store AdminStore, pepper string) {
+	s.adminStore = store
+	s.pepper = pepper
+	s.routes()
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +108,10 @@ func (s *Server) routes() {
 	}
 	if s.role == RoleAll || s.role == RoleGateway {
 		s.mux.HandleFunc("/", s.gateway)
+	}
+	if s.adminStore != nil && (s.role == RoleAll || s.role == RoleController) {
+		admin := newAdminHandler(s.adminStore, s.pepper)
+		admin.register(s.mux, s.requireAdminAuth)
 	}
 }
 
@@ -137,6 +165,10 @@ func (s *Server) leases(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok = s.requireTenant(w, r, principal)
+	if !ok {
+		return
+	}
 	var req control.CreateLeaseRequest
 	if !decode(w, r, &req) {
 		return
@@ -147,6 +179,10 @@ func (s *Server) leases(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) leaseByID(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -170,6 +206,10 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok = s.requireTenant(w, r, principal)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		policies, err := s.svc.ListPolicies(r.Context(), principal.TenantID)
@@ -188,6 +228,10 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) policyByID(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -215,6 +259,10 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok = s.requireTenant(w, r, principal)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		providers, err := s.svc.ListProviders(r.Context(), principal.TenantID)
@@ -233,6 +281,10 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) providerByID(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -260,6 +312,10 @@ func (s *Server) proxies(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok = s.requireTenant(w, r, principal)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		proxies, err := s.svc.ListProxies(r.Context(), principal.TenantID)
@@ -278,6 +334,10 @@ func (s *Server) proxies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) proxyByID(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -323,6 +383,10 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok = s.requireTenant(w, r, principal)
+	if !ok {
+		return
+	}
 	out, err := s.svc.Catalog(r.Context(), principal.TenantID)
 	respond(w, out, err, http.StatusOK)
 }
@@ -331,6 +395,10 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -352,6 +420,10 @@ func (s *Server) gatewayFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	principal, ok = s.requireTenant(w, r, principal)
 	if !ok {
 		return
 	}
@@ -386,6 +458,21 @@ func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 	respond(w, lease, err, http.StatusOK)
 }
 
+// requireAdminAuth wraps a handler to enforce admin-only access for /admin/* routes.
+func (s *Server) requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := s.requireAuth(w, r)
+		if !ok {
+			return
+		}
+		if principal.Type != "admin" {
+			respond(w, nil, domain.ErrForbidden, http.StatusOK)
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (domain.Principal, bool) {
 	p, err := s.authn.Authenticate(r)
 	if err != nil {
@@ -394,6 +481,49 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (domain.Pri
 	}
 	return p, true
 }
+
+// requireTenant enforces On-Behalf-Of semantics per the design doc.
+func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request, principal domain.Principal) (domain.Principal, bool) {
+	// Admin calling /admin/* does not need On-Behalf-Of.
+	if strings.HasPrefix(r.URL.Path, "/admin/") {
+		if principal.Type == "admin" {
+			return principal, true
+		}
+		respond(w, nil, domain.ErrForbidden, http.StatusOK)
+		return domain.Principal{}, false
+	}
+
+	obo := r.Header.Get(OnBehalfOfHeader)
+
+	if principal.Type == "admin" {
+		if obo == "" {
+			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			return domain.Principal{}, false
+		}
+		// Verify tenant exists and is active.
+		if s.adminStore != nil {
+			tenant, err := s.adminStore.GetTenant(r.Context(), obo)
+			if err != nil || !tenant.Enabled {
+				respond(w, nil, domain.ErrTenantNotFound, http.StatusOK)
+				return domain.Principal{}, false
+			}
+		}
+		principal.TenantID = obo
+		return principal, true
+	}
+
+	if principal.Type == "tenant_key" {
+		if obo != "" && obo != principal.TenantID {
+			respond(w, nil, domain.ErrTenantMismatch, http.StatusOK)
+			return domain.Principal{}, false
+		}
+		return principal, true
+	}
+
+	// Legacy / other principals pass through.
+	return principal, true
+}
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		respond(w, nil, err, http.StatusOK)
@@ -408,6 +538,12 @@ func respond(w http.ResponseWriter, body any, err error, okStatus int) {
 			status = http.StatusUnauthorized
 		} else if errors.Is(err, domain.ErrNotFound) {
 			status = http.StatusNotFound
+		} else if errors.Is(err, domain.ErrBadRequest) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, domain.ErrTenantNotFound) {
+			status = http.StatusNotFound
+		} else if errors.Is(err, domain.ErrTenantMismatch) || errors.Is(err, domain.ErrForbidden) {
+			status = http.StatusForbidden
 		}
 		writeJSON(w, status, map[string]string{"error": domain.ErrorCode(err)})
 		return

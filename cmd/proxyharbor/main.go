@@ -70,7 +70,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer authClose()
-	handler := server.NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl})
+	adminStore := server.NewMemoryAdminStore()
+	handler := server.NewForRoleWithHealthRecorderDependenciesAndAdmin(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl}, adminStore, cfg.KeyPepper)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
