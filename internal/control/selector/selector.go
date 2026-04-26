@@ -19,3 +19,7 @@ type SelectOptions struct {
 type ProxySelector interface {
 	Select(ctx context.Context, tenantID string, candidates []domain.Proxy, opts SelectOptions) (domain.Proxy, error)
 }
+
+func noHealthy(kind domain.ErrorKind, reason string, cause error) error {
+	return domain.NewKindedError(domain.ErrNoHealthyProxy, kind, reason, cause)
+}

@@ -40,6 +40,12 @@ func NewRedis(ctx context.Context, addr, password string, db int) (*Redis, error
 
 func (r *Redis) Close() error { return r.client.Close() }
 
+func (r *Redis) Check(ctx context.Context) error {
+	pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	return r.client.Ping(pingCtx).Err()
+}
+
 func leaseKey(tenantID, leaseID string) string {
 	return "ph:lease:" + tenantID + ":" + leaseID
 }

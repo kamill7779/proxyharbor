@@ -30,6 +30,8 @@ type Config struct {
 	Addr                       string
 	GatewayURL                 string
 	AuthKey                    string
+	LogFormat                  string
+	LogLevel                   string
 	StorageDriver              StorageDriver
 	MySQLDSN                   string
 	MySQLMaxOpen               int
@@ -62,6 +64,8 @@ func Load(args []string) (Config, error) {
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
 		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
+		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
+		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
 		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
 		MySQLDSN:                   os.Getenv("PROXYHARBOR_MYSQL_DSN"),
 		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
@@ -93,6 +97,8 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
 	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
+	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
 	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
@@ -124,6 +130,16 @@ func (c Config) validate() error {
 	case "all", "controller", "gateway":
 	default:
 		return fmt.Errorf("invalid role: %q", c.Role)
+	}
+	switch c.LogFormat {
+	case "json", "text":
+	default:
+		return fmt.Errorf("invalid log format: %q", c.LogFormat)
+	}
+	switch c.LogLevel {
+	case "info", "debug":
+	default:
+		return fmt.Errorf("invalid log level: %q", c.LogLevel)
 	}
 	switch c.StorageDriver {
 	case DriverMemory:

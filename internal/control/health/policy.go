@@ -1,6 +1,9 @@
 package health
 
-import "time"
+import (
+	"net/http"
+	"time"
+)
 
 type FailureKind int
 
@@ -74,4 +77,31 @@ func ScoringPolicyForProfile(profile string) ScoringPolicy {
 		policy.CircuitOpenThreshold = 5
 	}
 	return policy
+}
+
+// ClassifyProxyHTTPStatus returns whether an HTTP response status is evidence
+// of upstream proxy failure rather than the target site's business response.
+func ClassifyProxyHTTPStatus(statusCode int, header http.Header) (FailureKind, bool) {
+	switch statusCode {
+	case http.StatusProxyAuthRequired:
+		return FailureAuth, true
+	case http.StatusTooManyRequests:
+		return FailureProtocol, true
+	case http.StatusRequestTimeout:
+		if isProxyMarked(header) {
+			return FailureTimeout, true
+		}
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		if isProxyMarked(header) {
+			if statusCode == http.StatusGatewayTimeout {
+				return FailureTimeout, true
+			}
+			return FailureConn, true
+		}
+	}
+	return FailureUnknown, false
+}
+
+func isProxyMarked(header http.Header) bool {
+	return header.Get("Proxy-Authenticate") != "" || header.Get("Proxy-Connection") != "" || header.Get("Via") != ""
 }

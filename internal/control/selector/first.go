@@ -19,7 +19,7 @@ func (FirstSelectable) Select(_ context.Context, _ string, candidates []domain.P
 		}
 	}
 	if selected.ID == "" {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoEligible, "first_selectable_no_eligible_proxy", nil)
 	}
 	return selected, nil
 }

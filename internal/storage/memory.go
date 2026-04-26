@@ -40,6 +40,10 @@ func NewMemoryStore() *MemoryStore {
 	return store
 }
 
+func (s *MemoryStore) CheckDependencies(context.Context) map[string]error {
+	return map[string]error{"memory": nil}
+}
+
 func key(tenantID, id string) string { return tenantID + "/" + id }
 
 func (s *MemoryStore) GetLeaseByIdempotency(_ context.Context, scope IdempotencyScope) (domain.Lease, bool, error) {
