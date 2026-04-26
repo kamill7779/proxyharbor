@@ -16,6 +16,31 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
+type memoryKeyStoreAdapter struct {
+	rows []auth.TenantKeyRow
+}
+
+func (a memoryKeyStoreAdapter) GetTenantKeys(ctx context.Context) ([]auth.TenantKeyRow, error) {
+	return a.rows, nil
+}
+
+func (a memoryKeyStoreAdapter) GetTenantKeysSince(ctx context.Context, since time.Time) ([]auth.TenantKeyRow, error) {
+	return a.GetTenantKeys(ctx)
+}
+
+func (a memoryKeyStoreAdapter) GetTenantKeysVersion(ctx context.Context) (int64, error) {
+	return 1, nil
+}
+
+func (a memoryKeyStoreAdapter) IncrementTenantKeysVersion(ctx context.Context) error { return nil }
+func (a memoryKeyStoreAdapter) CreateTenantKey(ctx context.Context, key auth.TenantKeyRow) error {
+	return nil
+}
+func (a memoryKeyStoreAdapter) RevokeTenantKey(ctx context.Context, keyID string) error { return nil }
+func (a memoryKeyStoreAdapter) GetTenant(ctx context.Context, tenantID string) (auth.TenantRow, error) {
+	return auth.TenantRow{ID: tenantID, Status: "active"}, nil
+}
+
 // mockAdminStore implements server.AdminStore for tests.
 type mockAdminStore struct {
 	tenants   map[string]domain.Tenant
@@ -137,6 +162,54 @@ func TestAdminHandler_IssueKey(t *testing.T) {
 		t.Fatal("expected key_id and plaintext key in response")
 	}
 	assertAuditAction(t, store.events, "tenant_key.issued")
+}
+
+func TestAdminIssuedKeyAuthenticatesThroughDynamicStore(t *testing.T) {
+	store := server.NewMemoryAdminStore()
+	svc := control.NewService(storage.NewMemoryStore(), "http://gateway.local")
+	authn := auth.NewLegacy("legacy").WithAdminKey("admin-secret")
+	handler := server.NewWithAdminStore(svc, authn, store, "pepper-32-bytes-long-for-tests-only")
+
+	rr := adminRequest(t, handler, http.MethodPost, "/admin/tenants", `{"id":"t1","display_name":"Test"}`, "admin-secret")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create tenant status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = adminRequest(t, handler, http.MethodPost, "/admin/tenants/t1/keys", `{"label":"pod","purpose":"platform_container"}`, "admin-secret")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("issue key status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var issued struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	rows := extractTenantKeyRowsForTest(t, store)
+	pepper := []byte("pepper-32-bytes-long-for-tests-only")
+	dynamic, err := auth.NewDynamicStore(memoryKeyStoreAdapter{rows: rows}, pepper, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamicAuth := auth.NewDynamicKeys(dynamic)
+	req := httptest.NewRequest(http.MethodGet, "/v1/policies", nil)
+	req.Header.Set(auth.HeaderName, issued.Key)
+	req.Header.Set(auth.TenantHeaderName, "t1")
+	principal, err := dynamicAuth.Authenticate(req)
+	if err != nil {
+		t.Fatalf("issued key should authenticate through dynamic store: %v", err)
+	}
+	if principal.TenantID != "t1" || principal.Type != "tenant_key" {
+		t.Fatalf("unexpected principal: %#v", principal)
+	}
+}
+
+func extractTenantKeyRowsForTest(t *testing.T, store *server.MemoryAdminStore) []auth.TenantKeyRow {
+	t.Helper()
+	rows, err := store.GetTenantKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }
 
 // List keys: 200, response does NOT contain plaintext key.

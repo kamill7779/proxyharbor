@@ -1,4 +1,4 @@
-锘縶{- $resources := ternary .Values.resourcesLightweight .Values.resources .Values.lightweight -}}
+{{- $resources := ternary .Values.resourcesLightweight .Values.resources .Values.lightweight -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,10 +55,10 @@ spec:
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
-            # ----- 鍑嵁锛歟xistingSecret 浼樺厛锛屽惁鍒欏彇鏄庢枃 -----
-            # ----- 璁よ瘉閰嶇疆 -----
+            # ----- 凭据：existingSecret 优先，否则取明文 -----
+            # ----- 认证配置 -----
             - name: PROXYHARBOR_AUTH_MODE
-              value: {{ .Values.auth.mode | quote }}
+              value: {{ ternary "legacy-single-key" .Values.auth.mode (eq .Values.auth.mode "legacy") | quote }}
             {{- if eq .Values.auth.mode "legacy" }}
             - name: PROXYHARBOR_AUTH_KEY
               {{- if .Values.auth.existingSecret }}
@@ -165,3 +165,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+

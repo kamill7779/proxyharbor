@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
@@ -13,7 +14,7 @@ func TestResolveAuthModeExplicit(t *testing.T) {
 		wantErr    bool
 		errContain string
 	}{
-		{auth.ModeDynamicKeys, auth.ModeDynamicKeys, true, "dynamic-keys requires PROXYHARBOR_ADMIN_KEY"},
+		{auth.ModeDynamicKeys, auth.ModeDynamicKeys, true, "storage=mysql"},
 		{auth.ModeTenantKeys, auth.ModeTenantKeys, true, "tenant-keys requires PROXYHARBOR_TENANT_KEYS"},
 		{auth.ModeLegacy, auth.ModeLegacy, true, "legacy-single-key requires"},
 	}
@@ -49,10 +50,51 @@ func TestResolveAuthModeDynamicOK(t *testing.T) {
 		ZFairQuantum:          1,
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
+	})
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDynamicModeRequiresMySQL(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              auth.ModeDynamicKeys,
+		AdminKey:              "admin-key-1234567890123456789012345678",
+		KeyPepper:             "pepper-1234567890123456789012345678",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
+		StorageDriver:         DriverMemory,
+	})
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "storage=mysql") {
+		t.Fatalf("expected storage=mysql validation error, got %v", err)
+	}
+}
+
+func TestLegacyAliasNormalizes(t *testing.T) {
+	cfg := validTestConfig(Config{
+		AuthMode:              "legacy",
+		AuthKey:               "legacy-key",
+		Role:                  "all",
+		Selector:              "zfair",
+		StickyPolicy:          "none",
+		HealthBufferMax:       1,
+		ZFairQuantum:          1,
+		ZFairDefaultLatencyMS: 1,
+		ZFairMaxPromote:       1,
 		StorageDriver:         DriverMemory,
 	})
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolveAuthMode(cfg) != auth.ModeLegacy {
+		t.Fatalf("expected legacy-single-key, got %s", resolveAuthMode(cfg))
 	}
 }
 
@@ -67,7 +109,8 @@ func TestResolveAuthModeTenantKeysOK(t *testing.T) {
 		ZFairQuantum:          1,
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 	})
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -85,7 +128,8 @@ func TestResolveAuthModeLegacyOK(t *testing.T) {
 		ZFairQuantum:          1,
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 	})
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -97,6 +141,7 @@ func TestResolveAuthModeDefault(t *testing.T) {
 	cfg := validTestConfig(Config{
 		AdminKey:              "admin-key-1234567890123456780123456789",
 		KeyPepper:             "pepper-123456789012345678901234567890",
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 		Role:                  "all",
 		Selector:              "zfair",
 		StickyPolicy:          "none",
@@ -104,7 +149,7 @@ func TestResolveAuthModeDefault(t *testing.T) {
 		ZFairQuantum:          1,
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
+		StorageDriver:         DriverMySQL,
 	})
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -158,7 +203,8 @@ func TestPepperTooShort(t *testing.T) {
 		ZFairQuantum:          1,
 		ZFairDefaultLatencyMS: 1,
 		ZFairMaxPromote:       1,
-		StorageDriver:         DriverMemory,
+		StorageDriver:         DriverMySQL,
+		MySQLDSN:              "user:pass@tcp(localhost:3306)/proxyharbor",
 	})
 	err := cfg.validate()
 	if err == nil {

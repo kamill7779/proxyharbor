@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -77,6 +78,13 @@ func (s *MemoryAdminStore) UpdateTenant(ctx context.Context, id string, displayN
 			tenant.Enabled = true
 		case "disabled", "deleted":
 			tenant.Enabled = false
+			for idx := range s.keys[id] {
+				if s.keys[id][idx].RevokedAt == nil {
+					now := time.Now().UTC()
+					s.keys[id][idx].RevokedAt = &now
+				}
+			}
+			s.version++
 		default:
 			return domain.ErrBadRequest
 		}
@@ -106,6 +114,7 @@ func (s *MemoryAdminStore) CreateTenantKey(ctx context.Context, key auth.TenantK
 		return domain.ErrTenantNotFound
 	}
 	s.keys[key.TenantID] = append(s.keys[key.TenantID], key)
+	s.version++
 	return nil
 }
 
@@ -116,6 +125,7 @@ func (s *MemoryAdminStore) RevokeTenantKey(ctx context.Context, tenantID, keyID 
 	for idx := range s.keys[tenantID] {
 		if s.keys[tenantID][idx].ID == keyID {
 			s.keys[tenantID][idx].RevokedAt = &now
+			s.version++
 			return nil
 		}
 	}
@@ -159,8 +169,10 @@ func (s *MemoryAdminStore) tenantKeyRowsLocked() []auth.TenantKeyRow {
 	for _, keys := range s.keys {
 		for _, key := range keys {
 			var hash [32]byte
-			decoded := make([]byte, 32)
-			_ = decoded
+			decoded, err := hex.DecodeString(key.KeyHash)
+			if err == nil && len(decoded) == len(hash) {
+				copy(hash[:], decoded)
+			}
 			rows = append(rows, auth.TenantKeyRow{
 				ID:        key.ID,
 				TenantID:  key.TenantID,

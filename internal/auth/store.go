@@ -114,17 +114,39 @@ func (s *MySQLKeyStore) IncrementTenantKeysVersion(ctx context.Context) error {
 }
 
 func (s *MySQLKeyStore) CreateTenantKey(ctx context.Context, key TenantKeyRow) error {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO tenant_keys (id, tenant_id, key_hash, key_fp, label, purpose, created_by, created_at, expires_at, revoked_at, last_seen_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		key.ID, key.TenantID, key.KeyHash[:], key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt, nullTime(key.ExpiresAt), nullTime(key.RevokedAt), nullTime(key.LastSeenAt))
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLKeyStore) RevokeTenantKey(ctx context.Context, keyID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tenant_keys SET revoked_at = ? WHERE id = ?`, time.Now().UTC(), keyID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx,
+		`UPDATE tenant_keys SET revoked_at = ?, updated_at = ? WHERE id = ?`, time.Now().UTC(), time.Now().UTC(), keyID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MySQLKeyStore) GetTenant(ctx context.Context, tenantID string) (TenantRow, error) {

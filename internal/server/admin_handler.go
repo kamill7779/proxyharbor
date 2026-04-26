@@ -107,6 +107,12 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
+			if req.Status != nil && (*req.Status == "disabled" || *req.Status == "deleted") {
+				if err := h.revokeTenantKeys(r.Context(), id); err != nil {
+					respond(w, nil, err, http.StatusOK)
+					return
+				}
+			}
 			tenant, err := h.store.GetTenant(r.Context(), id)
 			if err != nil {
 				respond(w, nil, err, http.StatusOK)
@@ -118,14 +124,10 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
-			// cascade revoke keys
-			keys, _ := h.store.ListTenantKeys(r.Context(), id)
-			for _, k := range keys {
-				if k.RevokedAt == nil {
-					_ = h.store.RevokeTenantKey(r.Context(), id, k.ID)
-				}
+			if err := h.revokeTenantKeys(r.Context(), id); err != nil {
+				respond(w, nil, err, http.StatusOK)
+				return
 			}
-			_ = h.store.IncrementTenantKeysVersion(r.Context())
 			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		default:
 			methodNotAllowed(w)
@@ -177,7 +179,6 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
-			_ = h.store.IncrementTenantKeysVersion(r.Context())
 			_ = h.store.AppendAuditEvents(r.Context(), []domain.AuditEvent{{
 				EventID:     "audit-" + tk.ID,
 				TenantID:    id,
@@ -226,7 +227,6 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
-			_ = h.store.IncrementTenantKeysVersion(r.Context())
 			_ = h.store.AppendAuditEvents(r.Context(), []domain.AuditEvent{{
 				EventID:     "audit-revoke-" + keyID,
 				TenantID:    id,
@@ -243,6 +243,22 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(w, nil, domain.ErrNotFound, http.StatusOK)
+}
+
+func (h *adminHandler) revokeTenantKeys(ctx context.Context, tenantID string) error {
+	keys, err := h.store.ListTenantKeys(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if key.RevokedAt != nil {
+			continue
+		}
+		if err := h.store.RevokeTenantKey(ctx, tenantID, key.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func generateKey() string {

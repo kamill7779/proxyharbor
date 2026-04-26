@@ -4,16 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var staleCounter int64
+var staleCounter atomic.Int64
 
-func recordStale() { staleCounter++ }
+func recordStale() { staleCounter.Add(1) }
 
 // StaleCount returns the number of times the cache has been marked stale.
 func StaleCount() int64 {
-	return staleCounter
+	return staleCounter.Load()
 }
 
 type entry struct {
@@ -103,16 +104,16 @@ func (d *DynamicStore) tick(ctx context.Context) {
 	if v == cur {
 		return
 	}
-	rows, err := d.store.GetTenantKeysSince(ctx, time.Now().Add(-2*d.refresh))
+	rows, err := d.store.GetTenantKeys(ctx)
 	if err != nil {
 		recordStale()
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.byHash = make(map[[32]byte]entry, len(rows))
 	for _, r := range rows {
 		if r.RevokedAt != nil {
-			delete(d.byHash, r.KeyHash)
 			continue
 		}
 		d.byHash[r.KeyHash] = entry{

@@ -138,7 +138,7 @@ func Load(args []string) (Config, error) {
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
 	if *authModeFlag != "" {
-		cfg.AuthMode = auth.AuthMode(*authModeFlag)
+		cfg.AuthMode = normalizeAuthMode(auth.AuthMode(*authModeFlag))
 	}
 	cfg.AuthMode = resolveAuthMode(cfg)
 	return cfg, cfg.validate()
@@ -188,6 +188,9 @@ func (c Config) validate() error {
 	mode := resolveAuthMode(c)
 	switch mode {
 	case auth.ModeDynamicKeys:
+		if c.StorageDriver != DriverMySQL {
+			return errors.New("auth mode dynamic-keys requires storage=mysql")
+		}
 		if c.AdminKey == "" {
 			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_ADMIN_KEY")
 		}
@@ -215,7 +218,7 @@ func (c Config) validate() error {
 
 func resolveAuthMode(c Config) auth.AuthMode {
 	if c.AuthMode != "" {
-		return c.AuthMode
+		return normalizeAuthMode(c.AuthMode)
 	}
 	if c.TenantKeys != "" {
 		return auth.ModeTenantKeys
@@ -227,6 +230,13 @@ func resolveAuthMode(c Config) auth.AuthMode {
 		return auth.ModeDynamicKeys
 	}
 	return ""
+}
+
+func normalizeAuthMode(mode auth.AuthMode) auth.AuthMode {
+	if mode == "legacy" {
+		return auth.ModeLegacy
+	}
+	return mode
 }
 
 func envStr(key, fallback string) string {

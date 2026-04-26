@@ -70,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer authClose()
-	adminStore := server.NewMemoryAdminStore()
+	adminStore := buildAdminStore(store)
 	handler := server.NewForRoleWithHealthRecorderDependenciesAndAdmin(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl}, adminStore, cfg.KeyPepper)
 
 	srv := &http.Server{
@@ -101,6 +101,13 @@ func main() {
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer drainCancel()
 	healthRecorder.Close(drainCtx)
+}
+
+func buildAdminStore(store storage.Store) server.AdminStore {
+	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
+		return server.NewMySQLAdminStore(mysqlStore.DB())
+	}
+	return server.NewMemoryAdminStore()
 }
 
 func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, func(), error) {
