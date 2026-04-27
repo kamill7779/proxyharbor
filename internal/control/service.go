@@ -131,13 +131,22 @@ func (s *Service) RenewLease(ctx context.Context, principal domain.Principal, le
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	if lease.Revoked {
+	now := s.now()
+	if lease.Revoked || !now.Before(lease.ExpiresAt) {
 		return domain.Lease{}, domain.ErrLeaseRevoked
 	}
+	policy, err := s.store.GetPolicy(ctx, lease.PolicyRef.ID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	ttl := time.Duration(policy.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
 	lease.Generation++
-	lease.ExpiresAt = s.now().Add(30 * time.Minute)
-	lease.RenewBefore = s.now().Add(15 * time.Minute)
-	lease.UpdatedAt = s.now()
+	lease.ExpiresAt = now.Add(ttl)
+	lease.RenewBefore = now.Add(ttl / 2)
+	lease.UpdatedAt = now
 	updated, err := s.store.UpdateLease(ctx, lease)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, updated.TenantID, updated.ID)
@@ -178,6 +187,9 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 	}
 	if s.now().After(lease.ExpiresAt) {
 		return domain.Lease{}, domain.ErrLeaseRevoked
+	}
+	if !resourceMatchesTarget(lease.ResourceRef, target) {
+		return domain.Lease{}, domain.ErrPolicyDenied
 	}
 	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
 		return domain.Lease{}, domain.ErrAuthFailed
@@ -381,6 +393,10 @@ func (s *Service) logSelectorError(tenantID string, candidateCount int, err erro
 }
 
 func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }
+
+func resourceMatchesTarget(resource domain.ResourceRef, target string) bool {
+	return extractHost(resource.ID) == extractHost(target)
+}
 
 func safeTarget(target string) bool {
 	host := extractHost(target)

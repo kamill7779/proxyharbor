@@ -42,6 +42,7 @@ func ensureDynamicAuthSchema(ctx context.Context, inspector schemaInspector) err
 		{table: "proxies", columns: []string{"proxy_id", "source_id", "endpoint", "healthy", "weight", "health_score"}},
 		{table: "policies", columns: []string{"policy_id", "version", "enabled", "ttl_seconds"}},
 		{table: "proxy_leases", columns: []string{"lease_id", "tenant_id", "policy_ref_json", "proxy_id", "password_hash"}},
+		{table: "proxy_idempotency_keys", columns: []string{"idempotency_key", "tenant_id", "lease_id"}},
 	}
 	for _, req := range required {
 		exists, err := inspector.tableExists(ctx, req.table)

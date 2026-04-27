@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
@@ -121,12 +121,32 @@ func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, le
 		 VALUES (?,?,?,?,?,?,?)`,
 		scope.String(), scope.TenantID, scope.StableSubjectID, scope.ResourceRef, scope.RequestKind, lease.ID, time.Now().UTC(),
 	); err != nil {
+		if isDuplicateKey(err) {
+			_ = tx.Rollback()
+			return s.leaseByIdempotencyAfterConflict(ctx, scope)
+		}
 		return domain.Lease{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Lease{}, err
 	}
 	return lease, nil
+}
+
+func (s *MySQLStore) leaseByIdempotencyAfterConflict(ctx context.Context, scope IdempotencyScope) (domain.Lease, error) {
+	var existing string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT lease_id FROM proxy_idempotency_keys WHERE idempotency_key = ?`,
+		scope.String(),
+	).Scan(&existing); err != nil {
+		return domain.Lease{}, err
+	}
+	return s.GetLease(ctx, scope.TenantID, existing)
+}
+
+func isDuplicateKey(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
 
 func (s *MySQLStore) GetLease(ctx context.Context, tenantID, id string) (domain.Lease, error) {

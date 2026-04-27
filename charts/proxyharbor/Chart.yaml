@@ -4,6 +4,6 @@ description: |
   Lightweight proxy lease, catalog, policy, and gateway service.
   Supports K8s and K3s. Brings your own MySQL and Redis.
 type: application
-version: 0.1.1
-appVersion: 0.1.1
+version: 0.2.0-alpha
+appVersion: 0.2.0-alpha
 kubeVersion: ">=1.23.0-0"

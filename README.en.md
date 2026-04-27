@@ -37,13 +37,24 @@ Admin-only:
 - `POST|PUT|DELETE /v1/providers`
 - `POST|PUT|DELETE /v1/proxies`
 - `POST|PUT|DELETE /v1/policies/default`
+- `GET /v1/catalog/latest`
 
 Tenant:
 
 - `POST /v1/leases`
 - `POST /v1/leases/{id}:renew`
 - `DELETE /v1/leases/{id}`
-- `GET /v1/catalog/latest`
+
+## Helm Secret
+
+The chart is Secret-first and does not render plaintext credentials. Create the referenced Secret before install:
+
+```bash
+kubectl create secret generic proxyharbor-credentials \
+  --from-literal=admin-key="$(openssl rand -hex 32)" \
+  --from-literal=pepper="$(openssl rand -hex 32)" \
+  --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
+```
 
 ## Health
 

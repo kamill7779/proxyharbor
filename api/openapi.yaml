@@ -242,6 +242,8 @@ paths:
         '200': { description: deleted }
   /v1/catalog/latest:
     get:
+      summary: Get latest global catalog
+      description: Admin-only. Returns global proxy inventory including endpoints; tenant keys must not call this endpoint.
       responses:
         '200': { description: catalog, content: { application/json: { schema: { $ref: '#/components/schemas/Catalog' } } } }
 components:
@@ -373,6 +375,7 @@ components:
         ttl_seconds: { type: integer }
         labels: { type: object, additionalProperties: { type: string } }
     Catalog:
+      description: Admin-only global catalog; includes proxy endpoints.
       type: object
       properties:
         version: { type: string }
