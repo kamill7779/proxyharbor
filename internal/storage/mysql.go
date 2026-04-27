@@ -161,6 +161,10 @@ func (s *MySQLStore) GetLease(ctx context.Context, tenantID, id string) (domain.
 }
 
 func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domain.Lease, error) {
+	if lease.Generation <= 1 {
+		return domain.Lease{}, domain.ErrStaleLease
+	}
+	previousGeneration := lease.Generation - 1
 	subjectJSON, _ := json.Marshal(lease.Subject)
 	resourceJSON, _ := json.Marshal(lease.ResourceRef)
 	policyJSON, _ := json.Marshal(lease.PolicyRef)
@@ -169,17 +173,20 @@ func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domai
 		`UPDATE proxy_leases SET generation=?, subject_json=?, resource_ref_json=?, policy_ref_json=?,
 			gateway_url=?, username=?, password_hash=?, proxy_id=?, expires_at=?, renew_before=?,
 			catalog_version=?, candidate_set_id=?, revoked=?, updated_at=?
-		 WHERE tenant_id=? AND lease_id=?`,
+		 WHERE tenant_id=? AND lease_id=? AND generation=?`,
 		lease.Generation, subjectJSON, resourceJSON, policyJSON,
 		lease.GatewayURL, lease.Username, lease.PasswordHash, lease.ProxyID,
 		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
 		lease.CandidateSetID, lease.Revoked, time.Now().UTC(),
-		lease.TenantID, lease.ID,
+		lease.TenantID, lease.ID, previousGeneration,
 	)
 	if err != nil {
 		return domain.Lease{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := s.GetLease(ctx, lease.TenantID, lease.ID); err == nil {
+			return domain.Lease{}, domain.ErrStaleLease
+		}
 		return domain.Lease{}, domain.ErrNotFound
 	}
 	return lease, nil
@@ -233,6 +240,80 @@ func (s *MySQLStore) DeleteExpiredLeases(ctx context.Context, tenantID string, b
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+func (s *MySQLStore) DeleteExpiredLeasesBatch(ctx context.Context, before time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM proxy_leases WHERE expires_at < ? LIMIT ?`,
+		before.UTC(), limit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *MySQLStore) HeartbeatInstance(ctx context.Context, heartbeat InstanceHeartbeat) error {
+	startedAt := heartbeat.StartedAt.UTC()
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	lastSeenAt := heartbeat.LastSeenAt.UTC()
+	if lastSeenAt.IsZero() {
+		lastSeenAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO instances (instance_id, role, version, config_fingerprint, started_at, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE role=VALUES(role), version=VALUES(version),
+			config_fingerprint=VALUES(config_fingerprint), last_seen_at=VALUES(last_seen_at)`,
+		heartbeat.InstanceID, heartbeat.Role, heartbeat.Version, heartbeat.ConfigFingerprint, startedAt, lastSeenAt,
+	)
+	return err
+}
+
+func (s *MySQLStore) TryAcquireLock(ctx context.Context, name, ownerInstanceID string, ttl time.Duration) (bool, error) {
+	now := time.Now().UTC()
+	leaseUntil := now.Add(ttl)
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO cluster_locks (name, owner_instance_id, lease_until, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+			owner_instance_id = IF(lease_until < VALUES(updated_at) OR owner_instance_id = VALUES(owner_instance_id), VALUES(owner_instance_id), owner_instance_id),
+			lease_until = IF(lease_until < VALUES(updated_at) OR owner_instance_id = VALUES(owner_instance_id), VALUES(lease_until), lease_until),
+			updated_at = IF(lease_until < VALUES(updated_at) OR owner_instance_id = VALUES(owner_instance_id), VALUES(updated_at), updated_at)`,
+		name, ownerInstanceID, leaseUntil, now,
+	)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	lock, ok, err := s.GetClusterLock(ctx, name)
+	if err != nil || !ok {
+		return false, err
+	}
+	return lock.OwnerInstanceID == ownerInstanceID && lock.LeaseUntil.After(now), nil
+}
+
+func (s *MySQLStore) GetClusterLock(ctx context.Context, name string) (ClusterLock, bool, error) {
+	var lock ClusterLock
+	err := s.db.QueryRowContext(ctx,
+		`SELECT name, owner_instance_id, lease_until, updated_at FROM cluster_locks WHERE name = ?`,
+		name,
+	).Scan(&lock.Name, &lock.OwnerInstanceID, &lock.LeaseUntil, &lock.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClusterLock{}, false, nil
+	}
+	if err != nil {
+		return ClusterLock{}, false, err
+	}
+	return lock, true, nil
 }
 
 // ---------- PolicyStore ----------

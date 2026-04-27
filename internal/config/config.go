@@ -60,7 +60,12 @@ type Config struct {
 	AuthInvalidation string
 	// InstanceID is a non-secret identifier surfaced in /readyz and the
 	// debug auth cache endpoint to help correlate logs across replicas.
-	InstanceID string
+	InstanceID                string
+	ClusterEnabled            bool
+	InstanceHeartbeatInterval time.Duration
+	LeaderLeaseTTL            time.Duration
+	MaintenanceInterval       time.Duration
+	MaintenanceBatchSize      int
 }
 
 func Load(args []string) (Config, error) {
@@ -94,6 +99,11 @@ func Load(args []string) (Config, error) {
 		ZFairMaxPromote:            envInt("PROXYHARBOR_ZFAIR_MAX_PROMOTE", 128),
 		AuthInvalidation:           envStr("PROXYHARBOR_AUTH_INVALIDATION", ""),
 		InstanceID:                 envStr("PROXYHARBOR_INSTANCE_ID", ""),
+		ClusterEnabled:             envBool("PROXYHARBOR_CLUSTER_ENABLED", false),
+		InstanceHeartbeatInterval:  envDur("PROXYHARBOR_INSTANCE_HEARTBEAT_INTERVAL", 10*time.Second),
+		LeaderLeaseTTL:             envDur("PROXYHARBOR_LEADER_LEASE_TTL", 45*time.Second),
+		MaintenanceInterval:        envDur("PROXYHARBOR_MAINTENANCE_INTERVAL", 30*time.Second),
+		MaintenanceBatchSize:       envInt("PROXYHARBOR_MAINTENANCE_BATCH_SIZE", 500),
 	}
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
@@ -118,6 +128,11 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.ZFairMaxPromote, "zfair-max-promote", cfg.ZFairMaxPromote, "zfair max delayed promotions")
 	fs.StringVar(&cfg.AuthInvalidation, "auth-invalidation", cfg.AuthInvalidation, "auth invalidation transport: auto | redis | polling")
 	fs.StringVar(&cfg.InstanceID, "instance-id", cfg.InstanceID, "non-secret instance identifier exposed in readiness/debug responses")
+	fs.BoolVar(&cfg.ClusterEnabled, "cluster-enabled", cfg.ClusterEnabled, "enable MySQL-backed instance heartbeat and maintenance leader election")
+	fs.DurationVar(&cfg.InstanceHeartbeatInterval, "instance-heartbeat-interval", cfg.InstanceHeartbeatInterval, "cluster instance heartbeat interval")
+	fs.DurationVar(&cfg.LeaderLeaseTTL, "leader-lease-ttl", cfg.LeaderLeaseTTL, "cluster leader lock lease TTL")
+	fs.DurationVar(&cfg.MaintenanceInterval, "maintenance-interval", cfg.MaintenanceInterval, "leader maintenance interval")
+	fs.IntVar(&cfg.MaintenanceBatchSize, "maintenance-batch-size", cfg.MaintenanceBatchSize, "leader expired lease cleanup batch size")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -185,6 +200,21 @@ func (c Config) validate() error {
 	}
 	if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
 		return errors.New("PROXYHARBOR_AUTH_REFRESH_INTERVAL must be > 0 and <= 5s")
+	}
+	if c.ClusterEnabled && c.StorageDriver != DriverMySQL {
+		return errors.New("cluster mode requires storage=mysql")
+	}
+	if c.InstanceHeartbeatInterval <= 0 {
+		return errors.New("PROXYHARBOR_INSTANCE_HEARTBEAT_INTERVAL must be positive")
+	}
+	if c.LeaderLeaseTTL <= 0 {
+		return errors.New("PROXYHARBOR_LEADER_LEASE_TTL must be positive")
+	}
+	if c.MaintenanceInterval <= 0 {
+		return errors.New("PROXYHARBOR_MAINTENANCE_INTERVAL must be positive")
+	}
+	if c.MaintenanceBatchSize <= 0 {
+		return errors.New("PROXYHARBOR_MAINTENANCE_BATCH_SIZE must be positive")
 	}
 	return nil
 }

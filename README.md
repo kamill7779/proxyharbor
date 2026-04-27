@@ -140,6 +140,17 @@ kubectl create secret generic proxyharbor-credentials \
   --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
 ```
 
+
+### Kubernetes 多实例部署
+
+Helm Chart 默认以 HA baseline 运行：`replicaCount=2`、RollingUpdate `maxUnavailable=0` / `maxSurge=1`，并启用 PDB、优雅终止和可选 HPA。多实例部署需要共享 MySQL；Redis/zfair 推荐开启，生产多实例建议设置 `redis.selectorRedisRequired=true` 和 `auth.invalidation=redis`。内存存储仅适合本地开发，不适合多 Pod。
+
+示例：
+
+```bash
+helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/multi-instance-values.yaml
+```
+
 ## 数据模型
 
 ### Provider（提供商）

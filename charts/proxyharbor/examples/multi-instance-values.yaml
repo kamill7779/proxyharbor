@@ -1,0 +1,56 @@
+# ProxyHarbor multi-instance baseline.
+# Requires shared MySQL storage. Redis/zfair is recommended for multi-instance
+# selector coordination and cache invalidation; memory storage is for dev only.
+replicaCount: 2
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+terminationGracePeriodSeconds: 30
+preStop:
+  enabled: true
+  sleepSeconds: 5
+
+mysql:
+  existingSecret: proxyharbor-credentials
+  existingSecretKey: mysql-dsn
+  maxOpen: 20
+  maxIdle: 5
+  connMaxAge: 30m
+
+redis:
+  # Example: redis-master.proxyharbor.svc.cluster.local:6379
+  addr: redis-master.proxyharbor.svc.cluster.local:6379
+  existingSecret: proxyharbor-credentials
+  existingSecretKey: redis-password
+  selectorRedisRequired: true
+  db: 0
+
+auth:
+  existingSecret: proxyharbor-credentials
+  keys:
+    adminKey: admin-key
+    pepper: pepper
+  refreshInterval: 5s
+  invalidation: redis
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: proxyharbor

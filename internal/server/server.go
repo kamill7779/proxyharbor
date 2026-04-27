@@ -16,7 +16,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.2.0-alpha"
+const Version = "0.3.0-alpha"
 
 type Role string
 
@@ -39,6 +39,8 @@ type Server struct {
 	invalidator    auth.Invalidator
 	instanceID     string
 	authSnapshot   AuthSnapshotProvider
+	clusterStore   storage.ClusterStore
+	clusterSummary map[string]any
 }
 
 // AuthReadyChecker reports whether the auth subsystem is ready to handle
@@ -64,6 +66,8 @@ type Options struct {
 	AuthSnapshot   AuthSnapshotProvider
 	Invalidator    auth.Invalidator
 	InstanceID     string
+	ClusterStore   storage.ClusterStore
+	ClusterSummary map[string]any
 }
 
 // NewWithOptions builds the HTTP handler with the supplied optional
@@ -86,6 +90,8 @@ func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Option
 		authSnapshot:   opts.AuthSnapshot,
 		invalidator:    opts.Invalidator,
 		instanceID:     opts.InstanceID,
+		clusterStore:   opts.ClusterStore,
+		clusterSummary: opts.ClusterSummary,
 	}
 	s.routes()
 	return Recover(s)
@@ -141,6 +147,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/readyz", s.ready)
 	s.mux.HandleFunc("/version", s.version)
+	s.mux.HandleFunc("/metrics", s.metrics)
 	if s.role == RoleAll || s.role == RoleController {
 		s.mux.HandleFunc("/v1/leases", s.leases)
 		s.mux.HandleFunc("/v1/leases/", s.leaseByID)
@@ -163,6 +170,7 @@ func (s *Server) routes() {
 	if s.adminStore != nil && (s.role == RoleAll || s.role == RoleController) {
 		admin := newAdminHandler(s.adminStore, s.pepper, s.invalidator, s.instanceID)
 		admin.register(s.mux, s.requireAdminAuth)
+		s.mux.HandleFunc("/admin/cluster", s.requireAdminAuth(s.adminCluster))
 	}
 	if s.role == RoleAll || s.role == RoleController {
 		s.mux.HandleFunc("/debug/auth-cache", s.requireAdminAuth(s.debugAuthCache))

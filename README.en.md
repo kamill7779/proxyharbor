@@ -140,6 +140,17 @@ kubectl create secret generic proxyharbor-credentials \
   --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
 ```
 
+
+### Kubernetes Multi-Instance Deployment
+
+The Helm chart now defaults to an HA baseline: `replicaCount=2`, RollingUpdate `maxUnavailable=0` / `maxSurge=1`, PDB enabled, graceful termination, and optional HPA. Multi-instance deployments require shared MySQL. Redis/zfair is recommended; for production multi-instance installs, set `redis.selectorRedisRequired=true` and `auth.invalidation=redis`. Memory storage is for local development only and is not suitable for multiple Pods.
+
+Example:
+
+```bash
+helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/multi-instance-values.yaml
+```
+
 ## Data Model
 
 ### Provider
