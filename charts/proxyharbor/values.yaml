@@ -18,7 +18,16 @@ image:
 
 # all (dev) | controller (control plane) | gateway (data plane)
 role: all
-replicaCount: 2
+replicaCount: 1
+
+# Optional Deployment.spec.strategy override. Example for safer multi-replica
+# rollouts in dynamic-keys mode (see charts/proxyharbor/examples/dynamic-ha-values.yaml):
+#   strategy:
+#     type: RollingUpdate
+#     rollingUpdate:
+#       maxSurge: 1
+#       maxUnavailable: 0
+strategy: {}
 
 # K3s/edge optimization: lowers resources and relaxes livenessProbe when enabled.
 lightweight: false
@@ -52,6 +61,11 @@ auth:
   adminKey: ""                # Bootstrap Admin Key; required for dynamic-keys, >=32 chars.
   pepper: ""                  # Key Pepper; required for dynamic-keys, >=32 random bytes.
   refreshInterval: 5s         # Cache polling interval.
+  # Auth invalidation transport for dynamic-keys (v0.1.6+):
+  #   ""/"auto" : enable Redis pub/sub when redis.addr is configured, fall back to polling otherwise (recommended)
+  #   "redis"   : require Redis pub/sub broadcast (still polling-backed for safety)
+  #   "polling" : disable pub/sub, rely solely on refreshInterval polling
+  invalidation: ""
 
 # MySQL connection; choose one:
 #   1) Set mysql.dsn directly (plaintext).

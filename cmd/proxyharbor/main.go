@@ -3,11 +3,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/control/selector"
 	"github.com/kamill7779/proxyharbor/internal/server"
 	"github.com/kamill7779/proxyharbor/internal/storage"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -64,14 +68,74 @@ func main() {
 	svc.SetSelector(selectorImpl)
 
 	role := server.Role(cfg.Role)
-	authn, authClose, err := buildAuthenticator(ctx, cfg, store)
+	instanceID := resolveInstanceID(cfg)
+
+	// Optional Redis client reused for cache/selector pub/sub invalidation.
+	// Cache/selector keep their own clients to avoid coupling timeouts;
+	// this client is dedicated to pub/sub so subscribe blocking does not
+	// stall normal traffic.
+	var invalidationClient *redis.Client
+	if cfg.AuthMode == auth.ModeDynamicKeys && cfg.RedisAddr != "" && cfg.AuthInvalidation != "polling" {
+		invalidationClient = redis.NewClient(&redis.Options{
+			Addr:         cfg.RedisAddr,
+			Password:     cfg.RedisPassword,
+			DB:           cfg.RedisDB,
+			DialTimeout:  3 * time.Second,
+			ReadTimeout:  0, // pub/sub uses blocking reads
+			WriteTimeout: 2 * time.Second,
+		})
+	}
+	defer func() {
+		if invalidationClient != nil {
+			_ = invalidationClient.Close()
+		}
+	}()
+
+	// Verify dynamic-mode MySQL schema is at the version this binary expects
+	// before starting any traffic-serving goroutine. Legacy/tenant-keys are
+	// not gated.
+	if cfg.AuthMode == auth.ModeDynamicKeys {
+		if mysqlStore, ok := store.(*storage.MySQLStore); ok {
+			if err := storage.EnsureDynamicAuthSchema(ctx, mysqlStore.DB()); err != nil {
+				logger.Error("dynamic auth schema check failed", "err", err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	authn, dynamicStore, authClose, err := buildAuthenticator(ctx, cfg, store)
 	if err != nil {
 		logger.Error("open authenticator", "err", err)
 		os.Exit(1)
 	}
 	defer authClose()
+
+	var invalidator auth.Invalidator = auth.NoopInvalidator{}
+	if invalidationClient != nil {
+		invalidator = auth.NewRedisInvalidator(invalidationClient, auth.DefaultInvalidationChannel, logger)
+		if dynamicStore != nil {
+			subCtx, subCancel := context.WithCancel(ctx)
+			go auth.SubscribeInvalidations(subCtx, invalidationClient, auth.DefaultInvalidationChannel, dynamicStore, logger)
+			defer subCancel()
+		}
+	}
+
 	adminStore := buildAdminStore(store)
-	handler := server.NewForRoleWithHealthRecorderDependenciesAndAdmin(svc, authn, role, healthRecorder, dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl}, adminStore, cfg.KeyPepper)
+	opts := server.Options{
+		Role:           role,
+		HealthRecorder: healthRecorder,
+		Dependency:     dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl},
+		AdminStore:     adminStore,
+		Pepper:         cfg.KeyPepper,
+		Invalidator:    invalidator,
+		InstanceID:     instanceID,
+	}
+	if dynamicStore != nil {
+		readyChecker := dynamicAuthReady{store: dynamicStore}
+		opts.AuthReady = readyChecker
+		opts.AuthSnapshot = readyChecker
+	}
+	handler := server.NewWithOptions(svc, authn, opts)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -83,7 +147,9 @@ func main() {
 		logger.Info("proxyharbor listening",
 			"role", cfg.Role, "addr", cfg.Addr, "storage", cfg.StorageDriver,
 			"redis", cfg.RedisAddr != "", "selector", cfg.Selector,
-			"auth_mode", cfg.AuthMode, "auth_cache_entries", authn.CacheEntries())
+			"auth_mode", cfg.AuthMode, "auth_cache_entries", authn.CacheEntries(),
+			"auth_invalidation", authInvalidationLabel(cfg, invalidationClient != nil),
+			"instance_id", instanceID)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("listen", "err", err)
 			stop()
@@ -110,26 +176,92 @@ func buildAdminStore(store storage.Store) server.AdminStore {
 	return server.NewMemoryAdminStore()
 }
 
-func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, func(), error) {
+func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, func(), error) {
 	switch cfg.AuthMode {
 	case auth.ModeDynamicKeys:
 		mysqlStore, ok := store.(*storage.MySQLStore)
 		if !ok {
-			return nil, func() {}, errors.New("auth mode dynamic-keys requires mysql storage")
+			return nil, nil, func() {}, errors.New("auth mode dynamic-keys requires mysql storage")
 		}
 		dynamicStore, err := auth.NewDynamicStore(auth.NewMySQLKeyStore(mysqlStore.DB()), []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
 		if err != nil {
-			return nil, func() {}, err
+			return nil, nil, func() {}, err
 		}
 		refreshCtx, cancel := context.WithCancel(ctx)
 		go dynamicStore.Run(refreshCtx)
-		return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), cancel, nil
+		return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), dynamicStore, cancel, nil
 	case auth.ModeTenantKeys:
-		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), func() {}, nil
+		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), nil, func() {}, nil
 	case auth.ModeLegacy:
-		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), func() {}, nil
+		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), nil, func() {}, nil
 	default:
-		return nil, func() {}, errors.New("unsupported auth mode")
+		return nil, nil, func() {}, errors.New("unsupported auth mode")
+	}
+}
+
+// dynamicAuthReady satisfies server.AuthReadyChecker / AuthSnapshotProvider
+// without leaking secrets.
+type dynamicAuthReady struct {
+	store *auth.DynamicStore
+}
+
+func (d dynamicAuthReady) CheckAuthReady(context.Context) error {
+	if d.store == nil {
+		return nil
+	}
+	if !d.store.Initialized() {
+		return errors.New("dynamic auth cache not initialized")
+	}
+	return nil
+}
+
+func (d dynamicAuthReady) AuthSnapshot() auth.Snapshot {
+	if d.store == nil {
+		return auth.Snapshot{}
+	}
+	return d.store.Snapshot()
+}
+
+func resolveInstanceID(cfg config.Config) string {
+	if cfg.InstanceID != "" {
+		return cfg.InstanceID
+	}
+	if v := os.Getenv("HOSTNAME"); v != "" {
+		return v + "-" + shortRand()
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "proxyharbor"
+	}
+	return host + "-" + shortRand()
+}
+
+func shortRand() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "0000"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func authInvalidationLabel(cfg config.Config, redisActive bool) string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.AuthInvalidation))
+	if cfg.AuthMode != auth.ModeDynamicKeys {
+		return "n/a"
+	}
+	switch mode {
+	case "polling":
+		return "polling"
+	case "redis":
+		if redisActive {
+			return "redis"
+		}
+		return "redis-unconfigured"
+	default:
+		if redisActive {
+			return "auto-redis"
+		}
+		return "polling"
 	}
 }
 

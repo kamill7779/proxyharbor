@@ -30,12 +30,31 @@ type AdminStore interface {
 }
 
 type adminHandler struct {
-	store  AdminStore
-	pepper string
+	store       AdminStore
+	pepper      string
+	invalidator auth.Invalidator
+	instanceID  string
 }
 
-func newAdminHandler(store AdminStore, pepper string) *adminHandler {
-	return &adminHandler{store: store, pepper: pepper}
+func newAdminHandler(store AdminStore, pepper string, invalidator auth.Invalidator, instanceID string) *adminHandler {
+	if invalidator == nil {
+		invalidator = auth.NoopInvalidator{}
+	}
+	return &adminHandler{store: store, pepper: pepper, invalidator: invalidator, instanceID: instanceID}
+}
+
+func (h *adminHandler) emit(ctx context.Context, reason, tenantID, keyID string) {
+	ev := auth.InvalidationEvent{
+		Reason:     reason,
+		TenantID:   tenantID,
+		KeyID:      keyID,
+		InstanceID: h.instanceID,
+	}
+	go func() {
+		publishCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = h.invalidator.Publish(publishCtx, ev)
+	}()
 }
 
 func (h *adminHandler) register(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
@@ -113,6 +132,7 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 					respond(w, nil, err, http.StatusOK)
 					return
 				}
+				h.emit(r.Context(), "tenant_status_change", id, "")
 				if *req.Status == "deleted" {
 					writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 					return
@@ -133,6 +153,7 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
+			h.emit(r.Context(), "tenant_status_change", id, "")
 			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		default:
 			methodNotAllowed(w)
@@ -198,6 +219,7 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
+			h.emit(r.Context(), "tenant_key.create", id, tk.ID)
 			_ = h.store.AppendAuditEvents(r.Context(), []domain.AuditEvent{{
 				EventID:     "audit-" + tk.ID,
 				TenantID:    id,
@@ -249,6 +271,7 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
+			h.emit(r.Context(), "tenant_key.revoke", id, keyID)
 			_ = h.store.AppendAuditEvents(r.Context(), []domain.AuditEvent{{
 				EventID:     "audit-revoke-" + keyID,
 				TenantID:    id,
@@ -272,6 +295,7 @@ func (h *adminHandler) revokeTenantKeys(ctx context.Context, tenantID string) er
 	if err != nil {
 		return err
 	}
+	revoked := 0
 	for _, key := range keys {
 		if key.RevokedAt != nil {
 			continue
@@ -279,6 +303,7 @@ func (h *adminHandler) revokeTenantKeys(ctx context.Context, tenantID string) er
 		if err := h.store.RevokeTenantKey(ctx, tenantID, key.ID); err != nil {
 			return err
 		}
+		revoked++
 	}
 	return nil
 }

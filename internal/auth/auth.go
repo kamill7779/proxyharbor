@@ -78,6 +78,24 @@ func (a *Authenticator) CacheEntries() int {
 	return a.dynamic.Len()
 }
 
+// Mode returns the authenticator mode (legacy/tenant-keys/dynamic-keys).
+func (a *Authenticator) Mode() AuthMode {
+	if a == nil {
+		return ""
+	}
+	return a.mode
+}
+
+// DynamicStore returns the underlying DynamicStore for dynamic-keys mode,
+// or nil for other modes. Callers may use it to inspect snapshots, but must
+// not mutate the store directly.
+func (a *Authenticator) DynamicStore() *DynamicStore {
+	if a == nil {
+		return nil
+	}
+	return a.dynamic
+}
+
 func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) {
 	if a == nil || r == nil {
 		return domain.Principal{}, domain.ErrAuthFailed
