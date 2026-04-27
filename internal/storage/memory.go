@@ -87,8 +87,12 @@ func (s *MemoryStore) UpdateLease(_ context.Context, lease domain.Lease) (domain
 	defer s.mu.Unlock()
 
 	leaseKey := key(lease.TenantID, lease.ID)
-	if _, ok := s.leases[leaseKey]; !ok {
+	existing, ok := s.leases[leaseKey]
+	if !ok {
 		return domain.Lease{}, domain.ErrNotFound
+	}
+	if lease.Generation <= 1 || existing.Generation != lease.Generation-1 {
+		return domain.Lease{}, domain.ErrStaleLease
 	}
 	lease.Password = ""
 	s.leases[leaseKey] = copyLease(lease)

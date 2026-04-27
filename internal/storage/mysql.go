@@ -161,11 +161,10 @@ func (s *MySQLStore) GetLease(ctx context.Context, tenantID, id string) (domain.
 }
 
 func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domain.Lease, error) {
-	previousGeneration := lease.Generation
-	if previousGeneration <= 0 {
+	if lease.Generation <= 1 {
 		return domain.Lease{}, domain.ErrStaleLease
 	}
-	lease.Generation++
+	previousGeneration := lease.Generation - 1
 	subjectJSON, _ := json.Marshal(lease.Subject)
 	resourceJSON, _ := json.Marshal(lease.ResourceRef)
 	policyJSON, _ := json.Marshal(lease.PolicyRef)
