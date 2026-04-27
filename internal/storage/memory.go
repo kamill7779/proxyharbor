@@ -16,7 +16,7 @@ type MemoryStore struct {
 	policies    map[string]domain.Policy
 	providers   map[string]domain.Provider
 	proxies     map[string]domain.Proxy
-	catalogs    map[string]domain.Catalog
+	catalog     domain.Catalog
 	audit       map[string]domain.AuditEvent
 	usage       map[string]domain.UsageEvent
 }
@@ -29,14 +29,12 @@ func NewMemoryStore() *MemoryStore {
 		policies:    map[string]domain.Policy{},
 		providers:   map[string]domain.Provider{},
 		proxies:     map[string]domain.Proxy{},
-		catalogs:    map[string]domain.Catalog{},
 		audit:       map[string]domain.AuditEvent{},
 		usage:       map[string]domain.UsageEvent{},
 	}
 
-	_, _ = store.UpsertPolicy(context.Background(), domain.Policy{ID: "default", TenantID: "default", Version: 1, Name: "Default allow policy", Enabled: true, TTLSeconds: 1800, CreatedAt: now, UpdatedAt: now})
-	_, _ = store.UpsertProvider(context.Background(), domain.Provider{ID: "static-dev", TenantID: "default", Type: "static", Name: "Static dev provider", Enabled: true, CreatedAt: now, UpdatedAt: now})
-	_, _ = store.UpsertProxy(context.Background(), domain.Proxy{ID: "proxy-dev", TenantID: "default", ProviderID: "static-dev", Endpoint: "http://127.0.0.1:18080", Healthy: true, Weight: 1, LastSeenAt: now})
+	_, _ = store.UpsertPolicy(context.Background(), domain.Policy{ID: "default", Version: 1, Name: "Default allow policy", Enabled: true, TTLSeconds: 1800, CreatedAt: now, UpdatedAt: now})
+	_, _ = store.UpsertProvider(context.Background(), domain.Provider{ID: "default", Type: "static", Name: "Default provider", Enabled: true, CreatedAt: now, UpdatedAt: now})
 	return store
 }
 
@@ -141,11 +139,11 @@ func (s *MemoryStore) DeleteExpiredLeases(_ context.Context, tenantID string, be
 	return deleted, nil
 }
 
-func (s *MemoryStore) ChooseHealthyProxy(_ context.Context, tenantID string) (domain.Proxy, error) {
+func (s *MemoryStore) ChooseHealthyProxy(_ context.Context) (domain.Proxy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	proxies := s.selectableProxiesLocked(tenantID, time.Now().UTC())
+	proxies := s.selectableProxiesLocked(time.Now().UTC())
 	if len(proxies) == 0 {
 		return domain.Proxy{}, domain.ErrNoHealthyProxy
 	}
@@ -158,18 +156,18 @@ func (s *MemoryStore) ChooseHealthyProxy(_ context.Context, tenantID string) (do
 	return proxies[0], nil
 }
 
-func (s *MemoryStore) ListSelectableProxies(_ context.Context, tenantID string) ([]domain.Proxy, error) {
+func (s *MemoryStore) ListSelectableProxies(_ context.Context) ([]domain.Proxy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.selectableProxiesLocked(tenantID, time.Now().UTC()), nil
+	return s.selectableProxiesLocked(time.Now().UTC()), nil
 }
 
-func (s *MemoryStore) RecordProxyOutcome(_ context.Context, tenantID, proxyID string, delta ProxyHealthDelta) error {
+func (s *MemoryStore) RecordProxyOutcome(_ context.Context, proxyID string, delta ProxyHealthDelta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	proxy, ok := s.proxies[key(tenantID, proxyID)]
+	proxy, ok := s.proxies[key("", proxyID)]
 	if !ok {
 		return domain.ErrNotFound
 	}
@@ -228,29 +226,27 @@ func (s *MemoryStore) RecordProxyOutcome(_ context.Context, tenantID, proxyID st
 			proxy.CircuitOpenUntil = observedAt.Add(cooldown)
 		}
 	}
-	s.proxies[key(tenantID, proxyID)] = copyProxy(proxy)
+	s.proxies[key("", proxyID)] = copyProxy(proxy)
 	return nil
 }
 
-func (s *MemoryStore) ListProviders(_ context.Context, tenantID string) ([]domain.Provider, error) {
+func (s *MemoryStore) ListProviders(_ context.Context) ([]domain.Provider, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	providers := make([]domain.Provider, 0)
 	for _, provider := range s.providers {
-		if provider.TenantID == tenantID {
-			providers = append(providers, copyProvider(provider))
-		}
+		providers = append(providers, copyProvider(provider))
 	}
 	sort.Slice(providers, func(i, j int) bool { return providers[i].ID < providers[j].ID })
 	return providers, nil
 }
 
-func (s *MemoryStore) GetProvider(_ context.Context, tenantID, id string) (domain.Provider, error) {
+func (s *MemoryStore) GetProvider(_ context.Context, id string) (domain.Provider, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	provider, ok := s.providers[key(tenantID, id)]
+	provider, ok := s.providers[key("", id)]
 	if !ok {
 		return domain.Provider{}, domain.ErrNotFound
 	}
@@ -262,9 +258,6 @@ func (s *MemoryStore) UpsertProvider(_ context.Context, provider domain.Provider
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	if provider.TenantID == "" {
-		provider.TenantID = "default"
-	}
 	if provider.ID == "" {
 		provider.ID = "provider-" + now.Format("20060102150405.000000000")
 	}
@@ -278,42 +271,39 @@ func (s *MemoryStore) UpsertProvider(_ context.Context, provider domain.Provider
 		provider.CreatedAt = now
 	}
 	provider.UpdatedAt = now
-	s.providers[key(provider.TenantID, provider.ID)] = copyProvider(provider)
+	s.providers[key("", provider.ID)] = copyProvider(provider)
 	return copyProvider(provider), nil
 }
 
-func (s *MemoryStore) DeleteProvider(_ context.Context, tenantID, id string) error {
+func (s *MemoryStore) DeleteProvider(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.providers, key(tenantID, id))
+	delete(s.providers, key("", id))
 	return nil
 }
 
-func (s *MemoryStore) LatestCatalog(_ context.Context, tenantID string) (domain.Catalog, error) {
+func (s *MemoryStore) LatestCatalog(_ context.Context) (domain.Catalog, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if catalog, ok := s.catalogs[tenantID]; ok {
-		return copyCatalog(catalog), nil
+	if s.catalog.Version != "" {
+		return copyCatalog(s.catalog), nil
 	}
-	proxies := s.proxiesForTenantLocked(tenantID)
+	proxies := s.catalogProxiesLocked()
 	now := time.Now().UTC()
-	return domain.Catalog{TenantID: tenantID, Version: "memory", Proxies: proxies, Generated: now, ExpiresAt: now.Add(time.Minute)}, nil
+	return domain.Catalog{Version: "memory", Proxies: proxies, Generated: now, ExpiresAt: now.Add(time.Minute)}, nil
 }
 
 func (s *MemoryStore) UpsertProxy(_ context.Context, proxy domain.Proxy) (domain.Proxy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if proxy.TenantID == "" {
-		proxy.TenantID = "default"
-	}
 	if proxy.ID == "" {
 		proxy.ID = "proxy-" + time.Now().UTC().Format("20060102150405.000000000")
 	}
 	if proxy.ProviderID == "" {
-		proxy.ProviderID = "static-dev"
+		proxy.ProviderID = "default"
 	}
 	if proxy.Weight == 0 {
 		proxy.Weight = 1
@@ -324,26 +314,26 @@ func (s *MemoryStore) UpsertProxy(_ context.Context, proxy domain.Proxy) (domain
 	if proxy.LastSeenAt.IsZero() {
 		proxy.LastSeenAt = time.Now().UTC()
 	}
-	s.proxies[key(proxy.TenantID, proxy.ID)] = copyProxy(proxy)
+	s.proxies[key("", proxy.ID)] = copyProxy(proxy)
 	return copyProxy(proxy), nil
 }
 
-func (s *MemoryStore) GetProxy(_ context.Context, tenantID, id string) (domain.Proxy, error) {
+func (s *MemoryStore) GetProxy(_ context.Context, id string) (domain.Proxy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	proxy, ok := s.proxies[key(tenantID, id)]
+	proxy, ok := s.proxies[key("", id)]
 	if !ok {
 		return domain.Proxy{}, domain.ErrNotFound
 	}
 	return copyProxy(proxy), nil
 }
 
-func (s *MemoryStore) DeleteProxy(_ context.Context, tenantID, id string) error {
+func (s *MemoryStore) DeleteProxy(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.proxies, key(tenantID, id))
+	delete(s.proxies, key("", id))
 	return nil
 }
 
@@ -351,21 +341,21 @@ func (s *MemoryStore) SaveCatalogSnapshot(_ context.Context, catalog domain.Cata
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.catalogs[catalog.TenantID] = copyCatalog(catalog)
+	s.catalog = copyCatalog(catalog)
 	return nil
 }
 
-func (s *MemoryStore) ListCatalogProxies(_ context.Context, tenantID string) ([]domain.Proxy, error) {
+func (s *MemoryStore) ListCatalogProxies(_ context.Context) ([]domain.Proxy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.proxiesForTenantLocked(tenantID), nil
+	return s.catalogProxiesLocked(), nil
 }
 
-func (s *MemoryStore) selectableProxiesLocked(tenantID string, now time.Time) []domain.Proxy {
+func (s *MemoryStore) selectableProxiesLocked(now time.Time) []domain.Proxy {
 	proxies := make([]domain.Proxy, 0)
 	for _, proxy := range s.proxies {
-		if proxy.TenantID != tenantID || !proxy.Healthy || proxy.Weight <= 0 || proxy.HealthScore <= 0 {
+		if !proxy.Healthy || proxy.Weight <= 0 || proxy.HealthScore <= 0 {
 			continue
 		}
 		if !proxy.CircuitOpenUntil.IsZero() && proxy.CircuitOpenUntil.After(now) {
@@ -377,25 +367,23 @@ func (s *MemoryStore) selectableProxiesLocked(tenantID string, now time.Time) []
 	return proxies
 }
 
-func (s *MemoryStore) ListPolicies(_ context.Context, tenantID string) ([]domain.Policy, error) {
+func (s *MemoryStore) ListPolicies(_ context.Context) ([]domain.Policy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	policies := make([]domain.Policy, 0)
 	for _, policy := range s.policies {
-		if policy.TenantID == tenantID {
-			policies = append(policies, copyPolicy(policy))
-		}
+		policies = append(policies, copyPolicy(policy))
 	}
 	sort.Slice(policies, func(i, j int) bool { return policies[i].ID < policies[j].ID })
 	return policies, nil
 }
 
-func (s *MemoryStore) GetPolicy(_ context.Context, tenantID, id string) (domain.Policy, error) {
+func (s *MemoryStore) GetPolicy(_ context.Context, id string) (domain.Policy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	policy, ok := s.policies[key(tenantID, id)]
+	policy, ok := s.policies[key("", id)]
 	if !ok {
 		return domain.Policy{}, domain.ErrNotFound
 	}
@@ -410,10 +398,7 @@ func (s *MemoryStore) UpsertPolicy(_ context.Context, policy domain.Policy) (dom
 	if policy.ID == "" {
 		policy.ID = "policy-" + now.Format("20060102150405.000000000")
 	}
-	if policy.TenantID == "" {
-		policy.TenantID = "default"
-	}
-	existing, ok := s.policies[key(policy.TenantID, policy.ID)]
+	existing, ok := s.policies[key("", policy.ID)]
 	if ok {
 		policy.Version = existing.Version + 1
 		policy.CreatedAt = existing.CreatedAt
@@ -425,15 +410,15 @@ func (s *MemoryStore) UpsertPolicy(_ context.Context, policy domain.Policy) (dom
 		policy.TTLSeconds = 1800
 	}
 	policy.UpdatedAt = now
-	s.policies[key(policy.TenantID, policy.ID)] = copyPolicy(policy)
+	s.policies[key("", policy.ID)] = copyPolicy(policy)
 	return copyPolicy(policy), nil
 }
 
-func (s *MemoryStore) DeletePolicy(_ context.Context, tenantID, id string) error {
+func (s *MemoryStore) DeletePolicy(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.policies, key(tenantID, id))
+	delete(s.policies, key("", id))
 	return nil
 }
 
@@ -478,12 +463,10 @@ func (s *MemoryStore) AppendUsageEvents(_ context.Context, events []domain.Usage
 	return nil
 }
 
-func (s *MemoryStore) proxiesForTenantLocked(tenantID string) []domain.Proxy {
+func (s *MemoryStore) catalogProxiesLocked() []domain.Proxy {
 	proxies := make([]domain.Proxy, 0)
 	for _, proxy := range s.proxies {
-		if proxy.TenantID == tenantID {
-			proxies = append(proxies, copyProxy(proxy))
-		}
+		proxies = append(proxies, copyProxy(proxy))
 	}
 	sort.Slice(proxies, func(i, j int) bool { return proxies[i].ID < proxies[j].ID })
 	return proxies

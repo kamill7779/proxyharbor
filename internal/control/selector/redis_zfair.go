@@ -175,14 +175,14 @@ func (s *RedisZFair) Check(ctx context.Context) error {
 	return s.client.Ping(pingCtx).Err()
 }
 
-func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
+func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	if len(candidates) == 0 {
 		return domain.Proxy{}, domain.ErrNoHealthyProxy
 	}
 	candidateByID := make(map[string]domain.Proxy, len(candidates))
 	pipe := s.client.Pipeline()
 	for _, candidate := range candidates {
-		if candidate.TenantID != tenantID || !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
 			continue
 		}
 		latencyMS := candidate.LatencyEWMAms
@@ -194,16 +194,15 @@ func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []d
 			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
 		}
 		candidateByID[candidate.ID] = candidate
-		pipe.HSet(ctx, nodeKey(tenantID, candidate.ID), map[string]any{
-			"tenant_id":          tenantID,
+		pipe.HSet(ctx, nodeKey(candidate.ID), map[string]any{
 			"proxy_id":           candidate.ID,
 			"weight":             candidate.Weight,
 			"health_score":       candidate.HealthScore,
 			"latency_ewma_ms":    latencyMS,
 			"circuit_open_until": circuitOpenUntil,
 		})
-		pipe.HSetNX(ctx, nodeKey(tenantID, candidate.ID), "virtual_runtime", 0)
-		pipe.HSetNX(ctx, nodeKey(tenantID, candidate.ID), "next_eligible_at", 0)
+		pipe.HSetNX(ctx, nodeKey(candidate.ID), "virtual_runtime", 0)
+		pipe.HSetNX(ctx, nodeKey(candidate.ID), "next_eligible_at", 0)
 	}
 	if len(candidateByID) == 0 {
 		return domain.Proxy{}, domain.ErrNoHealthyProxy
@@ -212,14 +211,14 @@ func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []d
 		return domain.Proxy{}, err
 	}
 
-	keys := []string{readyKey(tenantID), delayedKey(tenantID), nodePrefix(tenantID)}
+	keys := []string{readyKey(), delayedKey(), nodePrefix()}
 	args := []any{s.now().UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
 	for proxyID := range candidateByID {
 		args = append(args, proxyID)
 	}
 	result, err := s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
 	if errors.Is(err, redis.Nil) || result == nil {
-		if rebuildErr := s.ensureCandidates(ctx, tenantID, candidateByID); rebuildErr != nil {
+		if rebuildErr := s.ensureCandidates(ctx, candidateByID); rebuildErr != nil {
 			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_rebuild_failed", rebuildErr)
 		}
 		result, err = s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
@@ -242,24 +241,24 @@ func (s *RedisZFair) Select(ctx context.Context, tenantID string, candidates []d
 	return selected, nil
 }
 
-func (s *RedisZFair) ensureCandidates(ctx context.Context, tenantID string, candidates map[string]domain.Proxy) error {
-	lockKey := rebuildLockKey(tenantID)
+func (s *RedisZFair) ensureCandidates(ctx context.Context, candidates map[string]domain.Proxy) error {
+	lockKey := rebuildLockKey()
 	locked, err := s.client.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
 	if err != nil {
 		return err
 	}
 	if !locked {
-		return s.waitForRebuild(ctx, tenantID)
+		return s.waitForRebuild(ctx)
 	}
 	defer s.client.Del(context.Background(), lockKey)
 
 	pipe := s.client.Pipeline()
 	nowMS := s.now().UTC().UnixMilli()
 	for proxyID, candidate := range candidates {
-		if candidate.TenantID != tenantID || !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
 			continue
 		}
-		nodeKey := nodeKey(tenantID, proxyID)
+		nodeKey := nodeKey(proxyID)
 		score := float64(0)
 		if vr, err := s.client.HGet(ctx, nodeKey, "virtual_runtime").Float64(); err == nil {
 			score = vr
@@ -269,16 +268,16 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, tenantID string, cand
 			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
 		}
 		if circuitOpenUntil > nowMS {
-			pipe.ZAdd(ctx, delayedKey(tenantID), redis.Z{Score: float64(circuitOpenUntil), Member: proxyID})
+			pipe.ZAdd(ctx, delayedKey(), redis.Z{Score: float64(circuitOpenUntil), Member: proxyID})
 			continue
 		}
-		pipe.ZAdd(ctx, readyKey(tenantID), redis.Z{Score: score, Member: proxyID})
+		pipe.ZAdd(ctx, readyKey(), redis.Z{Score: score, Member: proxyID})
 	}
 	_, err = pipe.Exec(ctx)
 	return err
 }
 
-func (s *RedisZFair) waitForRebuild(ctx context.Context, tenantID string) error {
+func (s *RedisZFair) waitForRebuild(ctx context.Context) error {
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	deadline := time.NewTimer(250 * time.Millisecond)
@@ -290,7 +289,7 @@ func (s *RedisZFair) waitForRebuild(ctx context.Context, tenantID string) error 
 		case <-deadline.C:
 			return nil
 		case <-ticker.C:
-			exists, err := s.client.Exists(ctx, rebuildLockKey(tenantID)).Result()
+			exists, err := s.client.Exists(ctx, rebuildLockKey()).Result()
 			if err != nil {
 				return err
 			}
@@ -301,10 +300,8 @@ func (s *RedisZFair) waitForRebuild(ctx context.Context, tenantID string) error 
 	}
 }
 
-func readyKey(tenantID string) string   { return "proxyharbor:{" + tenantID + "}:selector:ready" }
-func delayedKey(tenantID string) string { return "proxyharbor:{" + tenantID + "}:selector:delayed" }
-func rebuildLockKey(tenantID string) string {
-	return "proxyharbor:{" + tenantID + "}:selector:rebuild_lock"
-}
-func nodePrefix(tenantID string) string       { return "proxyharbor:{" + tenantID + "}:selector:node:" }
-func nodeKey(tenantID, proxyID string) string { return nodePrefix(tenantID) + proxyID }
+func readyKey() string              { return "proxyharbor:{global}:selector:ready" }
+func delayedKey() string            { return "proxyharbor:{global}:selector:delayed" }
+func rebuildLockKey() string        { return "proxyharbor:{global}:selector:rebuild_lock" }
+func nodePrefix() string            { return "proxyharbor:{global}:selector:node:" }
+func nodeKey(proxyID string) string { return nodePrefix() + proxyID }

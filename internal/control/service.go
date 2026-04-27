@@ -90,15 +90,15 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	} else if ok {
 		return lease, nil
 	}
-	policy, err := s.pickPolicy(ctx, principal.TenantID, req)
+	policy, err := s.pickPolicy(ctx, req)
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	candidates, err := s.store.ListSelectableProxies(ctx, principal.TenantID)
+	candidates, err := s.store.ListSelectableProxies(ctx)
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	proxy, err := s.selector.Select(ctx, principal.TenantID, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
+	proxy, err := s.selector.Select(ctx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
 	if err != nil {
 		s.logSelectorError(principal.TenantID, len(candidates), err)
 		return domain.Lease{}, err
@@ -131,13 +131,22 @@ func (s *Service) RenewLease(ctx context.Context, principal domain.Principal, le
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	if lease.Revoked {
+	now := s.now()
+	if lease.Revoked || !now.Before(lease.ExpiresAt) {
 		return domain.Lease{}, domain.ErrLeaseRevoked
 	}
+	policy, err := s.store.GetPolicy(ctx, lease.PolicyRef.ID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	ttl := time.Duration(policy.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
 	lease.Generation++
-	lease.ExpiresAt = s.now().Add(30 * time.Minute)
-	lease.RenewBefore = s.now().Add(15 * time.Minute)
-	lease.UpdatedAt = s.now()
+	lease.ExpiresAt = now.Add(ttl)
+	lease.RenewBefore = now.Add(ttl / 2)
+	lease.UpdatedAt = now
 	updated, err := s.store.UpdateLease(ctx, lease)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, updated.TenantID, updated.ID)
@@ -179,6 +188,9 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 	if s.now().After(lease.ExpiresAt) {
 		return domain.Lease{}, domain.ErrLeaseRevoked
 	}
+	if !resourceMatchesTarget(lease.ResourceRef, target) {
+		return domain.Lease{}, domain.ErrPolicyDenied
+	}
 	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
 		return domain.Lease{}, domain.ErrAuthFailed
 	}
@@ -190,7 +202,7 @@ func (s *Service) ValidateGatewayRequest(ctx context.Context, tenantID, leaseID,
 	if err != nil {
 		return domain.Lease{}, domain.Proxy{}, err
 	}
-	proxy, err := s.store.GetProxy(ctx, tenantID, lease.ProxyID)
+	proxy, err := s.store.GetProxy(ctx, lease.ProxyID)
 	if err != nil {
 		return domain.Lease{}, domain.Proxy{}, err
 	}
@@ -200,84 +212,101 @@ func (s *Service) ValidateGatewayRequest(ctx context.Context, tenantID, leaseID,
 	return lease, proxy, nil
 }
 
-func (s *Service) Catalog(ctx context.Context, tenantID string) (domain.Catalog, error) {
-	if cat, hit, _ := s.cache.GetCatalog(ctx, tenantID); hit {
+func (s *Service) Catalog(ctx context.Context) (domain.Catalog, error) {
+	if cat, hit, _ := s.cache.GetCatalog(ctx); hit {
 		return cat, nil
 	}
-	cat, err := s.store.LatestCatalog(ctx, tenantID)
+	cat, err := s.store.LatestCatalog(ctx)
 	if err == nil {
 		_ = s.cache.PutCatalog(ctx, cat, s.cacheTTL)
 	}
 	return cat, err
 }
-func (s *Service) ListProviders(ctx context.Context, tenantID string) ([]domain.Provider, error) {
-	return s.store.ListProviders(ctx, tenantID)
+func (s *Service) ListProviders(ctx context.Context) ([]domain.Provider, error) {
+	return s.store.ListProviders(ctx)
 }
 func (s *Service) CreateProvider(ctx context.Context, principal domain.Principal, provider domain.Provider) (domain.Provider, error) {
-	provider.TenantID = principal.TenantID
+	if principal.Type != "admin" {
+		return domain.Provider{}, domain.ErrForbidden
+	}
 	out, err := s.store.UpsertProvider(ctx, provider)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) GetProvider(ctx context.Context, principal domain.Principal, id string) (domain.Provider, error) {
-	return s.store.GetProvider(ctx, principal.TenantID, id)
+	return s.store.GetProvider(ctx, id)
 }
 func (s *Service) UpdateProvider(ctx context.Context, principal domain.Principal, id string, provider domain.Provider) (domain.Provider, error) {
+	if principal.Type != "admin" {
+		return domain.Provider{}, domain.ErrForbidden
+	}
 	provider.ID = id
-	provider.TenantID = principal.TenantID
 	out, err := s.store.UpsertProvider(ctx, provider)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) DeleteProvider(ctx context.Context, principal domain.Principal, id string) error {
-	err := s.store.DeleteProvider(ctx, principal.TenantID, id)
+	if principal.Type != "admin" {
+		return domain.ErrForbidden
+	}
+	err := s.store.DeleteProvider(ctx, id)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return err
 }
-func (s *Service) ListProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
-	return s.store.ListCatalogProxies(ctx, tenantID)
+func (s *Service) ListProxies(ctx context.Context) ([]domain.Proxy, error) {
+	return s.store.ListCatalogProxies(ctx)
 }
 func (s *Service) CreateProxy(ctx context.Context, principal domain.Principal, proxy domain.Proxy) (domain.Proxy, error) {
-	proxy.TenantID = principal.TenantID
+	if principal.Type != "admin" {
+		return domain.Proxy{}, domain.ErrForbidden
+	}
 	if proxy.Endpoint == "" || !s.safeProxyEndpoint(proxy.Endpoint) {
 		return domain.Proxy{}, domain.ErrUnsafeDestination
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) GetProxy(ctx context.Context, principal domain.Principal, id string) (domain.Proxy, error) {
-	return s.store.GetProxy(ctx, principal.TenantID, id)
+	return s.store.GetProxy(ctx, id)
 }
 func (s *Service) UpdateProxy(ctx context.Context, principal domain.Principal, id string, proxy domain.Proxy) (domain.Proxy, error) {
+	if principal.Type != "admin" {
+		return domain.Proxy{}, domain.ErrForbidden
+	}
 	proxy.ID = id
-	proxy.TenantID = principal.TenantID
 	if proxy.Endpoint == "" || !s.safeProxyEndpoint(proxy.Endpoint) {
 		return domain.Proxy{}, domain.ErrUnsafeDestination
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) DeleteProxy(ctx context.Context, principal domain.Principal, id string) error {
-	err := s.store.DeleteProxy(ctx, principal.TenantID, id)
+	if principal.Type != "admin" {
+		return domain.ErrForbidden
+	}
+	err := s.store.DeleteProxy(ctx, id)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return err
 }
 func (s *Service) UpdateProxyHealth(ctx context.Context, principal domain.Principal, id string, healthy bool, failureHint string) (domain.Proxy, error) {
-	proxy, err := s.store.GetProxy(ctx, principal.TenantID, id)
+	if principal.Type != "admin" {
+		return domain.Proxy{}, domain.ErrForbidden
+	}
+	proxy, err := s.store.GetProxy(ctx, id)
 	if err != nil {
 		return domain.Proxy{}, err
 	}
@@ -286,37 +315,44 @@ func (s *Service) UpdateProxyHealth(ctx context.Context, principal domain.Princi
 	proxy.LastSeenAt = s.now().UTC()
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
-func (s *Service) ListPolicies(ctx context.Context, tenantID string) ([]domain.Policy, error) {
-	return s.store.ListPolicies(ctx, tenantID)
+func (s *Service) ListPolicies(ctx context.Context) ([]domain.Policy, error) {
+	return s.store.ListPolicies(ctx)
 }
 func (s *Service) CreatePolicy(ctx context.Context, principal domain.Principal, policy domain.Policy) (domain.Policy, error) {
-	policy.TenantID = principal.TenantID
+	if principal.Type != "admin" || policy.ID != "default" {
+		return domain.Policy{}, domain.ErrForbidden
+	}
 	out, err := s.store.UpsertPolicy(ctx, policy)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) GetPolicy(ctx context.Context, principal domain.Principal, id string) (domain.Policy, error) {
-	return s.store.GetPolicy(ctx, principal.TenantID, id)
+	return s.store.GetPolicy(ctx, id)
 }
 func (s *Service) UpdatePolicy(ctx context.Context, principal domain.Principal, id string, policy domain.Policy) (domain.Policy, error) {
+	if principal.Type != "admin" || id != "default" {
+		return domain.Policy{}, domain.ErrForbidden
+	}
 	policy.ID = id
-	policy.TenantID = principal.TenantID
 	out, err := s.store.UpsertPolicy(ctx, policy)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return out, err
 }
 func (s *Service) DeletePolicy(ctx context.Context, principal domain.Principal, id string) error {
-	err := s.store.DeletePolicy(ctx, principal.TenantID, id)
+	if principal.Type != "admin" || id != "default" {
+		return domain.ErrForbidden
+	}
+	err := s.store.DeletePolicy(ctx, id)
 	if err == nil {
-		_ = s.cache.InvalidateCatalog(ctx, principal.TenantID)
+		_ = s.cache.InvalidateCatalog(ctx)
 	}
 	return err
 }
@@ -328,20 +364,18 @@ func (s *Service) RecordGatewayFeedback(ctx context.Context, events []domain.Aud
 	return s.store.AppendAuditEvents(ctx, events)
 }
 
-func (s *Service) pickPolicy(ctx context.Context, tenantID string, req CreateLeaseRequest) (domain.Policy, error) {
-	if req.PolicyID != "" {
-		return s.store.GetPolicy(ctx, tenantID, req.PolicyID)
+func (s *Service) pickPolicy(ctx context.Context, req CreateLeaseRequest) (domain.Policy, error) {
+	if req.PolicyID != "" && req.PolicyID != "default" {
+		return domain.Policy{}, domain.ErrPolicyDenied
 	}
-	policies, err := s.store.ListPolicies(ctx, tenantID)
+	policy, err := s.store.GetPolicy(ctx, "default")
 	if err != nil {
 		return domain.Policy{}, err
 	}
-	for _, policy := range policies {
-		if policy.Enabled {
-			return policy, nil
-		}
+	if !policy.Enabled {
+		return domain.Policy{}, domain.ErrPolicyDenied
 	}
-	return domain.Policy{}, domain.ErrPolicyDenied
+	return policy, nil
 }
 
 func (s *Service) logSelectorError(tenantID string, candidateCount int, err error) {
@@ -359,6 +393,10 @@ func (s *Service) logSelectorError(tenantID string, candidateCount int, err erro
 }
 
 func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }
+
+func resourceMatchesTarget(resource domain.ResourceRef, target string) bool {
+	return extractHost(resource.ID) == extractHost(target)
+}
 
 func safeTarget(target string) bool {
 	host := extractHost(target)
