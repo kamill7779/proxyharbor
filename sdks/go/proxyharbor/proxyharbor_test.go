@@ -70,6 +70,26 @@ func TestGetProxyURLEmbedsCredentials(t *testing.T) {
 	}
 }
 
+func TestGetProxyURLEmbedsTenantScopedUsername(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(leaseDTO{
+			LeaseID:    "lease-1",
+			Username:   "tenant-a|lease-1",
+			Password:   "p",
+			GatewayURL: "http://gw.local:1080",
+			ProxyID:    "proxy-1",
+			ExpiresAt:  time.Now().Add(5 * time.Minute),
+		})
+	})
+	proxyURL, err := c.GetProxyURL(context.Background())
+	if err != nil {
+		t.Fatalf("GetProxyURL: %v", err)
+	}
+	if !strings.Contains(proxyURL, "tenant-a%7Clease-1:p@gw.local") {
+		t.Errorf("expected tenant-scoped credentials in URL, got %q", proxyURL)
+	}
+}
+
 func TestGetProxyKeyStickyReusesLease(t *testing.T) {
 	var calls int32
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

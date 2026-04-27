@@ -161,17 +161,24 @@ func gatewayCredentials(r *http.Request) (string, string, string, bool) {
 	leaseID := r.Header.Get("ProxyHarbor-Lease")
 	password := ""
 	if username, pass, ok := r.BasicAuth(); ok {
-		leaseID = username
+		tenantID, leaseID = gatewayTenantAndLease(tenantID, username)
 		password = pass
 	}
 	if username, pass, ok := basicProxyAuth(r.Header.Get("Proxy-Authorization")); ok {
-		leaseID = username
+		tenantID, leaseID = gatewayTenantAndLease(tenantID, username)
 		password = pass
 	}
 	if password == "" {
 		password = r.Header.Get("ProxyHarbor-Password")
 	}
 	return tenantID, leaseID, password, leaseID != ""
+}
+
+func gatewayTenantAndLease(currentTenantID, username string) (string, string) {
+	if tenantID, leaseID, ok := strings.Cut(username, "|"); ok && tenantID != "" && leaseID != "" {
+		return tenantID, leaseID
+	}
+	return currentTenantID, username
 }
 
 func basicProxyAuth(header string) (string, string, bool) {

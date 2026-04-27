@@ -41,3 +41,24 @@ func TestRenewLeaseUsesSingleGenerationBump(t *testing.T) {
 		t.Fatalf("renewed generation = %d, want 2", renewed.Generation)
 	}
 }
+
+func TestCreateLeaseReturnsTenantScopedGatewayUsername(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemoryStore()
+	_, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1})
+	if err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	svc := NewService(store, "http://gateway.local")
+
+	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-username", CreateLeaseRequest{
+		Subject:     domain.Subject{Type: "user", ID: "user-a"},
+		ResourceRef: domain.ResourceRef{Kind: "url", ID: "https://example.com/resource"},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+	if created.Username != "tenant-a|"+created.ID {
+		t.Fatalf("created username = %q, want %q", created.Username, "tenant-a|"+created.ID)
+	}
+}

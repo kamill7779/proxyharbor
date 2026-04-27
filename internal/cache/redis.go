@@ -16,6 +16,11 @@ type Redis struct {
 	client *redis.Client
 }
 
+type cachedLease struct {
+	domain.Lease
+	PasswordHash string `json:"password_hash"`
+}
+
 // NewRedis 建立一个 ping 通过的 Redis 缓存。如果 addr 为空，调用方应使用 Noop。
 func NewRedis(ctx context.Context, addr, password string, db int) (*Redis, error) {
 	if addr == "" {
@@ -62,10 +67,12 @@ func (r *Redis) GetLease(ctx context.Context, tenantID, leaseID string) (domain.
 	if err != nil {
 		return domain.Lease{}, false, err
 	}
-	var lease domain.Lease
-	if err := json.Unmarshal(raw, &lease); err != nil {
+	var cached cachedLease
+	if err := json.Unmarshal(raw, &cached); err != nil {
 		return domain.Lease{}, false, err
 	}
+	lease := cached.Lease
+	lease.PasswordHash = cached.PasswordHash
 	return lease, true, nil
 }
 
@@ -73,7 +80,8 @@ func (r *Redis) PutLease(ctx context.Context, lease domain.Lease, ttl time.Durat
 	if ttl <= 0 {
 		return nil
 	}
-	raw, err := json.Marshal(lease)
+	lease.Password = ""
+	raw, err := json.Marshal(cachedLease{Lease: lease, PasswordHash: lease.PasswordHash})
 	if err != nil {
 		return err
 	}
