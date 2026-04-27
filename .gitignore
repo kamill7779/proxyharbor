@@ -10,3 +10,7 @@ coverage.out
 /perf/
 /docker-compose.perf.yaml
 .claude/
+
+# local SDK workspaces generated outside this PR
+/sdks/python/
+/sdks/typescript/
