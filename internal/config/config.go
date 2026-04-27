@@ -63,6 +63,14 @@ type Config struct {
 	HealthcheckTimeout         time.Duration
 	StickyEnabled              bool
 	StickyPolicy               string
+	// AuthInvalidation selects the auth-cache invalidation transport in
+	// dynamic-keys mode. ""/"auto" enables Redis pub/sub when Redis is
+	// configured and falls back to polling otherwise; "redis" forces Redis
+	// (still polling-backed); "polling" disables pub/sub.
+	AuthInvalidation string
+	// InstanceID is a non-secret identifier surfaced in /readyz and the
+	// debug auth cache endpoint to help correlate logs across replicas.
+	InstanceID string
 }
 
 func Load(args []string) (Config, error) {
@@ -103,6 +111,8 @@ func Load(args []string) (Config, error) {
 		HealthcheckTimeout:         envDur("PROXYHARBOR_HEALTHCHECK_TIMEOUT", 5*time.Second),
 		StickyEnabled:              envBool("PROXYHARBOR_STICKY_ENABLED", false),
 		StickyPolicy:               envStr("PROXYHARBOR_STICKY_POLICY", "none"),
+		AuthInvalidation:           envStr("PROXYHARBOR_AUTH_INVALIDATION", ""),
+		InstanceID:                 envStr("PROXYHARBOR_INSTANCE_ID", ""),
 	}
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
@@ -133,6 +143,8 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.HealthcheckTimeout, "healthcheck-timeout", cfg.HealthcheckTimeout, "active healthcheck timeout")
 	fs.BoolVar(&cfg.StickyEnabled, "sticky-enabled", cfg.StickyEnabled, "enable sticky affinity placeholder")
 	fs.StringVar(&cfg.StickyPolicy, "sticky-policy", cfg.StickyPolicy, "sticky affinity policy")
+	fs.StringVar(&cfg.AuthInvalidation, "auth-invalidation", cfg.AuthInvalidation, "auth invalidation transport: auto | redis | polling")
+	fs.StringVar(&cfg.InstanceID, "instance-id", cfg.InstanceID, "non-secret instance identifier exposed in readiness/debug responses")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -183,6 +195,11 @@ func (c Config) validate() error {
 	}
 	if c.StickyPolicy == "" {
 		return errors.New("sticky policy must not be empty")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.AuthInvalidation)) {
+	case "", "auto", "redis", "polling":
+	default:
+		return fmt.Errorf("invalid auth invalidation transport: %q", c.AuthInvalidation)
 	}
 
 	mode := resolveAuthMode(c)

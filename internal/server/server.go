@@ -37,6 +37,22 @@ type Server struct {
 	role           Role
 	healthRecorder health.HealthRecorder
 	dependency     storage.DependencyChecker
+	authReady      AuthReadyChecker
+	invalidator    auth.Invalidator
+	instanceID     string
+	authSnapshot   AuthSnapshotProvider
+}
+
+// AuthReadyChecker reports whether the auth subsystem is ready to handle
+// traffic. Implementations must return a non-nil error when traffic should
+// not be accepted yet (e.g. dynamic auth cache not yet loaded).
+type AuthReadyChecker interface {
+	CheckAuthReady(context.Context) error
+}
+
+// AuthSnapshotProvider returns a non-secret view of the auth cache state.
+type AuthSnapshotProvider interface {
+	AuthSnapshot() auth.Snapshot
 }
 
 func New(svc *control.Service, authn *auth.Authenticator) http.Handler {
@@ -65,6 +81,46 @@ func NewForRoleWithHealthRecorderDependenciesAndAdmin(svc *control.Service, auth
 	return Recover(s)
 }
 
+// Options bundles optional dependencies for the HTTP server. New fields
+// added here must remain optional so legacy/tenant-keys deployments and
+// existing call sites continue to work unchanged.
+type Options struct {
+	Role           Role
+	HealthRecorder health.HealthRecorder
+	Dependency     storage.DependencyChecker
+	AdminStore     AdminStore
+	Pepper         string
+	AuthReady      AuthReadyChecker
+	AuthSnapshot   AuthSnapshotProvider
+	Invalidator    auth.Invalidator
+	InstanceID     string
+}
+
+// NewWithOptions builds the HTTP handler with the supplied optional
+// dependencies. Fields left zero are treated as not configured.
+func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Options) http.Handler {
+	role := opts.Role
+	if role == "" {
+		role = RoleAll
+	}
+	s := &Server{
+		mux:            http.NewServeMux(),
+		svc:            svc,
+		authn:          authn,
+		role:           role,
+		healthRecorder: opts.HealthRecorder,
+		dependency:     opts.Dependency,
+		adminStore:     opts.AdminStore,
+		pepper:         opts.Pepper,
+		authReady:      opts.AuthReady,
+		authSnapshot:   opts.AuthSnapshot,
+		invalidator:    opts.Invalidator,
+		instanceID:     opts.InstanceID,
+	}
+	s.routes()
+	return Recover(s)
+}
+
 // NewWithAdminStore creates a server with admin store configured.
 func NewWithAdminStore(svc *control.Service, authn *auth.Authenticator, store AdminStore, pepper string) http.Handler {
 	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, adminStore: store, pepper: pepper, role: RoleAll}
@@ -76,7 +132,48 @@ func NewWithAdminStore(svc *control.Service, authn *auth.Authenticator, store Ad
 func (s *Server) SetAdminStore(store AdminStore, pepper string) {
 	s.adminStore = store
 	s.pepper = pepper
+	s.mux = http.NewServeMux()
 	s.routes()
+}
+
+func (s *Server) debugAuthCache(w http.ResponseWriter, r *http.Request) {
+	if !allow(w, r, http.MethodGet) {
+		return
+	}
+	body := map[string]any{
+		"instance_id": s.instanceID,
+		"auth_mode":   string(s.authn.Mode()),
+		"role":        string(s.role),
+	}
+	if s.authSnapshot != nil {
+		body["cache"] = s.authSnapshot.AuthSnapshot()
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) debugAuthCacheMetrics(w http.ResponseWriter, r *http.Request) {
+	if !allow(w, r, http.MethodGet) {
+		return
+	}
+	body := map[string]any{
+		"instance_id": s.instanceID,
+		"auth_mode":   string(s.authn.Mode()),
+		"role":        string(s.role),
+	}
+	if s.authSnapshot != nil {
+		snap := s.authSnapshot.AuthSnapshot()
+		body["auth_cache_initialized"] = snap.Initialized
+		body["auth_cache_version"] = snap.Version
+		body["auth_cache_entries"] = snap.Entries
+		body["auth_cache_last_refresh"] = snap.LastRefresh
+		body["auth_cache_stale_seconds"] = snap.StaleSeconds
+		body["auth_cache_refresh_failures"] = snap.RefreshFailures
+		body["auth_cache_refresh_success"] = snap.RefreshSuccess
+		if snap.LastError != "" {
+			body["auth_cache_last_error"] = snap.LastError
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -111,8 +208,12 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("/", s.gateway)
 	}
 	if s.adminStore != nil && (s.role == RoleAll || s.role == RoleController) {
-		admin := newAdminHandler(s.adminStore, s.pepper)
+		admin := newAdminHandler(s.adminStore, s.pepper, s.invalidator, s.instanceID)
 		admin.register(s.mux, s.requireAdminAuth)
+	}
+	if s.role == RoleAll || s.role == RoleController {
+		s.mux.HandleFunc("/debug/auth-cache", s.requireAdminAuth(s.debugAuthCache))
+		s.mux.HandleFunc("/debug/auth-cache/metrics", s.requireAdminAuth(s.debugAuthCacheMetrics))
 	}
 }
 
@@ -120,36 +221,46 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": string(s.role)})
+	body := map[string]any{"status": "ok", "role": string(s.role)}
+	writeJSON(w, http.StatusOK, body)
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	if s.dependency == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "role": string(s.role), "reasons": map[string]string{}})
-		return
-	}
+	reasons := map[string]string{}
+	ready := true
 	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 	defer cancel()
-	checks := s.dependency.CheckDependencies(ctx)
-	reasons := make(map[string]string, len(checks))
-	ready := true
-	for name, err := range checks {
-		if err != nil {
-			reasons[name] = "unavailable"
-			ready = false
-			continue
+	if s.dependency != nil {
+		for name, err := range s.dependency.CheckDependencies(ctx) {
+			if err != nil {
+				reasons[name] = "unavailable"
+				ready = false
+				continue
+			}
+			reasons[name] = "ok"
 		}
-		reasons[name] = "ok"
+	}
+	if s.authReady != nil {
+		if err := s.authReady.CheckAuthReady(ctx); err != nil {
+			reasons["auth_cache"] = "not_initialized"
+			ready = false
+		} else {
+			reasons["auth_cache"] = "ok"
+		}
+	}
+	body := map[string]any{"role": string(s.role), "reasons": reasons}
+	if s.instanceID != "" {
+		body["instance_id"] = s.instanceID
 	}
 	status := http.StatusOK
-	bodyStatus := "ready"
+	body["status"] = "ready"
 	if !ready {
 		status = http.StatusServiceUnavailable
-		bodyStatus = "degraded"
+		body["status"] = "degraded"
 	}
-	writeJSON(w, status, map[string]any{"status": bodyStatus, "role": string(s.role), "reasons": reasons})
+	writeJSON(w, status, body)
 }
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
