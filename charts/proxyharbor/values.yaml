@@ -5,9 +5,17 @@ image:
   pullSecrets: []
 
 role: all
-replicaCount: 1
-strategy: {}
+replicaCount: 2
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
 lightweight: false
+terminationGracePeriodSeconds: 30
+preStop:
+  enabled: true
+  sleepSeconds: 5
 
 service:
   type: ClusterIP
@@ -71,6 +79,7 @@ resourcesLightweight:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+topologySpreadConstraints: []
 podAnnotations: {}
 podSecurityContext:
   runAsNonRoot: true
@@ -89,3 +98,15 @@ probes:
   readiness:
     initialDelaySeconds: 3
     periodSeconds: 10
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80

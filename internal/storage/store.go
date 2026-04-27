@@ -30,6 +30,29 @@ type DependencyChecker interface {
 	CheckDependencies(context.Context) map[string]error
 }
 
+type InstanceHeartbeat struct {
+	InstanceID        string
+	Role              string
+	Version           string
+	ConfigFingerprint string
+	StartedAt         time.Time
+	LastSeenAt        time.Time
+}
+
+type ClusterLock struct {
+	Name            string
+	OwnerInstanceID string
+	LeaseUntil      time.Time
+	UpdatedAt       time.Time
+}
+
+type ClusterStore interface {
+	HeartbeatInstance(context.Context, InstanceHeartbeat) error
+	TryAcquireLock(context.Context, string, string, time.Duration) (bool, error)
+	GetClusterLock(context.Context, string) (ClusterLock, bool, error)
+	DeleteExpiredLeasesBatch(context.Context, time.Time, int) (int, error)
+}
+
 type LeaseStore interface {
 	GetLeaseByIdempotency(context.Context, IdempotencyScope) (domain.Lease, bool, error)
 	CreateLease(context.Context, IdempotencyScope, domain.Lease) (domain.Lease, error)

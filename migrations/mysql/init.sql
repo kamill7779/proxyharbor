@@ -147,6 +147,24 @@ CREATE TABLE IF NOT EXISTS proxy_health_samples (
     observed_at  DATETIME(3)  NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS instances (
+    instance_id        VARCHAR(191) PRIMARY KEY,
+    role               VARCHAR(64)  NOT NULL,
+    version            VARCHAR(64)  NOT NULL,
+    config_fingerprint VARCHAR(191) NOT NULL,
+    started_at         DATETIME(3)  NOT NULL,
+    last_seen_at       DATETIME(3)  NOT NULL,
+    INDEX idx_instances_last_seen (last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS cluster_locks (
+    name              VARCHAR(191) PRIMARY KEY,
+    owner_instance_id VARCHAR(191) NOT NULL,
+    lease_until       DATETIME(3)  NOT NULL,
+    updated_at        DATETIME(3)  NOT NULL,
+    INDEX idx_cluster_locks_lease_until (lease_until)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 INSERT INTO tenant_keys_version (id, version) VALUES (1, 0)
     ON DUPLICATE KEY UPDATE version = version;
 

@@ -4,8 +4,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/cache"
+	"github.com/kamill7779/proxyharbor/internal/cluster"
 	"github.com/kamill7779/proxyharbor/internal/config"
 	"github.com/kamill7779/proxyharbor/internal/control"
 	"github.com/kamill7779/proxyharbor/internal/control/health"
@@ -98,6 +101,28 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if cfg.ClusterEnabled {
+		clusterStore, ok := store.(storage.ClusterStore)
+		if !ok {
+			logger.Error("cluster mode requires cluster-capable storage")
+			os.Exit(1)
+		}
+		clusterCtx, clusterCancel := context.WithCancel(ctx)
+		defer clusterCancel()
+		go cluster.Runner{
+			Store:             clusterStore,
+			InstanceID:        instanceID,
+			Role:              cfg.Role,
+			Version:           server.Version,
+			ConfigFingerprint: configFingerprint(cfg),
+			StartedAt:         time.Now().UTC(),
+			HeartbeatInterval: cfg.InstanceHeartbeatInterval,
+			LeaderLeaseTTL:    cfg.LeaderLeaseTTL,
+			MaintenanceEvery:  cfg.MaintenanceInterval,
+			MaintenanceLimit:  cfg.MaintenanceBatchSize,
+			Logger:            logger,
+		}.Run(clusterCtx)
+	}
 
 	authn, dynamicStore, authClose, err := buildAuthenticator(ctx, cfg, store)
 	if err != nil {
@@ -125,6 +150,8 @@ func main() {
 		Pepper:         cfg.KeyPepper,
 		Invalidator:    invalidator,
 		InstanceID:     instanceID,
+		ClusterStore:   clusterStoreForOptions(store),
+		ClusterSummary: clusterSummary(cfg),
 	}
 	if dynamicStore != nil {
 		readyChecker := dynamicAuthReady{store: dynamicStore}
@@ -221,6 +248,28 @@ func resolveInstanceID(cfg config.Config) string {
 		host = "proxyharbor"
 	}
 	return host + "-" + shortRand()
+}
+
+func configFingerprint(cfg config.Config) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("role=%s;storage=%s;selector=%s;auth_refresh=%s;cluster=%t",
+		cfg.Role, cfg.StorageDriver, cfg.Selector, cfg.AuthRefreshInterval, cfg.ClusterEnabled)))
+	return hex.EncodeToString(sum[:8])
+}
+
+func clusterSummary(cfg config.Config) map[string]any {
+	return map[string]any{
+		"cluster_enabled":       cfg.ClusterEnabled,
+		"storage":               string(cfg.StorageDriver),
+		"selector":              cfg.Selector,
+		"auth_refresh_interval": cfg.AuthRefreshInterval.String(),
+		"config_fingerprint":    configFingerprint(cfg),
+		"version":               server.Version,
+	}
+}
+
+func clusterStoreForOptions(store storage.Store) storage.ClusterStore {
+	clusterStore, _ := store.(storage.ClusterStore)
+	return clusterStore
 }
 
 func shortRand() string {

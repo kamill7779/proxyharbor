@@ -18,6 +18,7 @@ var (
 	ErrBadRequest          = errors.New("bad_request")
 	ErrTenantNotFound      = errors.New("tenant_not_found")
 	ErrForbidden           = errors.New("forbidden")
+	ErrStaleLease          = errors.New("stale_lease_generation")
 )
 
 type ErrorKind string
