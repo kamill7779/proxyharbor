@@ -111,7 +111,8 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
-	lease := domain.Lease{ID: "lease_" + randomHex(12), TenantID: principal.TenantID, Generation: 1, Subject: req.Subject, ResourceRef: req.ResourceRef, PolicyRef: domain.PolicyRef{ID: policy.ID, Version: policy.Version, Hash: fmt.Sprintf("v%d", policy.Version)}, GatewayURL: s.gatewayURL, Username: "lease", ProxyID: proxy.ID, ExpiresAt: now.Add(ttl), RenewBefore: now.Add(ttl / 2), CatalogVersion: "memory", CandidateSetID: "healthy", CreatedAt: now, UpdatedAt: now}
+	leaseID := "lease_" + randomHex(12)
+	lease := domain.Lease{ID: leaseID, TenantID: principal.TenantID, Generation: 1, Subject: req.Subject, ResourceRef: req.ResourceRef, PolicyRef: domain.PolicyRef{ID: policy.ID, Version: policy.Version, Hash: fmt.Sprintf("v%d", policy.Version)}, GatewayURL: s.gatewayURL, Username: principal.TenantID + "|" + leaseID, ProxyID: proxy.ID, ExpiresAt: now.Add(ttl), RenewBefore: now.Add(ttl / 2), CatalogVersion: "memory", CandidateSetID: "healthy", CreatedAt: now, UpdatedAt: now}
 	plaintext := "lease_" + randomHex(24)
 	lease.Password = plaintext
 	lease.PasswordHash = hashLeasePassword(lease.ID, plaintext)
