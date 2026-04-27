@@ -8,7 +8,7 @@ import (
 
 type FirstSelectable struct{}
 
-func (FirstSelectable) Select(_ context.Context, _ string, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
+func (FirstSelectable) Select(_ context.Context, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	var selected domain.Proxy
 	for _, candidate := range candidates {
 		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {

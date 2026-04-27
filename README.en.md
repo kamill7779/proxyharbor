@@ -1,289 +1,52 @@
-<div align="center">
-  <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
-</div>
+# ProxyHarbor
 
-<div align="center">
+ProxyHarbor is a lightweight cloud-native proxy pool service. v0.2.0 is a breaking reset:
 
-**A lightweight proxy pool for small-business integration**
+- Admin key manages tenants, tenant keys, providers, proxies, and the global `default` policy.
+- Tenant keys can create, renew, revoke, and validate leases only.
+- Providers and proxies are global platform inventory, not tenant-owned.
+- Lease records keep `tenant_id`; scheduling reads from the global healthy proxy pool.
+- MySQL is required. Redis is optional acceleration unless zfair Redis is explicitly required.
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](go.mod)
-[![License](https://img.shields.io/badge/License-MIT-orange)](LICENSE)
-[![ä¸­æ–‡](https://img.shields.io/badge/README-ä¸­æ–‡-blue)](README.md)
-
-</div>
-
----
-
-ProxyHarbor is a lightweight proxy pool service designed for small-business scenarios. It combines a **control plane** (proxy registration, policy management, lease issuance) with a **data plane** (HTTP forward proxy + CONNECT tunnel) in a single process. The only runtime dependencies are **MySQL + Redis**, keeping the deployment footprint minimal.
-
-## Features
-
-- **Control-plane API** â€?manage Providers, Proxies, Policies, and Leases; read the Catalog
-- **HTTP gateway** â€?supports both plain HTTP forward-proxy requests and CONNECT tunnels (HTTPS)
-- **zfair fair scheduling** â€?Redis ZSET + atomic Lua scripts for weight- and health-aware lease distribution
-- **Health scoring** â€?success +5, connection failure âˆ?0, timeout âˆ?5, auth/protocol failure âˆ?0; circuit breaker trips after 3 consecutive failures with 30 s â€?5 min exponential back-off cooldown
-- **Lease system** â€?time-limited credentials; plaintext password returned only once at creation, stored as an irreversible SHA-256 hash; idempotency key deduplication
-- **Redis caching** â€?Catalog and Lease dual-cache to reduce MySQL hot-path pressure
-- **Role separation** â€?`all` / `controller` / `gateway` startup roles for split deployment
-
-## Quick Start
-
-> Docker Compose is the recommended local path â€?MySQL and Redis are bundled, no extra setup needed.
-
-### 1. Start all services
+## Local Start
 
 ```bash
-docker compose --profile bundle up -d --build
+export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
+export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
+docker compose up -d --build
 ```
 
-This starts:
-- `mysql` â€?proxy catalog and health-state persistence
-- `redis` â€?zfair scheduling state + Lease/Catalog cache
-- `proxyharbor` â€?combined controller and gateway process
+MySQL initializes from `migrations/mysql/init.sql`.
 
-Default development API key:
+## Required Configuration
 
-```env
-PROXYHARBOR_AUTH_KEY=change-me
-```
-
-**Before exposing the service externally, set a strong key:**
-
-```bash
-cp .env.example .env
-```
-
-```env
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
-PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
-PROXYHARBOR_REDIS_ADDR=redis:6379
-```
-
-## Authentication Modes
-
-ProxyHarbor v0.1.5 supports three authentication modes:
-
-| Mode | Use case | Configuration | Behavior |
-| --- | --- | --- | --- |
-| `legacy-single-key` / `legacy` | Single-tenant development and rollback | `PROXYHARBOR_AUTH_KEY` | One shared key, compatible with v0.1.3 behavior |
-| `tenant-keys` | Static multi-tenant deployments | `PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` | Server maps each key to exactly one tenant; no online changes |
-| `dynamic-keys` | Recommended production mode | `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` | Tenant keys are issued/revoked via Admin API and refreshed from DB within the configured interval |
-
-Upgrade and rollback are configuration-only: keep `PROXYHARBOR_AUTH_KEY` for legacy mode, keep `PROXYHARBOR_TENANT_KEYS` for static tenant keys, or set `PROXYHARBOR_AUTH_MODE=dynamic-keys` with `PROXYHARBOR_ADMIN_KEY` and `PROXYHARBOR_KEY_PEPPER` for dynamic keys.
-### 2. Check readiness
-
-```bash
-curl http://localhost:8080/readyz
-```
-
-```json
-{"dependencies":{"mysql":"ok","redis_cache":"ok","redis_selector":"ok"},"role":"all","status":"ready"}
-```
-
-### 3. Register a provider
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"static-main","type":"static","name":"My proxy pool","enabled":true}' \
-  http://localhost:8080/v1/providers
-```
-
-### 4. Add a proxy
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"proxy-1","provider_id":"static-main","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
-  http://localhost:8080/v1/proxies
-```
-
-> For loopback or private-network endpoints during local testing, set `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true` first.
-
-Bulk add (Bash):
-
-```bash
-for item in \
-  'proxy-1 http://proxy1.example.com:8080 100' \
-  'proxy-2 http://proxy2.example.com:8080 80' \
-  'proxy-3 http://proxy3.example.com:8080 50'
-do
-  set -- $item
-  curl -H 'ProxyHarbor-Key: change-me' \
-    -H 'Content-Type: application/json' \
-    -d "{\"id\":\"$1\",\"provider_id\":\"static-main\",\"endpoint\":\"$2\",\"healthy\":true,\"weight\":$3}" \
-    http://localhost:8080/v1/proxies
-done
-```
-
-Bulk add (PowerShell):
-
-```powershell
-$proxies = @(
-  @{ id = 'proxy-1'; endpoint = 'http://proxy1.example.com:8080'; weight = 100 },
-  @{ id = 'proxy-2'; endpoint = 'http://proxy2.example.com:8080'; weight = 80 },
-  @{ id = 'proxy-3'; endpoint = 'http://proxy3.example.com:8080'; weight = 50 }
-)
-foreach ($proxy in $proxies) {
-  $body = @{ id=$proxy.id; provider_id='static-main'; endpoint=$proxy.endpoint; healthy=$true; weight=$proxy.weight } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='change-me'} -ContentType 'application/json' -Body $body
-}
-```
-
-### 5. Create a policy
-
-A lease requires at least one enabled policy:
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"default","name":"Default policy","enabled":true,"ttl_seconds":1800}' \
-  http://localhost:8080/v1/policies
-```
-
-### 6. Create a lease
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-lease-1' \
-  -d '{"subject":{"subject_type":"user","subject_id":"local-dev"},"resource_ref":{"kind":"url","id":"https://example.com"},"ttl_seconds":600}' \
-  http://localhost:8080/v1/leases
-```
-
-Use the returned `lease_id` as the proxy username and `password` as the proxy password (**returned only once â€?save it immediately**).
-
-## Startup Modes
-
-### Bundled dependencies (recommended for local dev)
-
-```bash
-docker compose --profile bundle up -d --build
-```
-
-### External MySQL + Redis
-
-```bash
-cp .env.example .env
-# edit .env with your external connection details
-docker compose --profile app up -d --build
-```
-
-### Local binary
-
-```bash
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret \
-PROXYHARBOR_STORAGE=mysql \
-PROXYHARBOR_MYSQL_DSN='proxyharbor:proxyharbor@tcp(127.0.0.1:3306)/proxyharbor?parseTime=true&loc=UTC' \
-PROXYHARBOR_REDIS_ADDR='127.0.0.1:6379' \
-PROXYHARBOR_SELECTOR=zfair \
-go run ./cmd/proxyharbor
-```
-
-## Data Model
-
-### Provider
-
-Groups proxies from the same source. Use `type: static` for a manually managed pool:
-
-```json
-{"id":"static-main","type":"static","name":"My proxy pool","enabled":true}
-```
-
-### Proxy
-
-Describes a single upstream proxy endpoint:
-
-| Field | Description |
+| Variable | Description |
 | --- | --- |
-| `id` | Unique ID within the tenant |
-| `provider_id` | Owning provider |
-| `endpoint` | Upstream proxy URL |
-| `healthy` | Whether the proxy is eligible for scheduling |
-| `weight` | Relative scheduling weight for zfair â€?higher means more leases |
-| `health_score` | Health score maintained automatically by gateway feedback |
-| `circuit_open_until` | Circuit-breaker recovery timestamp |
-| `latency_ewma_ms` | Latency exponential weighted moving average (ms) |
-| `labels` | Extension labels for future policy filtering |
+| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes. |
+| `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes. |
+| `PROXYHARBOR_MYSQL_DSN` | MySQL DSN. |
 
-### Lease
+Optional: `PROXYHARBOR_REDIS_ADDR`, `PROXYHARBOR_REDIS_PASSWORD`, `PROXYHARBOR_AUTH_REFRESH_INTERVAL`, `PROXYHARBOR_SELECTOR_REDIS_REQUIRED`.
 
-Each lease binds **one proxy node** and issues time-limited credentials for gateway authentication:
+## API Shape
 
-- Password stored as SHA-256 hash; plaintext returned only in `CreateLease` response
-- Idempotency key prevents duplicate issuance
-- `RenewLease` extends expiry by 30 minutes; `RevokeLease` revokes immediately
+Admin-only:
 
-## Scheduling & Health Model
+- `POST /admin/tenants`
+- `POST /admin/tenants/{id}/keys`
+- `POST|PUT|DELETE /v1/providers`
+- `POST|PUT|DELETE /v1/proxies`
+- `POST|PUT|DELETE /v1/policies/default`
 
-### zfair Scheduler
+Tenant:
 
-- Maintains **ready** and **delayed** queues as Redis ZSETs
-- All operations (candidate registration, cooldown promotion, proxy selection, virtual-runtime update) are atomic via Lua scripts
-- Distributes leases fairly under concurrency according to weight and health signals
-- **Refuses to start** when Redis is unavailable in production â€?no silent fallback
+- `POST /v1/leases`
+- `POST /v1/leases/{id}:renew`
+- `DELETE /v1/leases/{id}`
+- `GET /v1/catalog/latest`
 
-### Health Scoring
+## Health
 
-| Event | Score delta |
-| --- | --- |
-| Request success | +5 |
-| Unknown failure | âˆ? |
-| Connection failure | âˆ?0 |
-| Timeout | âˆ?5 |
-| Auth failure | âˆ?0 |
-| Protocol error | âˆ?0 |
-
-Three consecutive failures trip the circuit breaker. Base cooldown is 30 s, maximum is 5 min (exponential back-off). Use `PROXYHARBOR_SCORING_PROFILE` to switch between `default`, `aggressive`, and `lenient` profiles.
-
-## Configuration Reference
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `PROXYHARBOR_AUTH_MODE` | Authentication mode: `legacy-single-key` / `tenant-keys` / `dynamic-keys`; `legacy` is accepted by Helm as chart shorthand | inferred from configured keys |
-| `PROXYHARBOR_AUTH_KEY` | Legacy single-key secret | empty |
-| `PROXYHARBOR_TENANT_KEYS` | Static tenant-key map: `tenant:key,tenant2:key2` | empty |
-| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key for dynamic mode (use at least 32 random characters) | empty |
-| `PROXYHARBOR_KEY_PEPPER` | Dynamic-key hashing pepper (use at least 32 random bytes) | empty |
-| `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | Dynamic-key cache refresh interval and revocation propagation target | `5s` |
-| PROXYHARBOR_ROLE | Process role: `all` / `controller` / `gateway` | `all` |
-| `PROXYHARBOR_LOG_FORMAT` | Standard-library slog output format: `json` / `text` | `json` |
-| `PROXYHARBOR_LOG_LEVEL` | Standard-library slog level: `info` / `debug` | `info` |
-| `PROXYHARBOR_STORAGE` | Storage driver: `mysql` / `memory` | `memory` |
-| `PROXYHARBOR_MYSQL_DSN` | MySQL connection string | empty |
-| `PROXYHARBOR_REDIS_ADDR` | Redis address; zfair production mode depends on it and cache reuses it | empty |
-| `PROXYHARBOR_SELECTOR` | Proxy selector name | `zfair` |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Refuse startup when zfair has no Redis; `false` remains for local legacy configs | `true` |
-| `PROXYHARBOR_SCORING_PROFILE` | Health scoring profile: `default` / `aggressive` / `lenient` | `default` |
-| `PROXYHARBOR_ZFAIR_QUANTUM` | Base virtual-runtime increment | `1000` |
-| `PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS` | Default latency for proxies without EWMA data (ms) | `200` |
-| `PROXYHARBOR_ZFAIR_MAX_PROMOTE` | Max delayed proxies promoted before each selection | `128` |
-| `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | Allow loopback/private addresses (testing only) | `false` |
-
-`/readyz` checks enabled critical dependencies in real time: MySQL storage, Redis cache, and Redis zfair selector. It returns 503 while a dependency is down and recovers to 200 after the dependency recovers. Startup uses bounded retry for MySQL/Redis and never waits forever. zfair may rebuild an empty ready queue once from tenant-scoped Redis nodes; ProxyHarbor still does not introduce leader election or cross-controller coordination in v0.1.3.
-
-See `.env.example` for a fully commented template.
-
-## Packaging & Deployment
-
-- `Dockerfile` â€?builds a static Go binary
-- `docker-compose.yaml` â€?local all-in-one or app-only development
-- `charts/proxyharbor` â€?Helm chart for Kubernetes
-- `migrations/mysql/` â€?database initialization SQL
-
-## Contributing
-
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Contact
-
-| Channel | Address |
-| --- | --- |
-| Telegram | [@kamill7779](https://t.me/kamill7779) |
-| Email | [kamill7779@outlook.com](mailto:kamill7779@outlook.com) |
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
-
+- `/healthz` is process liveness only.
+- `/readyz` checks MySQL, schema seeds, auth cache initialization, and required selector dependencies.
+- `/debug/auth-cache` and `/debug/auth-cache/metrics` are admin-only and never expose secrets.

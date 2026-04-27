@@ -67,7 +67,6 @@ type Lease struct {
 
 type Proxy struct {
 	ID                  string            `json:"id"`
-	TenantID            string            `json:"tenant_id"`
 	ProviderID          string            `json:"provider_id,omitempty"`
 	Endpoint            string            `json:"endpoint"`
 	Healthy             bool              `json:"healthy"`
@@ -86,7 +85,6 @@ type Proxy struct {
 
 type Provider struct {
 	ID        string            `json:"id"`
-	TenantID  string            `json:"tenant_id"`
 	Type      string            `json:"type"`
 	Name      string            `json:"name"`
 	Enabled   bool              `json:"enabled"`
@@ -96,7 +94,6 @@ type Provider struct {
 }
 
 type Catalog struct {
-	TenantID  string    `json:"tenant_id"`
 	Version   string    `json:"version"`
 	Proxies   []Proxy   `json:"proxies"`
 	Generated time.Time `json:"generated_at"`
@@ -105,7 +102,6 @@ type Catalog struct {
 
 type Policy struct {
 	ID           string            `json:"id"`
-	TenantID     string            `json:"tenant_id"`
 	Version      int64             `json:"version"`
 	Name         string            `json:"name"`
 	Enabled      bool              `json:"enabled"`

@@ -13,17 +13,7 @@ import (
 const (
 	HeaderName       = "ProxyHarbor-Key"
 	TenantHeaderName = "ProxyHarbor-Tenant"
-	TenantQueryName  = "tenant_id"
-	DefaultTenantID  = "default"
 	OnBehalfOfHeader = "X-On-Behalf-Of"
-)
-
-type AuthMode string
-
-const (
-	ModeLegacy      AuthMode = "legacy-single-key"
-	ModeTenantKeys  AuthMode = "tenant-keys"
-	ModeDynamicKeys AuthMode = "dynamic-keys"
 )
 
 type TenantKey struct {
@@ -40,27 +30,12 @@ type TenantKey struct {
 }
 
 type Authenticator struct {
-	mode     AuthMode
-	legacy   string
-	static   map[string]string
 	dynamic  *DynamicStore
 	adminKey string
 }
 
-func New(key string) *Authenticator {
-	return NewLegacy(key)
-}
-
-func NewLegacy(key string) *Authenticator {
-	return &Authenticator{mode: ModeLegacy, legacy: key}
-}
-
-func NewTenantKeys(keys map[string]string) *Authenticator {
-	return &Authenticator{mode: ModeTenantKeys, static: keys}
-}
-
 func NewDynamicKeys(dynamic *DynamicStore) *Authenticator {
-	return &Authenticator{mode: ModeDynamicKeys, dynamic: dynamic}
+	return &Authenticator{dynamic: dynamic}
 }
 
 func (a *Authenticator) WithAdminKey(adminKey string) *Authenticator {
@@ -78,17 +53,6 @@ func (a *Authenticator) CacheEntries() int {
 	return a.dynamic.Len()
 }
 
-// Mode returns the authenticator mode (legacy/tenant-keys/dynamic-keys).
-func (a *Authenticator) Mode() AuthMode {
-	if a == nil {
-		return ""
-	}
-	return a.mode
-}
-
-// DynamicStore returns the underlying DynamicStore for dynamic-keys mode,
-// or nil for other modes. Callers may use it to inspect snapshots, but must
-// not mutate the store directly.
 func (a *Authenticator) DynamicStore() *DynamicStore {
 	if a == nil {
 		return nil
@@ -108,40 +72,17 @@ func (a *Authenticator) Authenticate(r *http.Request) (domain.Principal, error) 
 		return domain.Principal{ID: "admin:" + Fingerprint(presented), Type: "admin"}, nil
 	}
 
-	switch a.mode {
-	case ModeDynamicKeys:
-		if a.dynamic == nil {
-			return domain.Principal{}, domain.ErrAuthFailed
-		}
-		key, ok := a.dynamic.Lookup(presented)
-		if !ok {
-			return domain.Principal{}, domain.ErrAuthFailed
-		}
-		if claimed := claimedTenant(r); claimed != "" && claimed != key.tenantID {
-			return domain.Principal{}, domain.ErrTenantMismatch
-		}
-		return domain.Principal{ID: "tenant-key:" + key.keyID, Type: "tenant_key", TenantID: key.tenantID}, nil
-	case ModeTenantKeys:
-		tenantID, ok := a.static[presented]
-		if !ok {
-			return domain.Principal{}, domain.ErrAuthFailed
-		}
-		if claimed := claimedTenant(r); claimed != "" && claimed != tenantID {
-			return domain.Principal{}, domain.ErrTenantMismatch
-		}
-		return domain.Principal{ID: "tenant-key:" + Fingerprint(presented), Type: "tenant_key", TenantID: tenantID}, nil
-	case ModeLegacy:
-		if a.legacy == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(a.legacy)) != 1 {
-			return domain.Principal{}, domain.ErrAuthFailed
-		}
-		tenantID, ok := ResolveTenantID(r)
-		if !ok {
-			return domain.Principal{}, domain.ErrAuthFailed
-		}
-		return domain.Principal{ID: "configured-key", Type: "header_key", TenantID: tenantID}, nil
-	default:
+	if a.dynamic == nil {
 		return domain.Principal{}, domain.ErrAuthFailed
 	}
+	key, ok := a.dynamic.Lookup(presented)
+	if !ok {
+		return domain.Principal{}, domain.ErrAuthFailed
+	}
+	if claimed := claimedTenant(r); claimed != "" && claimed != key.tenantID {
+		return domain.Principal{}, domain.ErrTenantMismatch
+	}
+	return domain.Principal{ID: "tenant-key:" + key.keyID, Type: "tenant_key", TenantID: key.tenantID}, nil
 }
 
 func claimedTenant(r *http.Request) string {
@@ -152,103 +93,6 @@ func claimedTenant(r *http.Request) string {
 		return tenantID
 	}
 	return strings.TrimSpace(r.Header.Get(TenantHeaderName))
-}
-
-func TenantIDFromRequest(r *http.Request) string {
-	tenantID, _ := ResolveTenantID(r)
-	return tenantID
-}
-
-func ResolveTenantID(r *http.Request) (string, bool) {
-	if r == nil {
-		return DefaultTenantID, true
-	}
-	if tenantID := strings.TrimSpace(r.Header.Get(TenantHeaderName)); tenantID != "" {
-		return tenantID, ValidTenantID(tenantID)
-	}
-	if tenantID := strings.TrimSpace(r.URL.Query().Get(TenantQueryName)); tenantID != "" {
-		return tenantID, ValidTenantID(tenantID)
-	}
-	return DefaultTenantID, true
-}
-
-func NormalizeTenantID(tenantID string) string {
-	if tenantID = strings.TrimSpace(tenantID); tenantID != "" {
-		return tenantID
-	}
-	return DefaultTenantID
-}
-
-func ValidTenantID(tenantID string) bool {
-	if len(tenantID) == 0 || len(tenantID) > 64 {
-		return false
-	}
-	for _, r := range tenantID {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func ParseTenantKeys(raw string) map[string]string {
-	out := make(map[string]string)
-	for _, mapping := range parseTenantKeyMappings(raw) {
-		out[mapping.key] = mapping.tenantID
-	}
-	return out
-}
-
-type tenantKeyMapping struct {
-	tenantID string
-	key      string
-}
-
-func parseTenantKeyMappings(raw string) []tenantKeyMapping {
-	var out []tenantKeyMapping
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		kv := strings.SplitN(part, ":", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		tenantID := strings.TrimSpace(kv[0])
-		key := strings.TrimSpace(kv[1])
-		if tenantID == "" || key == "" {
-			continue
-		}
-		out = append(out, tenantKeyMapping{tenantID: tenantID, key: key})
-	}
-	return out
-}
-
-func ValidateTenantKeys(raw string) error {
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		kv := strings.SplitN(part, ":", 2)
-		if len(kv) != 2 {
-			return fmt.Errorf("invalid tenant key mapping %q: expected tenant_id:key", part)
-		}
-		tenantID := strings.TrimSpace(kv[0])
-		key := strings.TrimSpace(kv[1])
-		if tenantID == "" || key == "" {
-			return fmt.Errorf("invalid tenant key mapping %q: tenant_id and key are required", part)
-		}
-		if !ValidTenantID(tenantID) {
-			return fmt.Errorf("invalid tenant key mapping %q: invalid tenant_id", part)
-		}
-	}
-	if len(parseTenantKeyMappings(raw)) == 0 {
-		return fmt.Errorf("invalid tenant key mappings: at least one tenant_id:key mapping is required")
-	}
-	return nil
 }
 
 func Fingerprint(key string) string {

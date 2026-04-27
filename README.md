@@ -1,296 +1,52 @@
-﻿<div align="center">
-  <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
-</div>
+# ProxyHarbor
 
-<div align="center">
+ProxyHarbor is a lightweight cloud-native proxy pool service. v0.2.0 is a breaking reset:
 
-**适用于小型业务接入的轻量代理池**
+- Admin key manages tenants, tenant keys, providers, proxies, and the global `default` policy.
+- Tenant keys can create, renew, revoke, and validate leases only.
+- Providers and proxies are global platform inventory, not tenant-owned.
+- Lease records keep `tenant_id`; scheduling reads from the global healthy proxy pool.
+- MySQL is required. Redis is optional acceleration unless zfair Redis is explicitly required.
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](go.mod)
-[![License](https://img.shields.io/badge/License-MIT-orange)](LICENSE)
-[![English](https://img.shields.io/badge/README-English-blue)](README.en.md)
-
-</div>
-
----
-
-ProxyHarbor 是一个面向小型业务场景的轻量代理池服务，提供代理目录管理、租约调度与 HTTP/HTTPS 网关转发能力。它将控制面（代理注册、策略管理、租约颁发）与数据面（HTTP 正向代理 + CONNECT 隧道）合并在单一进程中，依赖栈仅为 **MySQL + Redis**，部署门槛极低。
-
-## 功能特性
-
-- **控制面 API**：管理 Provider、Proxy、Policy、Lease，支持 Catalog 查询
-- **HTTP 网关**：同时支持普通 HTTP 正向代理请求和 CONNECT 隧道（HTTPS）
-- **zfair 公平调度**：Redis ZSET + Lua 原子操作，按权重和健康信号公平分配租约
-- **健康评分**：成功 +5 分，连接失败 -10、超时 -15、认证/协议失败 -30，连续 3 次失败触发熔断，冷却 30 s～5 min 指数退避
-- **租约系统**：时间限制凭据，密码仅在创建时一次性返回，持久化层存储不可逆哈希，支持幂等键去重
-- **Redis 缓存**：Catalog 和 Lease 双缓存，降低 MySQL 热点压力
-- **角色分离**：支持 `all` / `controller` / `gateway` 三种启动角色，可独立拆分部署
-
-## 快速开始
-
-> 推荐使用 Docker Compose 一键启动，内置 MySQL 和 Redis 无需额外准备。
-
-### 1. 启动全部服务
+## Local Start
 
 ```bash
-docker compose --profile bundle up -d --build
+export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
+export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
+docker compose up -d --build
 ```
 
-启动内容：
-- `mysql`：代理目录与健康状态持久化
-- `redis`：zfair 调度状态 + Lease/Catalog 缓存
-- `proxyharbor`：控制面 + 网关一体进程
+MySQL initializes from `migrations/mysql/init.sql`.
 
-默认开发 API Key（legacy 模式）：
+## Required Configuration
 
-```env
-PROXYHARBOR_AUTH_KEY=change-me
-```
-
-**对外暴露前务必修改为强密钥**：
-
-```bash
-cp .env.example .env
-```
-
-```env
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret
-PROXYHARBOR_MYSQL_DSN=proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
-PROXYHARBOR_REDIS_ADDR=redis:6379
-```
-
-## Authentication Modes
-
-ProxyHarbor v0.1.5 支持三种鉴权模式：
-
-| 模式 | 适用场景 | 配置 | 特点 |
-| --- | --- | --- | --- |
-| `legacy` | 单租户开发 | `PROXYHARBOR_AUTH_KEY` | 简单单 Key，零行为变化 |
-| `tenant-keys` | 多租户静态配置 | `PROXYHARBOR_TENANT_KEYS` | env 配置，不可在线变更 |
-| `dynamic-keys` | 生产多租户 | `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` | DB 驱动，可在线签发/撤销 |
-
-- **legacy**：v0.1.3 行为，单 `PROXYHARBOR_AUTH_KEY` 控制所有控制面访问。
-- **tenant-keys**：v0.1.4 行为，`PROXYHARBOR_TENANT_KEYS=tnt_a:key_a,tnt_b:key_b` 静态映射租户与 Key。
-- **dynamic-keys**：v0.1.5 推荐生产模式，Admin Key 通过 env 注入，Tenant Key 由 `/admin/tenants/{id}/keys` 签发并持久化到 DB，支持 ≤5 秒撤销生效。
-
-升级路径：保留原有 `PROXYHARBOR_AUTH_KEY` 或 `PROXYHARBOR_TENANT_KEYS` 即可零行为变化；设置 `PROXYHARBOR_AUTH_MODE=dynamic-keys` 并提供 `PROXYHARBOR_ADMIN_KEY` + `PROXYHARBOR_KEY_PEPPER` 即启用 dynamic-keys 模式。
-
-### 2. 检查服务就绪状态
-
-```bash
-curl http://localhost:8080/readyz
-```
-
-```json
-{"role":"all","status":"ready"}
-```
-
-### 3. 注册 Provider
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"static-main","type":"static","name":"我的代理池","enabled":true}' \
-  http://localhost:8080/v1/providers
-```
-
-### 4. 添加代理节点
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"proxy-1","provider_id":"static-main","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
-  http://localhost:8080/v1/proxies
-```
-
-> 本地测试回环地址或内网 IP 时，需先设置 `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true`
-
-批量添加（Bash）：
-
-```bash
-for item in \
-  'proxy-1 http://proxy1.example.com:8080 100' \
-  'proxy-2 http://proxy2.example.com:8080 80' \
-  'proxy-3 http://proxy3.example.com:8080 50'
-do
-  set -- $item
-  curl -H 'ProxyHarbor-Key: change-me' \
-    -H 'Content-Type: application/json' \
-    -d "{\"id\":\"$1\",\"provider_id\":\"static-main\",\"endpoint\":\"$2\",\"healthy\":true,\"weight\":$3}" \
-    http://localhost:8080/v1/proxies
-done
-```
-
-批量添加（PowerShell）：
-
-```powershell
-$proxies = @(
-  @{ id = 'proxy-1'; endpoint = 'http://proxy1.example.com:8080'; weight = 100 },
-  @{ id = 'proxy-2'; endpoint = 'http://proxy2.example.com:8080'; weight = 80 },
-  @{ id = 'proxy-3'; endpoint = 'http://proxy3.example.com:8080'; weight = 50 }
-)
-foreach ($proxy in $proxies) {
-  $body = @{ id=$proxy.id; provider_id='static-main'; endpoint=$proxy.endpoint; healthy=$true; weight=$proxy.weight } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/v1/proxies' -Headers @{'ProxyHarbor-Key'='change-me'} -ContentType 'application/json' -Body $body
-}
-```
-
-### 5. 创建策略
-
-租约颁发至少需要一条启用的策略：
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"default","name":"默认策略","enabled":true,"ttl_seconds":1800}' \
-  http://localhost:8080/v1/policies
-```
-
-### 6. 创建租约
-
-```bash
-curl -H 'ProxyHarbor-Key: change-me' \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-lease-1' \
-  -d '{"subject":{"subject_type":"user","subject_id":"local-dev"},"resource_ref":{"kind":"url","id":"https://example.com"},"ttl_seconds":600}' \
-  http://localhost:8080/v1/leases
-```
-
-返回的 `lease_id` 作为代理用户名，`password` 作为代理密码（**仅此一次返回，请立即保存**）。
-
-## 启动模式
-
-### 内置依赖（推荐本地开发）
-
-```bash
-docker compose --profile bundle up -d --build
-```
-
-### 外部 MySQL + Redis
-
-```bash
-cp .env.example .env
-# 编辑 .env 填写外部连接信息
-docker compose --profile app up -d --build
-```
-
-### 直接运行二进制
-
-```bash
-PROXYHARBOR_AUTH_KEY=replace-with-a-random-secret \
-PROXYHARBOR_STORAGE=mysql \
-PROXYHARBOR_MYSQL_DSN='proxyharbor:proxyharbor@tcp(127.0.0.1:3306)/proxyharbor?parseTime=true&loc=UTC' \
-PROXYHARBOR_REDIS_ADDR='127.0.0.1:6379' \
-PROXYHARBOR_SELECTOR=zfair \
-go run ./cmd/proxyharbor
-```
-
-## 数据模型
-
-### Provider（提供商）
-
-将同一来源的代理节点归组管理，静态手动维护使用 `type: static`：
-
-```json
-{"id":"static-main","type":"static","name":"我的代理池","enabled":true}
-```
-
-### Proxy（代理节点）
-
-描述一个上游代理端点：
-
-| 字段 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `id` | 租户内唯一 ID |
-| `provider_id` | 归属的 Provider |
-| `endpoint` | 上游代理 URL |
-| `healthy` | 是否参与调度 |
-| `weight` | zfair 调度相对权重，数值越大获得租约越多 |
-| `health_score` | 健康分值，由网关反馈自动维护 |
-| `circuit_open_until` | 熔断恢复时间 |
-| `latency_ewma_ms` | 延迟指数加权移动平均（ms） |
-| `labels` | 扩展标签，供策略过滤预留 |
+| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes. |
+| `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes. |
+| `PROXYHARBOR_MYSQL_DSN` | MySQL DSN. |
 
-### Lease（租约）
+Optional: `PROXYHARBOR_REDIS_ADDR`, `PROXYHARBOR_REDIS_PASSWORD`, `PROXYHARBOR_AUTH_REFRESH_INTERVAL`, `PROXYHARBOR_SELECTOR_REDIS_REQUIRED`.
 
-一次租约绑定 **一个代理节点**，颁发一组时效性凭据供网关鉴权：
+## API Shape
 
-- 密码使用 SHA-256 哈希存储，仅 `CreateLease` 响应中一次性返回明文
-- 支持 `Idempotency-Key` 防止重复颁发
-- 支持 `RenewLease` 续期（默认延长 30 分钟）和 `RevokeLease` 主动吊销
+Admin-only:
 
-## 调度与健康模型
+- `POST /admin/tenants`
+- `POST /admin/tenants/{id}/keys`
+- `POST|PUT|DELETE /v1/providers`
+- `POST|PUT|DELETE /v1/proxies`
+- `POST|PUT|DELETE /v1/policies/default`
 
-### zfair 调度器
+Tenant:
 
-- 使用 Redis ZSET 维护 **ready** 和 **delayed** 两个队列
-- 全程通过 Lua 脚本原子执行：候选注册、冷却晋升、节点选取、虚拟运行时更新
-- 按权重和健康信号公平分配，并发下不会出现调度倾斜
-- 生产环境下 Redis 不可用时**拒绝启动**而非静默降级
+- `POST /v1/leases`
+- `POST /v1/leases/{id}:renew`
+- `DELETE /v1/leases/{id}`
+- `GET /v1/catalog/latest`
 
-### 健康评分
+## Health
 
-| 事件 | 分值变化 |
-| --- | --- |
-| 请求成功 | +5 |
-| 未知失败 | -5 |
-| 连接失败 | -10 |
-| 超时 | -15 |
-| 认证失败 | -30 |
-| 协议错误 | -30 |
-
-连续失败 3 次触发熔断，基础冷却 30 秒，最大冷却 5 分钟（指数退避）。评分配置可通过 `PROXYHARBOR_SCORING_PROFILE` 调整为 `aggressive` 或 `lenient`。
-
-## 配置参考
-
-| 环境变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `PROXYHARBOR_AUTH_MODE` | 鉴权模式：`legacy-single-key`（`legacy` alias）/ `tenant-keys` / `dynamic-keys`；未设置时根据已配置 Key 推断 | 推断 |
-| `PROXYHARBOR_AUTH_KEY` | legacy 模式专用密钥 | 空 |
-| `PROXYHARBOR_TENANT_KEYS` | tenant-keys 模式静态映射 `tnt:key,tnt2:key2` | 空 |
-| `PROXYHARBOR_ADMIN_KEY` | dynamic-keys 模式 Bootstrap Admin Key（≥32 字符） | 空 |
-| `PROXYHARBOR_KEY_PEPPER` | dynamic-keys 模式 Pepper（≥32 字节随机） | 空 |
-| `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | 缓存增量轮询间隔 | `5s` |
-| `PROXYHARBOR_ROLE` | 进程角色：`all` / `controller` / `gateway` | `all` |
-| `PROXYHARBOR_STORAGE` | 存储驱动：`mysql` / `memory` | `mysql` |
-| `PROXYHARBOR_MYSQL_DSN` | MySQL 连接串 | 空 |
-| `PROXYHARBOR_REDIS_ADDR` | Redis 地址 | 空 |
-| `PROXYHARBOR_SELECTOR` | 调度器名称 | `zfair` |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | zfair 无 Redis 时拒绝启动；Helm 默认关闭以便轻量安装 | `true`（Helm: `false`） |
-| `PROXYHARBOR_SCORING_PROFILE` | 健康评分档位：`default` / `aggressive` / `lenient` | `default` |
-| `PROXYHARBOR_ZFAIR_QUANTUM` | 虚拟运行时基础增量 | `1000` |
-| `PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS` | 无 EWMA 数据时的默认延迟（ms） | `200` |
-| `PROXYHARBOR_ZFAIR_MAX_PROMOTE` | 每次选取前最多从 delayed 队列晋升的节点数 | `128` |
-| `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | 允许注册回环/内网地址（仅测试） | `false` |
-
-完整配置模板见 `.env.example`。
-
-## 打包与部署
-
-- `Dockerfile`：构建静态 Go 二进制
-- `docker-compose.yaml`：本地开发一键启动
-- `charts/proxyharbor`：Helm Chart，用于 Kubernetes 部署
-- `migrations/mysql/`：数据库初始化 SQL
-
-## 贡献指南
-
-欢迎提交 Issue 和 Pull Request，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 联系方式
-
-| 渠道 | 地址 |
-| --- | --- |
-| Telegram | [@kamill7779](https://t.me/kamill7779) |
-| Email | [kamill7779@outlook.com](mailto:kamill7779@outlook.com) |
-
-## 许可证
-
-本项目基于 [MIT License](LICENSE) 开源。
-
-
-## Platform Contract (v0.1.5 Milestone C)
-
-ProxyHarbor v0.1.5 defines a platform-container contract for dynamic tenant keys. The platform-api flow is: create an instance, call ProxyHarbor Admin API to create a tenant key with `purpose=platform_container`, write the returned one-time key into a Kubernetes Secret, then inject it into the workload as `PROXYHARBOR_KEY`. Container SDKs should read keys in this order: env `PROXYHARBOR_KEY`, mounted file `/var/run/proxyharbor/key`, then a future IMDS-like sidecar. See `docs/versions/v0.1.5.md` for the full contract and rollback notes.
-
-
-
+- `/healthz` is process liveness only.
+- `/readyz` checks MySQL, schema seeds, auth cache initialization, and required selector dependencies.
+- `/debug/auth-cache` and `/debug/auth-cache/metrics` are admin-only and never expose secrets.

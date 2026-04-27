@@ -1,45 +1,22 @@
-# ProxyHarbor Helm values
-# Supports Kubernetes >=1.23 and K3s. External dependencies (MySQL/Redis) are provided by users;
-# this chart does not bundle database subcharts.
-#
-# Minimal install using existing MySQL + Redis:
-#   helm install ph ./charts/proxyharbor \
-#     --set auth.key=$(openssl rand -hex 32) \
-#     --set mysql.dsn='user:pass@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC' \
-#     --set redis.addr=redis.svc:6379
-#
-# Recommended: inject auth.key and mysql.dsn through existingSecret instead of plaintext values.
-
 image:
   repository: ghcr.io/kamill7779/proxyharbor
-  tag: ""              # Defaults to .Chart.AppVersion
+  tag: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
 
-# all (dev) | controller (control plane) | gateway (data plane)
 role: all
 replicaCount: 1
-
-# Optional Deployment.spec.strategy override. Example for safer multi-replica
-# rollouts in dynamic-keys mode (see charts/proxyharbor/examples/dynamic-ha-values.yaml):
-#   strategy:
-#     type: RollingUpdate
-#     rollingUpdate:
-#       maxSurge: 1
-#       maxUnavailable: 0
 strategy: {}
-
-# K3s/edge optimization: lowers resources and relaxes livenessProbe when enabled.
 lightweight: false
 
 service:
-  type: ClusterIP      # Use LoadBalancer on K3s when servicelb should expose it directly.
+  type: ClusterIP
   port: 8080
   annotations: {}
 
 ingress:
   enabled: false
-  className: ""        # K3s defaults to traefik; common Kubernetes clusters often use nginx.
+  className: ""
   annotations: {}
   hosts:
     - host: proxyharbor.local
@@ -48,44 +25,26 @@ ingress:
           pathType: Prefix
   tls: []
 
-# Auth mode (v0.1.5+):
-#   legacy       : single-key development mode (PROXYHARBOR_AUTH_KEY)
-#   tenant-keys  : multi-tenant static config (PROXYHARBOR_TENANT_KEYS)
-#   dynamic-keys : production multi-tenant DB-backed mode (recommended)
 auth:
-  mode: legacy
-  key: "change-me"            # legacy mode only; backwards compatible
-  tenantKeys: ""              # tenant-keys mode: tenant_id:key,tenant_id:key
-  existingSecret: ""          # Existing Secret containing auth-key / admin-key / pepper keys.
-  existingSecretKey: "auth-key"
-  adminKey: ""                # Bootstrap Admin Key; required for dynamic-keys, >=32 chars.
-  pepper: ""                  # Key Pepper; required for dynamic-keys, >=32 random bytes.
-  refreshInterval: 5s         # Cache polling interval.
-  # Auth invalidation transport for dynamic-keys (v0.1.6+):
-  #   ""/"auto" : enable Redis pub/sub when redis.addr is configured, fall back to polling otherwise (recommended)
-  #   "redis"   : require Redis pub/sub broadcast (still polling-backed for safety)
-  #   "polling" : disable pub/sub, rely solely on refreshInterval polling
+  existingSecret: proxyharbor-credentials
+  keys:
+    adminKey: admin-key
+    pepper: pepper
+  refreshInterval: 5s
   invalidation: ""
 
-# MySQL connection; choose one:
-#   1) Set mysql.dsn directly (plaintext).
-#   2) Point mysql.existingSecret to a Secret key named by mysql.existingSecretKey.
 mysql:
-  dsn: "proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true"
-  existingSecret: ""
-  existingSecretKey: "mysql-dsn"
+  existingSecret: proxyharbor-credentials
+  existingSecretKey: mysql-dsn
   maxOpen: 20
   maxIdle: 5
   connMaxAge: 30m
 
-# Redis connection. Empty addr degrades cache to noop for lightweight scenarios.
-# Password can be provided as redis.password plaintext or via existingSecret.
 redis:
   addr: ""
   selectorRedisRequired: false
-  password: ""
   existingSecret: ""
-  existingSecretKey: "redis-password"
+  existingSecretKey: redis-password
   db: 0
 
 cache:
@@ -93,7 +52,6 @@ cache:
 
 shutdownTimeout: 15s
 
-# Defaults target cloud-native deployments; lightweight=true lowers settings for K3s/edge.
 resources:
   requests:
     cpu: 100m
@@ -113,7 +71,6 @@ resourcesLightweight:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
 podAnnotations: {}
 podSecurityContext:
   runAsNonRoot: true

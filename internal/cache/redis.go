@@ -50,8 +50,8 @@ func leaseKey(tenantID, leaseID string) string {
 	return "ph:lease:" + tenantID + ":" + leaseID
 }
 
-func catalogKey(tenantID string) string {
-	return "ph:catalog:" + tenantID
+func catalogKey() string {
+	return "ph:catalog:global"
 }
 
 func (r *Redis) GetLease(ctx context.Context, tenantID, leaseID string) (domain.Lease, bool, error) {
@@ -84,8 +84,8 @@ func (r *Redis) InvalidateLease(ctx context.Context, tenantID, leaseID string) e
 	return r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err()
 }
 
-func (r *Redis) GetCatalog(ctx context.Context, tenantID string) (domain.Catalog, bool, error) {
-	raw, err := r.client.Get(ctx, catalogKey(tenantID)).Bytes()
+func (r *Redis) GetCatalog(ctx context.Context) (domain.Catalog, bool, error) {
+	raw, err := r.client.Get(ctx, catalogKey()).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return domain.Catalog{}, false, nil
 	}
@@ -107,9 +107,9 @@ func (r *Redis) PutCatalog(ctx context.Context, catalog domain.Catalog, ttl time
 	if err != nil {
 		return err
 	}
-	return r.client.Set(ctx, catalogKey(catalog.TenantID), raw, ttl).Err()
+	return r.client.Set(ctx, catalogKey(), raw, ttl).Err()
 }
 
-func (r *Redis) InvalidateCatalog(ctx context.Context, tenantID string) error {
-	return r.client.Del(ctx, catalogKey(tenantID)).Err()
+func (r *Redis) InvalidateCatalog(ctx context.Context) error {
+	return r.client.Del(ctx, catalogKey()).Err()
 }

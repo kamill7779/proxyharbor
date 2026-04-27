@@ -1,7 +1,7 @@
 ﻿openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.1.0-alpha
+  version: 0.2.0-alpha
   x-stability: alpha
 servers:
   - url: http://localhost:8080
@@ -251,9 +251,8 @@ components:
       in: header
       name: ProxyHarbor-Key
       description: >-
-        Accepts the configured legacy key, a static tenant key from PROXYHARBOR_TENANT_KEYS,
-        a dynamic tenant key issued by /admin/tenants/{id}/keys, or the bootstrap admin key
-        for /admin/* and X-On-Behalf-Of control-plane calls.
+        Accepts the bootstrap admin key for admin/platform APIs or a dynamic tenant key
+        issued by /admin/tenants/{id}/keys for tenant lease APIs.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -344,7 +343,6 @@ components:
       type: object
       properties:
         id: { type: string }
-        tenant_id: { type: string, readOnly: true }
         type: { type: string, enum: [static] }
         name: { type: string }
         enabled: { type: boolean }
@@ -356,7 +354,6 @@ components:
       required: [endpoint]
       properties:
         id: { type: string }
-        tenant_id: { type: string, readOnly: true }
         provider_id: { type: string }
         endpoint: { type: string }
         healthy: { type: boolean }
@@ -368,7 +365,6 @@ components:
       type: object
       properties:
         id: { type: string }
-        tenant_id: { type: string, readOnly: true }
         version: { type: integer, readOnly: true }
         name: { type: string }
         enabled: { type: boolean }
@@ -379,7 +375,6 @@ components:
     Catalog:
       type: object
       properties:
-        tenant_id: { type: string }
         version: { type: string }
         proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } }
         generated_at: { type: string, format: date-time }

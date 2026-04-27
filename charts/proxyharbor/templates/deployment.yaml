@@ -61,67 +61,21 @@ spec:
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
               value: {{ .Values.shutdownTimeout | quote }}
-            # ----- Credentials: existingSecret takes precedence; otherwise use generated plaintext secrets. -----
-            # ----- Auth config -----
-            - name: PROXYHARBOR_AUTH_MODE
-              value: {{ ternary "legacy-single-key" .Values.auth.mode (eq .Values.auth.mode "legacy") | quote }}
-            {{- if or (eq .Values.auth.mode "legacy") (eq .Values.auth.mode "legacy-single-key") }}
-            - name: PROXYHARBOR_AUTH_KEY
-              {{- if .Values.auth.existingSecret }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.existingSecretKey }}
-              {{- else if .Values.auth.key }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: auth-key
-              {{- end }}
-            {{- else if eq .Values.auth.mode "tenant-keys" }}
-            - name: PROXYHARBOR_TENANT_KEYS
-              {{- if .Values.auth.existingSecret }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: tenant-keys
-              {{- else if .Values.auth.tenantKeys }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: tenant-keys
-              {{- end }}
-            {{- else if eq .Values.auth.mode "dynamic-keys" }}
             - name: PROXYHARBOR_ADMIN_KEY
-              {{- if .Values.auth.existingSecret }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.auth.existingSecret }}
-                  key: admin-key
-              {{- else if .Values.auth.adminKey }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: admin-key
-              {{- end }}
+                  key: {{ .Values.auth.keys.adminKey }}
             - name: PROXYHARBOR_KEY_PEPPER
-              {{- if .Values.auth.existingSecret }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.auth.existingSecret }}
-                  key: pepper
-              {{- else if .Values.auth.pepper }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: pepper
-              {{- end }}
+                  key: {{ .Values.auth.keys.pepper }}
             - name: PROXYHARBOR_AUTH_REFRESH_INTERVAL
               value: {{ .Values.auth.refreshInterval | quote }}
             {{- if .Values.auth.invalidation }}
             - name: PROXYHARBOR_AUTH_INVALIDATION
               value: {{ .Values.auth.invalidation | quote }}
-            {{- end }}
             {{- end }}
             - name: PROXYHARBOR_INSTANCE_ID
               valueFrom:

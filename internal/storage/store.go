@@ -41,26 +41,26 @@ type LeaseStore interface {
 }
 
 type PolicyStore interface {
-	ListPolicies(context.Context, string) ([]domain.Policy, error)
-	GetPolicy(context.Context, string, string) (domain.Policy, error)
+	ListPolicies(context.Context) ([]domain.Policy, error)
+	GetPolicy(context.Context, string) (domain.Policy, error)
 	UpsertPolicy(context.Context, domain.Policy) (domain.Policy, error)
-	DeletePolicy(context.Context, string, string) error
+	DeletePolicy(context.Context, string) error
 }
 
 type CatalogStore interface {
-	ListProviders(context.Context, string) ([]domain.Provider, error)
-	GetProvider(context.Context, string, string) (domain.Provider, error)
+	ListProviders(context.Context) ([]domain.Provider, error)
+	GetProvider(context.Context, string) (domain.Provider, error)
 	UpsertProvider(context.Context, domain.Provider) (domain.Provider, error)
-	DeleteProvider(context.Context, string, string) error
-	ListSelectableProxies(context.Context, string) ([]domain.Proxy, error)
-	RecordProxyOutcome(context.Context, string, string, ProxyHealthDelta) error
-	ChooseHealthyProxy(context.Context, string) (domain.Proxy, error)
-	LatestCatalog(context.Context, string) (domain.Catalog, error)
-	GetProxy(context.Context, string, string) (domain.Proxy, error)
+	DeleteProvider(context.Context, string) error
+	ListSelectableProxies(context.Context) ([]domain.Proxy, error)
+	RecordProxyOutcome(context.Context, string, ProxyHealthDelta) error
+	ChooseHealthyProxy(context.Context) (domain.Proxy, error)
+	LatestCatalog(context.Context) (domain.Catalog, error)
+	GetProxy(context.Context, string) (domain.Proxy, error)
 	UpsertProxy(context.Context, domain.Proxy) (domain.Proxy, error)
-	DeleteProxy(context.Context, string, string) error
+	DeleteProxy(context.Context, string) error
 	SaveCatalogSnapshot(context.Context, domain.Catalog) error
-	ListCatalogProxies(context.Context, string) ([]domain.Proxy, error)
+	ListCatalogProxies(context.Context) ([]domain.Proxy, error)
 }
 
 type ProxyHealthDelta struct {

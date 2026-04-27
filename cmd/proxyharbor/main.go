@@ -75,7 +75,7 @@ func main() {
 	// this client is dedicated to pub/sub so subscribe blocking does not
 	// stall normal traffic.
 	var invalidationClient *redis.Client
-	if cfg.AuthMode == auth.ModeDynamicKeys && cfg.RedisAddr != "" && cfg.AuthInvalidation != "polling" {
+	if cfg.RedisAddr != "" && cfg.AuthInvalidation != "polling" {
 		invalidationClient = redis.NewClient(&redis.Options{
 			Addr:         cfg.RedisAddr,
 			Password:     cfg.RedisPassword,
@@ -91,15 +91,11 @@ func main() {
 		}
 	}()
 
-	// Verify dynamic-mode MySQL schema is at the version this binary expects
-	// before starting any traffic-serving goroutine. Legacy/tenant-keys are
-	// not gated.
-	if cfg.AuthMode == auth.ModeDynamicKeys {
-		if mysqlStore, ok := store.(*storage.MySQLStore); ok {
-			if err := storage.EnsureDynamicAuthSchema(ctx, mysqlStore.DB()); err != nil {
-				logger.Error("dynamic auth schema check failed", "err", err)
-				os.Exit(1)
-			}
+	// Verify MySQL schema before starting any traffic-serving goroutine.
+	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
+		if err := storage.EnsureDynamicAuthSchema(ctx, mysqlStore.DB()); err != nil {
+			logger.Error("schema check failed", "err", err)
+			os.Exit(1)
 		}
 	}
 
@@ -147,7 +143,7 @@ func main() {
 		logger.Info("proxyharbor listening",
 			"role", cfg.Role, "addr", cfg.Addr, "storage", cfg.StorageDriver,
 			"redis", cfg.RedisAddr != "", "selector", cfg.Selector,
-			"auth_mode", cfg.AuthMode, "auth_cache_entries", authn.CacheEntries(),
+			"auth_cache_entries", authn.CacheEntries(),
 			"auth_invalidation", authInvalidationLabel(cfg, invalidationClient != nil),
 			"instance_id", instanceID)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -177,26 +173,17 @@ func buildAdminStore(store storage.Store) server.AdminStore {
 }
 
 func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, func(), error) {
-	switch cfg.AuthMode {
-	case auth.ModeDynamicKeys:
-		mysqlStore, ok := store.(*storage.MySQLStore)
-		if !ok {
-			return nil, nil, func() {}, errors.New("auth mode dynamic-keys requires mysql storage")
-		}
-		dynamicStore, err := auth.NewDynamicStore(auth.NewMySQLKeyStore(mysqlStore.DB()), []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
-		if err != nil {
-			return nil, nil, func() {}, err
-		}
-		refreshCtx, cancel := context.WithCancel(ctx)
-		go dynamicStore.Run(refreshCtx)
-		return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), dynamicStore, cancel, nil
-	case auth.ModeTenantKeys:
-		return auth.NewTenantKeys(auth.ParseTenantKeys(cfg.TenantKeys)).WithAdminKey(cfg.AdminKey), nil, func() {}, nil
-	case auth.ModeLegacy:
-		return auth.NewLegacy(cfg.AuthKey).WithAdminKey(cfg.AdminKey), nil, func() {}, nil
-	default:
-		return nil, nil, func() {}, errors.New("unsupported auth mode")
+	mysqlStore, ok := store.(*storage.MySQLStore)
+	if !ok {
+		return nil, nil, func() {}, errors.New("v0.2.0 auth requires mysql storage")
 	}
+	dynamicStore, err := auth.NewDynamicStore(auth.NewMySQLKeyStore(mysqlStore.DB()), []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	refreshCtx, cancel := context.WithCancel(ctx)
+	go dynamicStore.Run(refreshCtx)
+	return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), dynamicStore, cancel, nil
 }
 
 // dynamicAuthReady satisfies server.AuthReadyChecker / AuthSnapshotProvider
@@ -246,9 +233,6 @@ func shortRand() string {
 
 func authInvalidationLabel(cfg config.Config, redisActive bool) string {
 	mode := strings.ToLower(strings.TrimSpace(cfg.AuthInvalidation))
-	if cfg.AuthMode != auth.ModeDynamicKeys {
-		return "n/a"
-	}
 	switch mode {
 	case "polling":
 		return "polling"

@@ -21,9 +21,9 @@ type Cache interface {
 	InvalidateLease(ctx context.Context, tenantID, leaseID string) error
 
 	// GetCatalog 用于 gateway 选择路径上的代理目录加速。
-	GetCatalog(ctx context.Context, tenantID string) (domain.Catalog, bool, error)
+	GetCatalog(ctx context.Context) (domain.Catalog, bool, error)
 	PutCatalog(ctx context.Context, catalog domain.Catalog, ttl time.Duration) error
-	InvalidateCatalog(ctx context.Context, tenantID string) error
+	InvalidateCatalog(ctx context.Context) error
 
 	// Close 释放底层连接。
 	Close() error
@@ -37,9 +37,9 @@ func (Noop) GetLease(context.Context, string, string) (domain.Lease, bool, error
 }
 func (Noop) PutLease(context.Context, domain.Lease, time.Duration) error { return nil }
 func (Noop) InvalidateLease(context.Context, string, string) error       { return nil }
-func (Noop) GetCatalog(context.Context, string) (domain.Catalog, bool, error) {
+func (Noop) GetCatalog(context.Context) (domain.Catalog, bool, error) {
 	return domain.Catalog{}, false, nil
 }
 func (Noop) PutCatalog(context.Context, domain.Catalog, time.Duration) error { return nil }
-func (Noop) InvalidateCatalog(context.Context, string) error                 { return nil }
+func (Noop) InvalidateCatalog(context.Context) error                         { return nil }
 func (Noop) Close() error                                                    { return nil }

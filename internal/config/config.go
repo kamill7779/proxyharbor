@@ -16,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/kamill7779/proxyharbor/internal/auth"
 )
 
 type StorageDriver string
@@ -31,12 +29,9 @@ type Config struct {
 	Role                       string
 	Addr                       string
 	GatewayURL                 string
-	AuthKey                    string
-	AuthMode                   auth.AuthMode
 	AdminKey                   string
 	KeyPepper                  string
 	AuthRefreshInterval        time.Duration
-	TenantKeys                 string
 	LogFormat                  string
 	LogLevel                   string
 	StorageDriver              StorageDriver
@@ -58,11 +53,6 @@ type Config struct {
 	ZFairQuantum               int
 	ZFairDefaultLatencyMS      int
 	ZFairMaxPromote            int
-	HealthcheckURL             string
-	HealthcheckInterval        time.Duration
-	HealthcheckTimeout         time.Duration
-	StickyEnabled              bool
-	StickyPolicy               string
 	// AuthInvalidation selects the auth-cache invalidation transport in
 	// dynamic-keys mode. ""/"auto" enables Redis pub/sub when Redis is
 	// configured and falls back to polling otherwise; "redis" forces Redis
@@ -74,20 +64,16 @@ type Config struct {
 }
 
 func Load(args []string) (Config, error) {
-	authModeStr := envStr("PROXYHARBOR_AUTH_MODE", "")
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
-		AuthKey:                    os.Getenv("PROXYHARBOR_AUTH_KEY"),
-		AuthMode:                   auth.AuthMode(authModeStr),
 		AdminKey:                   os.Getenv("PROXYHARBOR_ADMIN_KEY"),
 		KeyPepper:                  os.Getenv("PROXYHARBOR_KEY_PEPPER"),
 		AuthRefreshInterval:        envDur("PROXYHARBOR_AUTH_REFRESH_INTERVAL", 5*time.Second),
-		TenantKeys:                 os.Getenv("PROXYHARBOR_TENANT_KEYS"),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
-		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "memory")),
+		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "mysql")),
 		MySQLDSN:                   os.Getenv("PROXYHARBOR_MYSQL_DSN"),
 		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
 		MySQLMaxIdle:               envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
@@ -106,11 +92,6 @@ func Load(args []string) (Config, error) {
 		ZFairQuantum:               envInt("PROXYHARBOR_ZFAIR_QUANTUM", 1000),
 		ZFairDefaultLatencyMS:      envInt("PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS", 200),
 		ZFairMaxPromote:            envInt("PROXYHARBOR_ZFAIR_MAX_PROMOTE", 128),
-		HealthcheckURL:             os.Getenv("PROXYHARBOR_HEALTHCHECK_URL"),
-		HealthcheckInterval:        envDur("PROXYHARBOR_HEALTHCHECK_INTERVAL", 30*time.Second),
-		HealthcheckTimeout:         envDur("PROXYHARBOR_HEALTHCHECK_TIMEOUT", 5*time.Second),
-		StickyEnabled:              envBool("PROXYHARBOR_STICKY_ENABLED", false),
-		StickyPolicy:               envStr("PROXYHARBOR_STICKY_POLICY", "none"),
 		AuthInvalidation:           envStr("PROXYHARBOR_AUTH_INVALIDATION", ""),
 		InstanceID:                 envStr("PROXYHARBOR_INSTANCE_ID", ""),
 	}
@@ -119,12 +100,9 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.Role, "role", cfg.Role, "process role: all | controller | gateway")
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
-	fs.StringVar(&cfg.AuthKey, "auth-key", cfg.AuthKey, "ProxyHarbor-Key header value")
-	authModeFlag := fs.String("auth-mode", authModeStr, "auth mode: legacy-single-key | tenant-keys | dynamic-keys")
 	fs.StringVar(&cfg.AdminKey, "admin-key", cfg.AdminKey, "bootstrap admin key")
 	fs.StringVar(&cfg.KeyPepper, "key-pepper", cfg.KeyPepper, "key hashing pepper for dynamic mode")
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
-	fs.StringVar(&cfg.TenantKeys, "tenant-keys", cfg.TenantKeys, "static tenant keys: tenant_id:key,tenant_id:key")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
@@ -138,21 +116,12 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.ZFairQuantum, "zfair-quantum", cfg.ZFairQuantum, "zfair scheduler quantum")
 	fs.IntVar(&cfg.ZFairDefaultLatencyMS, "zfair-default-latency-ms", cfg.ZFairDefaultLatencyMS, "zfair default latency ms")
 	fs.IntVar(&cfg.ZFairMaxPromote, "zfair-max-promote", cfg.ZFairMaxPromote, "zfair max delayed promotions")
-	fs.StringVar(&cfg.HealthcheckURL, "healthcheck-url", cfg.HealthcheckURL, "active healthcheck URL")
-	fs.DurationVar(&cfg.HealthcheckInterval, "healthcheck-interval", cfg.HealthcheckInterval, "active healthcheck interval")
-	fs.DurationVar(&cfg.HealthcheckTimeout, "healthcheck-timeout", cfg.HealthcheckTimeout, "active healthcheck timeout")
-	fs.BoolVar(&cfg.StickyEnabled, "sticky-enabled", cfg.StickyEnabled, "enable sticky affinity placeholder")
-	fs.StringVar(&cfg.StickyPolicy, "sticky-policy", cfg.StickyPolicy, "sticky affinity policy")
 	fs.StringVar(&cfg.AuthInvalidation, "auth-invalidation", cfg.AuthInvalidation, "auth invalidation transport: auto | redis | polling")
 	fs.StringVar(&cfg.InstanceID, "instance-id", cfg.InstanceID, "non-secret instance identifier exposed in readiness/debug responses")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
-	if *authModeFlag != "" {
-		cfg.AuthMode = normalizeAuthMode(auth.AuthMode(*authModeFlag))
-	}
-	cfg.AuthMode = resolveAuthMode(cfg)
 	return cfg, cfg.validate()
 }
 
@@ -193,76 +162,31 @@ func (c Config) validate() error {
 	if c.ZFairQuantum <= 0 || c.ZFairDefaultLatencyMS <= 0 || c.ZFairMaxPromote <= 0 {
 		return errors.New("zfair numeric settings must be positive")
 	}
-	if c.StickyPolicy == "" {
-		return errors.New("sticky policy must not be empty")
-	}
 	switch strings.ToLower(strings.TrimSpace(c.AuthInvalidation)) {
 	case "", "auto", "redis", "polling":
 	default:
 		return fmt.Errorf("invalid auth invalidation transport: %q", c.AuthInvalidation)
 	}
 
-	mode := resolveAuthMode(c)
-	switch mode {
-	case auth.ModeDynamicKeys:
-		if c.StorageDriver != DriverMySQL {
-			return errors.New("auth mode dynamic-keys requires storage=mysql")
-		}
-		if c.AdminKey == "" {
-			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_ADMIN_KEY")
-		}
-		if len(c.AdminKey) < 32 {
-			return errors.New("PROXYHARBOR_ADMIN_KEY must be at least 32 bytes")
-		}
-		if c.KeyPepper == "" {
-			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_KEY_PEPPER")
-		}
-		if len(c.KeyPepper) < 32 {
-			return errors.New("PROXYHARBOR_KEY_PEPPER must be at least 32 bytes")
-		}
-		if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
-			return errors.New("auth mode dynamic-keys requires PROXYHARBOR_AUTH_REFRESH_INTERVAL <= 5s and > 0")
-		}
-	case auth.ModeTenantKeys:
-		if c.TenantKeys == "" {
-			return errors.New("auth mode tenant-keys requires PROXYHARBOR_TENANT_KEYS")
-		}
-		if err := auth.ValidateTenantKeys(c.TenantKeys); err != nil {
-			return fmt.Errorf("invalid PROXYHARBOR_TENANT_KEYS: %w", err)
-		}
-	case auth.ModeLegacy:
-		if c.AuthKey == "" {
-			return errors.New("auth mode legacy-single-key requires -auth-key or PROXYHARBOR_AUTH_KEY")
-		}
-	case "":
-		return errors.New("auth configuration requires PROXYHARBOR_TENANT_KEYS, PROXYHARBOR_AUTH_KEY, or PROXYHARBOR_ADMIN_KEY")
-	default:
-		return fmt.Errorf("unsupported auth mode: %q", mode)
+	if c.StorageDriver != DriverMySQL {
+		return errors.New("v0.2.0 requires storage=mysql")
+	}
+	if c.AdminKey == "" {
+		return errors.New("PROXYHARBOR_ADMIN_KEY is required")
+	}
+	if len(c.AdminKey) < 32 {
+		return errors.New("PROXYHARBOR_ADMIN_KEY must be at least 32 bytes")
+	}
+	if c.KeyPepper == "" {
+		return errors.New("PROXYHARBOR_KEY_PEPPER is required")
+	}
+	if len(c.KeyPepper) < 32 {
+		return errors.New("PROXYHARBOR_KEY_PEPPER must be at least 32 bytes")
+	}
+	if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
+		return errors.New("PROXYHARBOR_AUTH_REFRESH_INTERVAL must be > 0 and <= 5s")
 	}
 	return nil
-}
-
-func resolveAuthMode(c Config) auth.AuthMode {
-	if c.AuthMode != "" {
-		return normalizeAuthMode(c.AuthMode)
-	}
-	if c.TenantKeys != "" {
-		return auth.ModeTenantKeys
-	}
-	if c.AuthKey != "" {
-		return auth.ModeLegacy
-	}
-	if c.AdminKey != "" {
-		return auth.ModeDynamicKeys
-	}
-	return ""
-}
-
-func normalizeAuthMode(mode auth.AuthMode) auth.AuthMode {
-	if mode == "legacy" {
-		return auth.ModeLegacy
-	}
-	return mode
 }
 
 func envStr(key, fallback string) string {

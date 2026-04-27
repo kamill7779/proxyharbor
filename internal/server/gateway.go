@@ -215,14 +215,14 @@ func (s *Server) recordProxySuccess(ctx context.Context, lease domain.Lease, lat
 	if s.healthRecorder == nil {
 		return
 	}
-	s.healthRecorder.RecordProxyResult(ctx, lease.TenantID, lease.ProxyID, health.ProxyHealthResult{Success: true, LatencyMS: int(latency.Milliseconds()), Hint: hint})
+	s.healthRecorder.RecordProxyResult(ctx, lease.ProxyID, health.ProxyHealthResult{Success: true, LatencyMS: int(latency.Milliseconds()), Hint: hint})
 }
 
 func (s *Server) recordProxyFailure(ctx context.Context, lease domain.Lease, kind health.FailureKind, hint string) {
 	if s.healthRecorder == nil {
 		return
 	}
-	s.healthRecorder.RecordProxyResult(ctx, lease.TenantID, lease.ProxyID, health.ProxyHealthResult{Success: false, Kind: kind, Hint: hint})
+	s.healthRecorder.RecordProxyResult(ctx, lease.ProxyID, health.ProxyHealthResult{Success: false, Kind: kind, Hint: hint})
 }
 
 func (s *Server) logGatewayFailure(mode string, lease domain.Lease, target string, kind health.FailureKind, reason string) {

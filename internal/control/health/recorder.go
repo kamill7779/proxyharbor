@@ -12,7 +12,7 @@ import (
 )
 
 type HealthRecorder interface {
-	RecordProxyResult(ctx context.Context, tenantID, proxyID string, result ProxyHealthResult)
+	RecordProxyResult(ctx context.Context, proxyID string, result ProxyHealthResult)
 }
 
 type ProxyHealthResult struct {
@@ -23,7 +23,7 @@ type ProxyHealthResult struct {
 }
 
 type OutcomeStore interface {
-	RecordProxyOutcome(ctx context.Context, tenantID, proxyID string, delta storage.ProxyHealthDelta) error
+	RecordProxyOutcome(ctx context.Context, proxyID string, delta storage.ProxyHealthDelta) error
 }
 
 type RecorderOptions struct {
@@ -45,14 +45,12 @@ type CoalescingRecorder struct {
 }
 
 type proxyEvent struct {
-	tenantID string
-	proxyID  string
-	result   ProxyHealthResult
+	proxyID string
+	result  ProxyHealthResult
 }
 
 type deltaKey struct {
-	tenantID string
-	proxyID  string
+	proxyID string
 }
 
 type proxyBucket struct {
@@ -89,8 +87,8 @@ func NewCoalescingRecorder(store OutcomeStore, options RecorderOptions) *Coalesc
 	return recorder
 }
 
-func (r *CoalescingRecorder) RecordProxyResult(_ context.Context, tenantID, proxyID string, result ProxyHealthResult) {
-	if r == nil || tenantID == "" || proxyID == "" {
+func (r *CoalescingRecorder) RecordProxyResult(_ context.Context, proxyID string, result ProxyHealthResult) {
+	if r == nil || proxyID == "" {
 		return
 	}
 	r.mu.Lock()
@@ -100,10 +98,10 @@ func (r *CoalescingRecorder) RecordProxyResult(_ context.Context, tenantID, prox
 	}
 	if len(r.events) == cap(r.events) {
 		copy(r.events, r.events[1:])
-		r.events[len(r.events)-1] = proxyEvent{tenantID: tenantID, proxyID: proxyID, result: result}
+		r.events[len(r.events)-1] = proxyEvent{proxyID: proxyID, result: result}
 		return
 	}
-	r.events = append(r.events, proxyEvent{tenantID: tenantID, proxyID: proxyID, result: result})
+	r.events = append(r.events, proxyEvent{proxyID: proxyID, result: result})
 }
 
 func (r *CoalescingRecorder) Flush(ctx context.Context) {
@@ -184,7 +182,7 @@ func (r *CoalescingRecorder) writeEvents(ctx context.Context, events []proxyEven
 			if bucket.latencyCount > 0 {
 				latencyMS = bucket.latencySumMS / bucket.latencyCount
 			}
-			if err := r.recordOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
+			if err := r.recordOutcome(ctx, key.proxyID, storage.ProxyHealthDelta{
 				Success:    true,
 				Reward:     r.policy.SuccessReward * bucket.successCount,
 				LatencyMS:  latencyMS,
@@ -198,7 +196,7 @@ func (r *CoalescingRecorder) writeEvents(ctx context.Context, events []proxyEven
 			if penalty <= 0 {
 				penalty = r.policy.FailurePenalty[FailureUnknown]
 			}
-			if err := r.recordOutcome(ctx, key.tenantID, key.proxyID, storage.ProxyHealthDelta{
+			if err := r.recordOutcome(ctx, key.proxyID, storage.ProxyHealthDelta{
 				Success:               false,
 				FailureKind:           bucket.failureKind.String(),
 				FailureHint:           bucket.failureHint,
@@ -215,18 +213,18 @@ func (r *CoalescingRecorder) writeEvents(ctx context.Context, events []proxyEven
 	return failed
 }
 
-func (r *CoalescingRecorder) recordOutcome(ctx context.Context, tenantID, proxyID string, delta storage.ProxyHealthDelta) error {
-	err := r.store.RecordProxyOutcome(ctx, tenantID, proxyID, delta)
+func (r *CoalescingRecorder) recordOutcome(ctx context.Context, proxyID string, delta storage.ProxyHealthDelta) error {
+	err := r.store.RecordProxyOutcome(ctx, proxyID, delta)
 	if err == nil {
 		return nil
 	}
 	if retryableRecorderError(err) {
-		err = r.store.RecordProxyOutcome(ctx, tenantID, proxyID, delta)
+		err = r.store.RecordProxyOutcome(ctx, proxyID, delta)
 		if err == nil {
 			return nil
 		}
 	}
-	slog.Warn("health.recorder.write_failed", "tenant_id", tenantID, "proxy_id", proxyID, "err", err)
+	slog.Warn("health.recorder.write_failed", "proxy_id", proxyID, "err", err)
 	return err
 }
 
@@ -247,7 +245,7 @@ func (r *CoalescingRecorder) coalesce(events []proxyEvent) []orderedProxyDelta {
 	deltas := make([]orderedProxyDelta, 0, len(events))
 	open := make(map[deltaKey]int)
 	for _, event := range events {
-		key := deltaKey{tenantID: event.tenantID, proxyID: event.proxyID}
+		key := deltaKey{proxyID: event.proxyID}
 		if event.result.Success {
 			idx, ok := open[key]
 			if !ok {

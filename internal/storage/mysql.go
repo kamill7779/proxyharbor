@@ -16,7 +16,7 @@ import (
 // MySQLStore 是基于 MySQL 8.x 的 Store 实现。
 //
 // 设计要点：
-//   - 表结构与 migrations/mysql/001_init.sql 保持一致；
+//   - 表结构与 migrations/mysql/init.sql 保持一致；
 //   - JSON 字段统一用 encoding/json 序列化；
 //   - 幂等键独立成表 proxy_idempotency_keys，避免 lease 重复插入；
 //   - 所有时间使用 UTC，避免跨时区错乱。
@@ -217,12 +217,11 @@ func (s *MySQLStore) DeleteExpiredLeases(ctx context.Context, tenantID string, b
 
 // ---------- PolicyStore ----------
 
-func (s *MySQLStore) ListPolicies(ctx context.Context, tenantID string) ([]domain.Policy, error) {
+func (s *MySQLStore) ListPolicies(ctx context.Context) ([]domain.Policy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT policy_id, tenant_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
+		`SELECT policy_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
 			ttl_seconds, labels_json, created_at, updated_at
-		 FROM policies WHERE tenant_id = ? ORDER BY policy_id`,
-		tenantID,
+		 FROM policies ORDER BY policy_id`,
 	)
 	if err != nil {
 		return nil, err
@@ -239,12 +238,12 @@ func (s *MySQLStore) ListPolicies(ctx context.Context, tenantID string) ([]domai
 	return out, rows.Err()
 }
 
-func (s *MySQLStore) GetPolicy(ctx context.Context, tenantID, id string) (domain.Policy, error) {
+func (s *MySQLStore) GetPolicy(ctx context.Context, id string) (domain.Policy, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT policy_id, tenant_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
+		`SELECT policy_id, version, name, enabled, COALESCE(subject_type,''), COALESCE(resource_kind,''),
 			ttl_seconds, labels_json, created_at, updated_at
-		 FROM policies WHERE tenant_id = ? AND policy_id = ?`,
-		tenantID, id,
+		 FROM policies WHERE policy_id = ?`,
+		id,
 	)
 	return scanPolicy(row)
 }
@@ -254,18 +253,15 @@ func (s *MySQLStore) UpsertPolicy(ctx context.Context, policy domain.Policy) (do
 	if policy.ID == "" {
 		policy.ID = "policy-" + now.Format("20060102150405.000000000")
 	}
-	if policy.TenantID == "" {
-		policy.TenantID = "default"
-	}
 	if policy.TTLSeconds == 0 {
 		policy.TTLSeconds = 1800
 	}
 	labelsJSON, _ := json.Marshal(policy.Labels)
 	// 用 UPSERT，version 在已存在时由 SQL 自增以避免读改写竞态。
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO policies (policy_id, tenant_id, version, name, enabled, subject_type, resource_kind,
+		`INSERT INTO policies (policy_id, version, name, enabled, subject_type, resource_kind,
 			ttl_seconds, labels_json, created_at, updated_at)
-		 VALUES (?, ?, GREATEST(?,1), ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?, ?)
+		 VALUES (?, GREATEST(?,1), ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 			version = version + 1,
 			name = VALUES(name),
@@ -275,28 +271,27 @@ func (s *MySQLStore) UpsertPolicy(ctx context.Context, policy domain.Policy) (do
 			ttl_seconds = VALUES(ttl_seconds),
 			labels_json = VALUES(labels_json),
 			updated_at = VALUES(updated_at)`,
-		policy.ID, policy.TenantID, policy.Version, policy.Name, policy.Enabled,
+		policy.ID, policy.Version, policy.Name, policy.Enabled,
 		policy.SubjectType, policy.ResourceKind, policy.TTLSeconds, labelsJSON, now, now,
 	)
 	if err != nil {
 		return domain.Policy{}, err
 	}
-	return s.GetPolicy(ctx, policy.TenantID, policy.ID)
+	return s.GetPolicy(ctx, policy.ID)
 }
 
-func (s *MySQLStore) DeletePolicy(ctx context.Context, tenantID, id string) error {
+func (s *MySQLStore) DeletePolicy(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM policies WHERE tenant_id = ? AND policy_id = ?`, tenantID, id)
+		`DELETE FROM policies WHERE policy_id = ?`, id)
 	return err
 }
 
 // ---------- CatalogStore ----------
 
-func (s *MySQLStore) ListProviders(ctx context.Context, tenantID string) ([]domain.Provider, error) {
+func (s *MySQLStore) ListProviders(ctx context.Context) ([]domain.Provider, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at
-		 FROM proxy_sources WHERE tenant_id = ? ORDER BY source_id`,
-		tenantID,
+		`SELECT source_id, kind, name, enabled, config_json, created_at, updated_at
+		 FROM proxy_sources ORDER BY source_id`,
 	)
 	if err != nil {
 		return nil, err
@@ -313,20 +308,17 @@ func (s *MySQLStore) ListProviders(ctx context.Context, tenantID string) ([]doma
 	return out, rows.Err()
 }
 
-func (s *MySQLStore) GetProvider(ctx context.Context, tenantID, id string) (domain.Provider, error) {
+func (s *MySQLStore) GetProvider(ctx context.Context, id string) (domain.Provider, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at
-		 FROM proxy_sources WHERE tenant_id = ? AND source_id = ?`,
-		tenantID, id,
+		`SELECT source_id, kind, name, enabled, config_json, created_at, updated_at
+		 FROM proxy_sources WHERE source_id = ?`,
+		id,
 	)
 	return scanProvider(row)
 }
 
 func (s *MySQLStore) UpsertProvider(ctx context.Context, p domain.Provider) (domain.Provider, error) {
 	now := time.Now().UTC()
-	if p.TenantID == "" {
-		p.TenantID = "default"
-	}
 	if p.ID == "" {
 		p.ID = "provider-" + now.Format("20060102150405.000000000")
 	}
@@ -338,40 +330,40 @@ func (s *MySQLStore) UpsertProvider(ctx context.Context, p domain.Provider) (dom
 	}
 	cfgJSON, _ := json.Marshal(p.Labels)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO proxy_sources (source_id, tenant_id, kind, name, enabled, config_json, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO proxy_sources (source_id, kind, name, enabled, config_json, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?)
 		 ON DUPLICATE KEY UPDATE kind=VALUES(kind), name=VALUES(name), enabled=VALUES(enabled),
 		   config_json=VALUES(config_json), updated_at=VALUES(updated_at)`,
-		p.ID, p.TenantID, p.Type, p.Name, p.Enabled, cfgJSON, now, now,
+		p.ID, p.Type, p.Name, p.Enabled, cfgJSON, now, now,
 	)
 	if err != nil {
 		return domain.Provider{}, err
 	}
-	return s.GetProvider(ctx, p.TenantID, p.ID)
+	return s.GetProvider(ctx, p.ID)
 }
 
-func (s *MySQLStore) DeleteProvider(ctx context.Context, tenantID, id string) error {
+func (s *MySQLStore) DeleteProvider(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM proxy_sources WHERE tenant_id = ? AND source_id = ?`, tenantID, id)
+		`DELETE FROM proxy_sources WHERE source_id = ?`, id)
 	return err
 }
 
-func (s *MySQLStore) GetProxy(ctx context.Context, tenantID, id string) (domain.Proxy, error) {
+func (s *MySQLStore) GetProxy(ctx context.Context, id string) (domain.Proxy, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+		`SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight,
 			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
 			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
-		 FROM proxies WHERE tenant_id = ? AND proxy_id = ?`,
-		tenantID, id,
+		 FROM proxies WHERE proxy_id = ?`,
+		id,
 	)
 	return scanProxy(row)
 }
 
 func (s *MySQLStore) UpsertProxy(ctx context.Context, p domain.Proxy) (domain.Proxy, error) {
 	now := time.Now().UTC()
-	if p.TenantID == "" {
-		p.TenantID = "default"
+	if p.ProviderID == "" {
+		p.ProviderID = "default"
 	}
 	if p.ID == "" {
 		p.ID = "proxy-" + now.Format("20060102150405.000000000")
@@ -387,43 +379,42 @@ func (s *MySQLStore) UpsertProxy(ctx context.Context, p domain.Proxy) (domain.Pr
 	}
 	labelsJSON, _ := json.Marshal(p.Labels)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO proxies (proxy_id, tenant_id, source_id, endpoint, healthy, weight, labels_json,
+		`INSERT INTO proxies (proxy_id, source_id, endpoint, healthy, weight, labels_json,
 			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
 			last_checked_at, last_success_at, last_failure_at, last_seen_at, failure_hint, created_at, updated_at)
-		 VALUES (?,?,NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),?,?)
+		 VALUES (?,NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),?,?)
 		 ON DUPLICATE KEY UPDATE source_id=VALUES(source_id), endpoint=VALUES(endpoint), healthy=VALUES(healthy),
 		   weight=VALUES(weight), labels_json=VALUES(labels_json), health_score=VALUES(health_score),
 		   consecutive_failures=VALUES(consecutive_failures), circuit_open_until=VALUES(circuit_open_until),
 		   latency_ewma_ms=VALUES(latency_ewma_ms), last_checked_at=VALUES(last_checked_at),
 		   last_success_at=VALUES(last_success_at), last_failure_at=VALUES(last_failure_at), last_seen_at=VALUES(last_seen_at),
 		   failure_hint=VALUES(failure_hint), updated_at=VALUES(updated_at)`,
-		p.ID, p.TenantID, p.ProviderID, p.Endpoint, p.Healthy, p.Weight, labelsJSON,
+		p.ID, p.ProviderID, p.Endpoint, p.Healthy, p.Weight, labelsJSON,
 		p.HealthScore, p.ConsecutiveFailures, nullTime(p.CircuitOpenUntil), nullInt(p.LatencyEWMAms),
 		nullTime(p.LastCheckedAt), nullTime(p.LastSuccessAt), nullTime(p.LastFailureAt), p.LastSeenAt.UTC(), p.FailureHint, now, now,
 	)
 	if err != nil {
 		return domain.Proxy{}, err
 	}
-	return s.GetProxy(ctx, p.TenantID, p.ID)
+	return s.GetProxy(ctx, p.ID)
 }
 
-func (s *MySQLStore) DeleteProxy(ctx context.Context, tenantID, id string) error {
+func (s *MySQLStore) DeleteProxy(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM proxies WHERE tenant_id = ? AND proxy_id = ?`, tenantID, id)
+		`DELETE FROM proxies WHERE proxy_id = ?`, id)
 	return err
 }
 
-func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context, tenantID string) (domain.Proxy, error) {
+func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context) (domain.Proxy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+		`SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight,
 			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
 			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
-		 FROM proxies WHERE tenant_id = ? AND healthy = TRUE
+		 FROM proxies WHERE healthy = TRUE
 		   AND weight > 0 AND health_score > 0
 		   AND (circuit_open_until IS NULL OR circuit_open_until <= UTC_TIMESTAMP())
 		 ORDER BY weight DESC, proxy_id ASC LIMIT 1`,
-		tenantID,
 	)
 	if err != nil {
 		return domain.Proxy{}, err
@@ -435,18 +426,17 @@ func (s *MySQLStore) ChooseHealthyProxy(ctx context.Context, tenantID string) (d
 	return scanProxy(rows)
 }
 
-func (s *MySQLStore) ListSelectableProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
+func (s *MySQLStore) ListSelectableProxies(ctx context.Context) ([]domain.Proxy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+		`SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight,
 			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
 			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
 		 FROM proxies
-		 WHERE tenant_id = ? AND healthy = TRUE
+		 WHERE healthy = TRUE
 		   AND weight > 0 AND health_score > 0
 		   AND (circuit_open_until IS NULL OR circuit_open_until <= UTC_TIMESTAMP())
 		 ORDER BY proxy_id`,
-		tenantID,
 	)
 	if err != nil {
 		return nil, err
@@ -463,7 +453,7 @@ func (s *MySQLStore) ListSelectableProxies(ctx context.Context, tenantID string)
 	return out, rows.Err()
 }
 
-func (s *MySQLStore) RecordProxyOutcome(ctx context.Context, tenantID, proxyID string, delta ProxyHealthDelta) error {
+func (s *MySQLStore) RecordProxyOutcome(ctx context.Context, proxyID string, delta ProxyHealthDelta) error {
 	observedAt := delta.ObservedAt.UTC()
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
@@ -489,8 +479,8 @@ func (s *MySQLStore) RecordProxyOutcome(ctx context.Context, tenantID, proxyID s
 			       ELSE circuit_open_until
 			     END,
 			     updated_at = UTC_TIMESTAMP()
-			 WHERE tenant_id = ? AND proxy_id = ?`,
-			reward, delta.LatencyMS, delta.LatencyMS, delta.LatencyMS, observedAt, observedAt, observedAt, tenantID, proxyID,
+			 WHERE proxy_id = ?`,
+			reward, delta.LatencyMS, delta.LatencyMS, delta.LatencyMS, observedAt, observedAt, observedAt, proxyID,
 		)
 		return err
 	}
@@ -523,20 +513,19 @@ func (s *MySQLStore) RecordProxyOutcome(ctx context.Context, tenantID, proxyID s
 		       ELSE circuit_open_until
 		     END,
 		     updated_at = UTC_TIMESTAMP()
-		 WHERE tenant_id = ? AND proxy_id = ?`,
-		penalty, observedAt, observedAt, delta.FailureHint, threshold, observedAt, maxCooldownSeconds, baseCooldownSeconds, tenantID, proxyID,
+		 WHERE proxy_id = ?`,
+		penalty, observedAt, observedAt, delta.FailureHint, threshold, observedAt, maxCooldownSeconds, baseCooldownSeconds, proxyID,
 	)
 	return err
 }
 
-func (s *MySQLStore) ListCatalogProxies(ctx context.Context, tenantID string) ([]domain.Proxy, error) {
+func (s *MySQLStore) ListCatalogProxies(ctx context.Context) ([]domain.Proxy, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT proxy_id, tenant_id, COALESCE(source_id,''), endpoint, healthy, weight,
+		`SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight,
 			health_score, consecutive_failures, circuit_open_until, latency_ewma_ms,
 			last_checked_at, last_success_at, last_failure_at, labels_json,
 			COALESCE(last_seen_at, UTC_TIMESTAMP()), COALESCE(failure_hint,'')
-		 FROM proxies WHERE tenant_id = ? ORDER BY proxy_id`,
-		tenantID,
+		 FROM proxies ORDER BY proxy_id`,
 	)
 	if err != nil {
 		return nil, err
@@ -553,12 +542,11 @@ func (s *MySQLStore) ListCatalogProxies(ctx context.Context, tenantID string) ([
 	return out, rows.Err()
 }
 
-func (s *MySQLStore) LatestCatalog(ctx context.Context, tenantID string) (domain.Catalog, error) {
+func (s *MySQLStore) LatestCatalog(ctx context.Context) (domain.Catalog, error) {
 	// 优先返回最新快照；若没有快照则基于 proxies 表实时构造。
 	row := s.db.QueryRowContext(ctx,
 		`SELECT version, proxies_json, generated_at, expires_at FROM proxy_catalog_snapshots
-		 WHERE tenant_id = ? ORDER BY generated_at DESC LIMIT 1`,
-		tenantID,
+		 ORDER BY generated_at DESC LIMIT 1`,
 	)
 	var (
 		version  string
@@ -570,18 +558,18 @@ func (s *MySQLStore) LatestCatalog(ctx context.Context, tenantID string) (domain
 	if err == nil {
 		var proxies []domain.Proxy
 		_ = json.Unmarshal(raw, &proxies)
-		return domain.Catalog{TenantID: tenantID, Version: version, Proxies: proxies, Generated: genAt, ExpiresAt: expireAt}, nil
+		return domain.Catalog{Version: version, Proxies: proxies, Generated: genAt, ExpiresAt: expireAt}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return domain.Catalog{}, err
 	}
-	proxies, err := s.ListCatalogProxies(ctx, tenantID)
+	proxies, err := s.ListCatalogProxies(ctx)
 	if err != nil {
 		return domain.Catalog{}, err
 	}
 	now := time.Now().UTC()
 	sort.Slice(proxies, func(i, j int) bool { return proxies[i].ID < proxies[j].ID })
-	return domain.Catalog{TenantID: tenantID, Version: now.Format("20060102150405"), Proxies: proxies, Generated: now, ExpiresAt: now.Add(time.Minute)}, nil
+	return domain.Catalog{Version: now.Format("20060102150405"), Proxies: proxies, Generated: now, ExpiresAt: now.Add(time.Minute)}, nil
 }
 
 func (s *MySQLStore) SaveCatalogSnapshot(ctx context.Context, c domain.Catalog) error {
@@ -589,12 +577,12 @@ func (s *MySQLStore) SaveCatalogSnapshot(ctx context.Context, c domain.Catalog) 
 	if err != nil {
 		return err
 	}
-	id := c.TenantID + "-" + c.Version
+	id := "global-" + c.Version
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO proxy_catalog_snapshots (snapshot_id, tenant_id, version, proxies_json, generated_at, expires_at)
-		 VALUES (?,?,?,?,?,?)
+		`INSERT INTO proxy_catalog_snapshots (snapshot_id, version, proxies_json, generated_at, expires_at)
+		 VALUES (?,?,?,?,?)
 		 ON DUPLICATE KEY UPDATE proxies_json=VALUES(proxies_json), generated_at=VALUES(generated_at), expires_at=VALUES(expires_at)`,
-		id, c.TenantID, c.Version, raw, c.Generated.UTC(), c.ExpiresAt.UTC(),
+		id, c.Version, raw, c.Generated.UTC(), c.ExpiresAt.UTC(),
 	)
 	return err
 }
@@ -675,7 +663,7 @@ func scanPolicy(r rowScanner) (domain.Policy, error) {
 		p          domain.Policy
 		labelsJSON []byte
 	)
-	if err := r.Scan(&p.ID, &p.TenantID, &p.Version, &p.Name, &p.Enabled, &p.SubjectType, &p.ResourceKind,
+	if err := r.Scan(&p.ID, &p.Version, &p.Name, &p.Enabled, &p.SubjectType, &p.ResourceKind,
 		&p.TTLSeconds, &labelsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Policy{}, domain.ErrNotFound
@@ -691,7 +679,7 @@ func scanProvider(r rowScanner) (domain.Provider, error) {
 		p          domain.Provider
 		configJSON []byte
 	)
-	if err := r.Scan(&p.ID, &p.TenantID, &p.Type, &p.Name, &p.Enabled, &configJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := r.Scan(&p.ID, &p.Type, &p.Name, &p.Enabled, &configJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Provider{}, domain.ErrNotFound
 		}
@@ -711,7 +699,7 @@ func scanProxy(r rowScanner) (domain.Proxy, error) {
 		lastSuccessAt    sql.NullTime
 		lastFailureAt    sql.NullTime
 	)
-	if err := r.Scan(&p.ID, &p.TenantID, &p.ProviderID, &p.Endpoint, &p.Healthy, &p.Weight,
+	if err := r.Scan(&p.ID, &p.ProviderID, &p.Endpoint, &p.Healthy, &p.Weight,
 		&p.HealthScore, &p.ConsecutiveFailures, &circuitOpenUntil, &latencyEWMAms,
 		&lastCheckedAt, &lastSuccessAt, &lastFailureAt, &labelsJSON, &p.LastSeenAt, &p.FailureHint); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

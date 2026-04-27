@@ -16,9 +16,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.1.0-alpha"
-
-const OnBehalfOfHeader = "X-On-Behalf-Of"
+const Version = "0.2.0-alpha"
 
 type Role string
 
@@ -55,35 +53,7 @@ type AuthSnapshotProvider interface {
 	AuthSnapshot() auth.Snapshot
 }
 
-func New(svc *control.Service, authn *auth.Authenticator) http.Handler {
-	return NewForRole(svc, authn, RoleAll)
-}
-
-func NewForRole(svc *control.Service, authn *auth.Authenticator, role Role) http.Handler {
-	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role}
-	s.routes()
-	return Recover(s)
-}
-
-func NewForRoleWithHealthRecorder(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder) http.Handler {
-	return NewForRoleWithHealthRecorderAndDependencies(svc, authn, role, recorder, nil)
-}
-
-func NewForRoleWithHealthRecorderAndDependencies(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder, dependency storage.DependencyChecker) http.Handler {
-	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder, dependency: dependency}
-	s.routes()
-	return Recover(s)
-}
-
-func NewForRoleWithHealthRecorderDependenciesAndAdmin(svc *control.Service, authn *auth.Authenticator, role Role, recorder health.HealthRecorder, dependency storage.DependencyChecker, store AdminStore, pepper string) http.Handler {
-	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, role: role, healthRecorder: recorder, dependency: dependency, adminStore: store, pepper: pepper}
-	s.routes()
-	return Recover(s)
-}
-
-// Options bundles optional dependencies for the HTTP server. New fields
-// added here must remain optional so legacy/tenant-keys deployments and
-// existing call sites continue to work unchanged.
+// Options bundles optional dependencies for the HTTP server.
 type Options struct {
 	Role           Role
 	HealthRecorder health.HealthRecorder
@@ -121,28 +91,12 @@ func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Option
 	return Recover(s)
 }
 
-// NewWithAdminStore creates a server with admin store configured.
-func NewWithAdminStore(svc *control.Service, authn *auth.Authenticator, store AdminStore, pepper string) http.Handler {
-	s := &Server{mux: http.NewServeMux(), svc: svc, authn: authn, adminStore: store, pepper: pepper, role: RoleAll}
-	s.routes()
-	return Recover(s)
-}
-
-// SetAdminStore injects the admin store and pepper for /admin/* handlers.
-func (s *Server) SetAdminStore(store AdminStore, pepper string) {
-	s.adminStore = store
-	s.pepper = pepper
-	s.mux = http.NewServeMux()
-	s.routes()
-}
-
 func (s *Server) debugAuthCache(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
 	body := map[string]any{
 		"instance_id": s.instanceID,
-		"auth_mode":   string(s.authn.Mode()),
 		"role":        string(s.role),
 	}
 	if s.authSnapshot != nil {
@@ -157,7 +111,6 @@ func (s *Server) debugAuthCacheMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	body := map[string]any{
 		"instance_id": s.instanceID,
-		"auth_mode":   string(s.authn.Mode()),
 		"role":        string(s.role),
 	}
 	if s.authSnapshot != nil {
@@ -318,15 +271,17 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
-		policies, err := s.svc.ListPolicies(r.Context(), principal.TenantID)
+		if !s.requireAdmin(w, principal) {
+			return
+		}
+		policies, err := s.svc.ListPolicies(r.Context())
 		respond(w, map[string]any{"policies": policies}, err, http.StatusOK)
 	case http.MethodPost:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var policy domain.Policy
 		if !decode(w, r, &policy) {
 			return
@@ -343,16 +298,18 @@ func (s *Server) policyByID(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/policies/")
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		out, err := s.svc.GetPolicy(r.Context(), principal, id)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodPut:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var policy domain.Policy
 		if !decode(w, r, &policy) {
 			return
@@ -360,6 +317,9 @@ func (s *Server) policyByID(w http.ResponseWriter, r *http.Request) {
 		out, err := s.svc.UpdatePolicy(r.Context(), principal, id, policy)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodDelete:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		respond(w, map[string]string{"status": "deleted"}, s.svc.DeletePolicy(r.Context(), principal, id), http.StatusOK)
 	default:
 		method(w)
@@ -371,15 +331,17 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
-		providers, err := s.svc.ListProviders(r.Context(), principal.TenantID)
+		if !s.requireAdmin(w, principal) {
+			return
+		}
+		providers, err := s.svc.ListProviders(r.Context())
 		respond(w, map[string]any{"providers": providers}, err, http.StatusOK)
 	case http.MethodPost:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var provider domain.Provider
 		if !decode(w, r, &provider) {
 			return
@@ -396,16 +358,18 @@ func (s *Server) providerByID(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/providers/")
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		out, err := s.svc.GetProvider(r.Context(), principal, id)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodPut:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var provider domain.Provider
 		if !decode(w, r, &provider) {
 			return
@@ -413,6 +377,9 @@ func (s *Server) providerByID(w http.ResponseWriter, r *http.Request) {
 		out, err := s.svc.UpdateProvider(r.Context(), principal, id, provider)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodDelete:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		respond(w, map[string]string{"status": "deleted"}, s.svc.DeleteProvider(r.Context(), principal, id), http.StatusOK)
 	default:
 		method(w)
@@ -424,15 +391,17 @@ func (s *Server) proxies(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
-		proxies, err := s.svc.ListProxies(r.Context(), principal.TenantID)
+		if !s.requireAdmin(w, principal) {
+			return
+		}
+		proxies, err := s.svc.ListProxies(r.Context())
 		respond(w, map[string]any{"proxies": proxies}, err, http.StatusOK)
 	case http.MethodPost:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var proxy domain.Proxy
 		if !decode(w, r, &proxy) {
 			return
@@ -449,12 +418,11 @@ func (s *Server) proxyByID(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
-		return
-	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/proxies/")
 	if strings.HasSuffix(path, ":health") {
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		if !allow(w, r, http.MethodPost) {
 			return
 		}
@@ -471,9 +439,15 @@ func (s *Server) proxyByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		out, err := s.svc.GetProxy(r.Context(), principal, path)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodPut:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		var proxy domain.Proxy
 		if !decode(w, r, &proxy) {
 			return
@@ -481,6 +455,9 @@ func (s *Server) proxyByID(w http.ResponseWriter, r *http.Request) {
 		out, err := s.svc.UpdateProxy(r.Context(), principal, path, proxy)
 		respond(w, out, err, http.StatusOK)
 	case http.MethodDelete:
+		if !s.requireAdmin(w, principal) {
+			return
+		}
 		respond(w, map[string]string{"status": "deleted"}, s.svc.DeleteProxy(r.Context(), principal, path), http.StatusOK)
 	default:
 		method(w)
@@ -495,11 +472,10 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
+	if !s.requireAdmin(w, principal) {
 		return
 	}
-	out, err := s.svc.Catalog(r.Context(), principal.TenantID)
+	out, err := s.svc.Catalog(r.Context())
 	respond(w, out, err, http.StatusOK)
 }
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
@@ -510,8 +486,7 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
+	if !s.requireAdmin(w, principal) {
 		return
 	}
 	var body struct {
@@ -533,8 +508,7 @@ func (s *Server) gatewayFeedback(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, ok = s.requireTenant(w, r, principal)
-	if !ok {
+	if !s.requireAdmin(w, principal) {
 		return
 	}
 	var body struct {
@@ -556,6 +530,13 @@ func (s *Server) gatewayFeedback(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
+		return
+	}
+	principal, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if !s.requireAdmin(w, principal) {
 		return
 	}
 	tenant := r.URL.Query().Get("tenant_id")
@@ -581,6 +562,14 @@ func (s *Server) requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) requireAdmin(w http.ResponseWriter, principal domain.Principal) bool {
+	if principal.Type == "admin" {
+		return true
+	}
+	respond(w, nil, domain.ErrForbidden, http.StatusOK)
+	return false
+}
+
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (domain.Principal, bool) {
 	p, err := s.authn.Authenticate(r)
 	if err != nil {
@@ -602,7 +591,7 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request, principal
 		return domain.Principal{}, false
 	}
 
-	obo := r.Header.Get(OnBehalfOfHeader)
+	obo := r.Header.Get(auth.OnBehalfOfHeader)
 
 	if principal.Type == "admin" {
 		if obo == "" {

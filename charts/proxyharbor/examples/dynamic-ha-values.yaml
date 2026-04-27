@@ -1,36 +1,16 @@
-# Dynamic-keys multi-replica HA example for ProxyHarbor v0.1.6+
-#
-# Use this as a starting point for production-style multi-instance deployments
-# with MySQL persistence and Redis-accelerated cache invalidation.
-#
-# Usage:
-#   helm template ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
-#   helm install ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
+# Dynamic-key HA example for ProxyHarbor v0.2.0-alpha.
 #
 # Required preconditions:
-#   1. Apply MySQL migrations 001..004 before deploying (see docs/operations/rolling-update.md).
-#   2. Create a Kubernetes Secret with admin-key, pepper, mysql-dsn (and optionally redis-password):
+#   1. Initialize MySQL with migrations/mysql/init.sql.
+#   2. Create a Secret with admin-key, pepper, mysql-dsn, and optional redis-password:
 #        kubectl create secret generic proxyharbor-credentials \
 #          --from-literal=admin-key="$(openssl rand -hex 32)" \
 #          --from-literal=pepper="$(openssl rand -hex 32)" \
-#          --from-literal=mysql-dsn='ph:CHANGEME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
-#      Reference it via the existingSecret fields below; never commit plaintext keys.
-#
-# Notes:
-#   - Redis pub/sub here only accelerates cache invalidation. Polling
-#     (auth.refreshInterval) remains the authoritative convergence path,
-#     so a Redis outage cannot break authentication.
-#   - PROXYHARBOR_INSTANCE_ID is auto-injected from metadata.name by the
-#     deployment template; no extra config required.
+#          --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
 
 replicaCount: 3
-
 role: all
 
-# Safer rolling update for multi-replica deployments: never let the active
-# pool drop below replicaCount. Combined with the v0.1.6 /readyz auth gate
-# this keeps traffic away from instances whose dynamic auth cache is not
-# yet loaded.
 strategy:
   type: RollingUpdate
   rollingUpdate:
@@ -38,12 +18,12 @@ strategy:
     maxUnavailable: 0
 
 auth:
-  mode: dynamic-keys
-  existingSecret: proxyharbor-credentials   # Secret with admin-key, pepper, mysql-dsn.
-  existingSecretKey: ""                     # Unused for dynamic-keys; the chart
-                                            # reads admin-key + pepper directly.
+  existingSecret: proxyharbor-credentials
+  keys:
+    adminKey: admin-key
+    pepper: pepper
   refreshInterval: 5s
-  invalidation: auto                        # auto | redis | polling.
+  invalidation: auto
 
 mysql:
   existingSecret: proxyharbor-credentials
@@ -53,12 +33,11 @@ mysql:
   connMaxAge: 30m
 
 redis:
-  addr: "redis.svc:6379"
+  addr: redis.svc:6379
   selectorRedisRequired: true
-  # Set redis.existingSecret + existingSecretKey if AUTH-protected.
+  db: 0
   # existingSecret: proxyharbor-credentials
   # existingSecretKey: redis-password
-  db: 0
 
 cache:
   ttl: 60s
