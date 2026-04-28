@@ -16,7 +16,7 @@ func TestRenewLeaseUsesSingleGenerationBump(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertProxy() error = %v", err)
 	}
-	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	svc := NewService(store, "http://gateway.local")
 	svc.now = func() time.Time { return now }
 
@@ -32,7 +32,7 @@ func TestRenewLeaseUsesSingleGenerationBump(t *testing.T) {
 		t.Fatalf("created generation = %d, want 1", created.Generation)
 	}
 
-	svc.now = func() time.Time { return now.Add(time.Minute) }
+	svc.now = func() time.Time { return created.CreatedAt.Add(time.Minute) }
 	renewed, err := svc.RenewLease(ctx, principal, created.ID)
 	if err != nil {
 		t.Fatalf("RenewLease() error = %v", err)

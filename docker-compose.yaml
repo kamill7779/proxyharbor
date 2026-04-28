@@ -1,37 +1,8 @@
 # ProxyHarbor docker-compose
-# Local v0.4.0 bundle: MySQL + Redis + ProxyHarbor.
+# Single-instance profile for local evaluation with SQLite persistence.
+# Use docker-compose.ha.yaml for MySQL+Redis HA.
 
 services:
-  mysql:
-    image: mysql:8.4
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: proxyharbor
-      MYSQL_USER: proxyharbor
-      MYSQL_PASSWORD: proxyharbor
-    ports:
-      - "3306:3306"
-    volumes:
-      - ./migrations/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      - mysql-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
-  redis:
-    image: redis:7.4-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   proxyharbor:
     build:
       context: .
@@ -40,21 +11,18 @@ services:
       PROXYHARBOR_ROLE: ${PROXYHARBOR_ROLE:-all}
       PROXYHARBOR_ADDR: ":8080"
       PROXYHARBOR_GATEWAY_URL: ${PROXYHARBOR_GATEWAY_URL:-http://localhost:8080}
+      PROXYHARBOR_STORAGE: ${PROXYHARBOR_STORAGE:-sqlite}
+      PROXYHARBOR_SQLITE_PATH: ${PROXYHARBOR_SQLITE_PATH:-/var/lib/proxyharbor/proxyharbor.db}
+      PROXYHARBOR_SELECTOR_REDIS_REQUIRED: ${PROXYHARBOR_SELECTOR_REDIS_REQUIRED:-false}
+      PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: ${PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT:-false}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
-      PROXYHARBOR_MYSQL_DSN: ${PROXYHARBOR_MYSQL_DSN:-proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC}
-      PROXYHARBOR_REDIS_ADDR: ${PROXYHARBOR_REDIS_ADDR:-redis:6379}
-      PROXYHARBOR_SELECTOR_REDIS_REQUIRED: ${PROXYHARBOR_SELECTOR_REDIS_REQUIRED:-true}
       PROXYHARBOR_CACHE_TTL: ${PROXYHARBOR_CACHE_TTL:-60s}
     ports:
       - "${PROXYHARBOR_HOST_PORT:-8080}:8080"
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    volumes:
+      - proxyharbor-data:/var/lib/proxyharbor
     restart: unless-stopped
 
 volumes:
-  mysql-data:
-  redis-data:
+  proxyharbor-data:

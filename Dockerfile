@@ -7,7 +7,10 @@ COPY . .
 RUN go build -ldflags="-s -w" -o /out/proxyharbor ./cmd/proxyharbor
 
 FROM alpine:3.20
-RUN adduser -D -H proxyharbor && apk add --no-cache ca-certificates
+RUN adduser -D -H proxyharbor \
+    && apk add --no-cache ca-certificates \
+    && mkdir -p /var/lib/proxyharbor \
+    && chown -R proxyharbor:proxyharbor /var/lib/proxyharbor
 USER proxyharbor
 COPY --from=build /out/proxyharbor /usr/local/bin/proxyharbor
 EXPOSE 8080

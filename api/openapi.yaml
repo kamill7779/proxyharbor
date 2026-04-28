@@ -1,94 +1,166 @@
-﻿openapi: 3.1.0
+openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.4.0
+  version: 0.4.1
   x-stability: release-candidate
-  description: >-
-    ProxyHarbor v0.4.0 core completion release. Admin uses `ProxyHarbor-Key`
-    header with the bootstrap admin key. To act on behalf of a tenant, Admin
-    must also include the `X-On-Behalf-Of` header with the tenant ID. Tenant
-    keys authenticate directly via `ProxyHarbor-Key` and must not attempt to
-    impersonate another tenant.
+  description: ProxyHarbor v0.4.1 SQLite single-node release. Admin uses `ProxyHarbor-Key`
+    header with the bootstrap admin key. To act on behalf of a tenant, Admin must
+    also include the `X-On-Behalf-Of` header with the tenant ID. Tenant keys authenticate
+    directly via `ProxyHarbor-Key` and must not attempt to impersonate another tenant.
 servers:
-  - url: http://localhost:8080
+- url: http://localhost:8080
 security:
-  - headerKey: []
+- headerKey: []
 paths:
   /healthz:
     get:
       security: []
       responses:
-        '200': { description: ok }
+        '200':
+          description: ok
   /readyz:
     get:
       security: []
       responses:
-        '200': { description: ready }
+        '200':
+          description: ready
   /version:
     get:
       security: []
       responses:
-        '200': { description: version }
+        '200':
+          description: version
   /admin/tenants:
     get:
       summary: List tenants
       responses:
-        '200': { description: tenants, content: { application/json: { schema: { type: object, properties: { tenants: { type: array, items: { $ref: '#/components/schemas/Tenant' } } } } } } }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
+        '200':
+          description: tenants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tenant'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     post:
       summary: Create tenant
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/CreateTenantRequest' }
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
       responses:
-        '201': { description: tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
+        '201':
+          description: tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /admin/tenants/{id}:
     patch:
       summary: Update tenant metadata/status
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/UpdateTenantRequest' }
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
       responses:
-        '200': { description: tenant, content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     delete:
       summary: Soft delete tenant
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: soft deleted }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: soft deleted
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /admin/tenants/{id}/keys:
     get:
       summary: List tenant key metadata only
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: key metadata, content: { application/json: { schema: { type: object, properties: { keys: { type: array, items: { $ref: '#/components/schemas/TenantKeyMetadata' } } } } } } }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: key metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TenantKeyMetadata'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     post:
       summary: Issue tenant key; plaintext is returned once
-      description: Platform-created container keys should set `purpose=platform_container`; platform-api writes the returned plaintext key into a K8s Secret and injects it into the workload.
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      description: Platform-created container keys should set `purpose=platform_container`;
+        platform-api writes the returned plaintext key into a K8s Secret and injects
+        it into the workload.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/IssueTenantKeyRequest' }
+            schema:
+              $ref: '#/components/schemas/IssueTenantKeyRequest'
             examples:
               platformContainer:
                 value:
@@ -96,391 +168,817 @@ paths:
                   purpose: platform_container
                   ttl_seconds: 86400
       responses:
-        '201': { description: issued key, content: { application/json: { schema: { $ref: '#/components/schemas/IssuedTenantKey' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '201':
+          description: issued key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssuedTenantKey'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /admin/tenants/{id}/keys/{kid}:
     delete:
       summary: Revoke tenant key and bump tenant key version
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string } }
-        - { name: kid, in: path, required: true, schema: { type: string } }
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: kid
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: revoked }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: revoked
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /v1/leases:
     post:
       parameters:
-        - $ref: '#/components/parameters/OnBehalfOf'
-        - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/OnBehalfOf'
+      - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/CreateLeaseRequest' }
+            schema:
+              $ref: '#/components/schemas/CreateLeaseRequest'
       responses:
-        '201': { description: lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
+        '201':
+          description: lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
   /v1/leases/{lease_id}:renew:
     post:
       parameters:
-        - $ref: '#/components/parameters/OnBehalfOf'
-        - { name: lease_id, in: path, required: true, schema: { type: string } }
+      - $ref: '#/components/parameters/OnBehalfOf'
+      - name: lease_id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: renewed lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '410': { $ref: '#/components/responses/Error' }
+        '200':
+          description: renewed lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '410':
+          $ref: '#/components/responses/Error'
   /v1/leases/{lease_id}:
     delete:
       parameters:
-        - $ref: '#/components/parameters/OnBehalfOf'
-        - { name: lease_id, in: path, required: true, schema: { type: string } }
+      - $ref: '#/components/parameters/OnBehalfOf'
+      - name: lease_id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: revoked }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: revoked
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /v1/providers:
     get:
       responses:
-        '200': { description: providers, content: { application/json: { schema: { type: object, properties: { providers: { type: array, items: { $ref: '#/components/schemas/Provider' } } } } } } }
+        '200':
+          description: providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     post:
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Provider' }
+            schema:
+              $ref: '#/components/schemas/Provider'
       responses:
-        '201': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
+        '201':
+          description: provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
   /v1/providers/{id}:
     get:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     put:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Provider' }
+            schema:
+              $ref: '#/components/schemas/Provider'
       responses:
-        '200': { description: provider, content: { application/json: { schema: { $ref: '#/components/schemas/Provider' } } } }
+        '200':
+          description: provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     delete:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: deleted }
+        '200':
+          description: deleted
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /v1/proxies:
     get:
       responses:
-        '200': { description: proxies, content: { application/json: { schema: { type: object, properties: { proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } } } } } } }
+        '200':
+          description: proxies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proxies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Proxy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     post:
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Proxy' }
+            schema:
+              $ref: '#/components/schemas/Proxy'
       responses:
-        '201': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
-        '400': { $ref: '#/components/responses/Error' }
+        '201':
+          description: proxy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proxy'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /v1/proxies/{id}:
     get:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
-        '404': { $ref: '#/components/responses/Error' }
+        '200':
+          description: proxy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proxy'
+        '404':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     put:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Proxy' }
+            schema:
+              $ref: '#/components/schemas/Proxy'
       responses:
-        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+        '200':
+          description: proxy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proxy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     delete:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: deleted }
+        '200':
+          description: deleted
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /v1/proxies/{id}:health:
     post:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [healthy]
+              required:
+              - healthy
               properties:
-                healthy: { type: boolean }
-                failure_hint: { type: string }
+                healthy:
+                  type: boolean
+                failure_hint:
+                  type: string
       responses:
-        '200': { description: proxy, content: { application/json: { schema: { $ref: '#/components/schemas/Proxy' } } } }
+        '200':
+          description: proxy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proxy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
   /v1/policies:
     get:
       responses:
-        '200': { description: policies }
+        '200':
+          description: policies
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
     post:
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Policy' }
+            schema:
+              $ref: '#/components/schemas/Policy'
       responses:
-        '201': { description: created policy }
+        '201':
+          description: created policy
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
   /v1/policies/{id}:
     get:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: policy }
+        '200':
+          description: policy
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     put:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/Policy' }
+            schema:
+              $ref: '#/components/schemas/Policy'
       responses:
-        '200': { description: policy }
+        '200':
+          description: policy
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
     delete:
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: deleted }
+        '200':
+          description: deleted
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
   /v1/catalog/latest:
     get:
       summary: Get latest global catalog
-      description: Admin-only. Returns global proxy inventory including endpoints; tenant keys must not call this endpoint.
+      description: Admin-only. Returns global proxy inventory including endpoints;
+        tenant keys must not call this endpoint.
       responses:
-        '200': { description: catalog, content: { application/json: { schema: { $ref: '#/components/schemas/Catalog' } } } }
+        '200':
+          description: catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalog'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /v1/gateway/validate:
     get:
       summary: Validate a lease on behalf of a gateway instance
-      description: >-
-        Admin-only endpoint for gateway instances that do not have direct MySQL access.
-        Callers must authenticate with the bootstrap admin `ProxyHarbor-Key`.
-        Validates the lease credentials, checks expiry/revocation, and
-        verifies the target matches the lease resource. Does not return
-        proxy endpoint details — only lease metadata.
+      description: Admin-only endpoint for gateway instances that do not have direct
+        MySQL access. Callers must authenticate with the bootstrap admin `ProxyHarbor-Key`.
+        Validates the lease credentials, checks expiry/revocation, and verifies the
+        target matches the lease resource. Does not return proxy endpoint details
+        — only lease metadata.
       parameters:
-        - { name: tenant_id, in: query, required: false, schema: { type: string, default: default } }
-        - { name: lease_id, in: query, required: true, schema: { type: string } }
-        - { name: password, in: query, required: true, schema: { type: string } }
-        - { name: target, in: query, required: true, schema: { type: string } }
+      - name: tenant_id
+        in: query
+        required: false
+        schema:
+          type: string
+          default: default
+      - name: lease_id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: password
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: target
+        in: query
+        required: true
+        schema:
+          type: string
       responses:
-        '200': { description: validated lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '410': { $ref: '#/components/responses/Error' }
+        '200':
+          description: validated lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lease'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '410':
+          $ref: '#/components/responses/Error'
 components:
   securitySchemes:
     headerKey:
       type: apiKey
       in: header
       name: ProxyHarbor-Key
-      description: >-
-        Accepts the bootstrap admin key for admin/platform APIs or a dynamic tenant key
-        issued by /admin/tenants/{id}/keys for tenant lease APIs.
+      description: Accepts the bootstrap admin key for admin/platform APIs or a dynamic
+        tenant key issued by /admin/tenants/{id}/keys for tenant lease APIs.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
-      schema: { type: string }
+      schema:
+        type: string
     OnBehalfOf:
       name: X-On-Behalf-Of
       in: header
       required: false
-      schema: { type: string }
-      description: >-
-        Admin must include this header when calling tenant-scoped APIs (e.g.,
-        /v1/leases) to specify which tenant the operation targets. Tenant keys
-        may omit it or set it to their own tenant ID. Tenant keys must NOT use
-        this header to impersonate another tenant; doing so will result in a
-        `tenant_mismatch` error.
+      schema:
+        type: string
+      description: Admin must include this header when calling tenant-scoped APIs
+        (e.g., /v1/leases) to specify which tenant the operation targets. Tenant keys
+        may omit it or set it to their own tenant ID. Tenant keys must NOT use this
+        header to impersonate another tenant; doing so will result in a `tenant_mismatch`
+        error.
   responses:
     Error:
       description: common error response
       content:
         application/json:
-          schema: { $ref: '#/components/schemas/Error' }
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
     Tenant:
       type: object
       properties:
-        id: { type: string }
-        name: { type: string }
-        enabled: { type: boolean }
-        created_at: { type: string, format: date-time }
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
     CreateTenantRequest:
       type: object
-      required: [id, display_name]
+      required:
+      - id
+      - display_name
       properties:
-        id: { type: string }
-        display_name: { type: string }
+        id:
+          type: string
+        display_name:
+          type: string
     UpdateTenantRequest:
       type: object
       properties:
-        display_name: { type: string }
-        status: { type: string, enum: [active, enabled, disabled, deleted] }
+        display_name:
+          type: string
+        status:
+          type: string
+          enum:
+          - active
+          - enabled
+          - disabled
+          - deleted
     IssueTenantKeyRequest:
       type: object
       properties:
-        label: { type: string }
+        label:
+          type: string
         purpose:
           type: string
-          description: Use `platform_container` for keys issued by platform-api into container Secrets.
-          enum: [general, platform_container]
-        ttl_seconds: { type: integer, minimum: 1 }
+          description: Use `platform_container` for keys issued by platform-api into
+            container Secrets.
+          enum:
+          - general
+          - platform_container
+        ttl_seconds:
+          type: integer
+          minimum: 1
     IssuedTenantKey:
       allOf:
-        - $ref: '#/components/schemas/TenantKeyMetadata'
-        - type: object
-          properties:
-            key: { type: string, description: Plaintext key returned only on issue }
+      - $ref: '#/components/schemas/TenantKeyMetadata'
+      - type: object
+        properties:
+          key:
+            type: string
+            description: Plaintext key returned only on issue
     TenantKeyMetadata:
       type: object
       properties:
-        key_id: { type: string }
-        tenant_id: { type: string }
-        key_fp: { type: string }
-        label: { type: string }
-        purpose: { type: string }
-        created_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time, nullable: true }
-        revoked_at: { type: string, format: date-time, nullable: true }
+        key_id:
+          type: string
+        tenant_id:
+          type: string
+        key_fp:
+          type: string
+        label:
+          type: string
+        purpose:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
     Error:
       type: object
       properties:
         error:
           type: string
           enum:
-            - auth_failed
-            - forbidden
-            - tenant_mismatch
-            - tenant_not_found
-            - tenant_disabled
-            - policy_denied
-            - subject_not_eligible
-            - unsafe_destination
-            - no_healthy_proxy
-            - lease_expired
-            - lease_revoked
-            - idempotency_conflict
-            - stale_lease_generation
-            - catalog_stale
-            - not_found
-            - unsupported
-            - bad_request
-            - internal_error
+          - auth_failed
+          - forbidden
+          - tenant_mismatch
+          - tenant_not_found
+          - tenant_disabled
+          - policy_denied
+          - subject_not_eligible
+          - unsafe_destination
+          - no_healthy_proxy
+          - lease_expired
+          - lease_revoked
+          - idempotency_conflict
+          - stale_lease_generation
+          - catalog_stale
+          - not_found
+          - unsupported
+          - bad_request
+          - internal_error
           description: Stable error code for programmatic handling.
         reason:
           type: string
           enum:
-            - missing_on_behalf_of
-            - first_selectable_no_eligible_proxy
-            - ready_empty_rebuild_failed
-            - ready_empty_after_rebuild
-            - redis_eval_failed
-            - malformed_result
-            - stale_result
-          description: Human-readable reason. Present on richer errors but may be empty.
+          - missing_on_behalf_of
+          - first_selectable_no_eligible_proxy
+          - ready_empty_rebuild_failed
+          - ready_empty_after_rebuild
+          - redis_eval_failed
+          - malformed_result
+          - stale_result
+          description: Human-readable reason. Present on richer errors but may be
+            empty.
     CreateLeaseRequest:
       type: object
-      required: [subject, resource_ref]
+      required:
+      - subject
+      - resource_ref
       properties:
-        subject: { $ref: '#/components/schemas/Subject' }
-        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
-        policy_id: { type: string }
-        ttl_seconds: { type: integer }
+        subject:
+          $ref: '#/components/schemas/Subject'
+        resource_ref:
+          $ref: '#/components/schemas/ResourceRef'
+        policy_id:
+          type: string
+        ttl_seconds:
+          type: integer
     Subject:
       type: object
-      required: [subject_type, subject_id]
+      required:
+      - subject_type
+      - subject_id
       properties:
-        subject_type: { type: string }
-        subject_id: { type: string }
-        labels: { type: object, additionalProperties: { type: string } }
+        subject_type:
+          type: string
+        subject_id:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
     ResourceRef:
       type: object
-      required: [kind, id]
+      required:
+      - kind
+      - id
       properties:
-        kind: { type: string }
-        id: { type: string }
-        scope: { type: string }
-        labels: { type: object, additionalProperties: { type: string } }
+        kind:
+          type: string
+        id:
+          type: string
+        scope:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
     Provider:
       type: object
       properties:
-        id: { type: string }
-        type: { type: string, enum: [static] }
-        name: { type: string }
-        enabled: { type: boolean }
-        labels: { type: object, additionalProperties: { type: string } }
-        created_at: { type: string, format: date-time, readOnly: true }
-        updated_at: { type: string, format: date-time, readOnly: true }
+        id:
+          type: string
+        type:
+          type: string
+          enum:
+          - static
+        name:
+          type: string
+        enabled:
+          type: boolean
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
     Proxy:
       type: object
-      required: [endpoint]
+      required:
+      - endpoint
       properties:
-        id: { type: string }
-        provider_id: { type: string }
-        endpoint: { type: string }
-        healthy: { type: boolean }
-        weight: { type: integer }
-        labels: { type: object, additionalProperties: { type: string } }
-        last_seen_at: { type: string, format: date-time }
-        failure_hint: { type: string }
+        id:
+          type: string
+        provider_id:
+          type: string
+        endpoint:
+          type: string
+        healthy:
+          type: boolean
+        weight:
+          type: integer
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        failure_hint:
+          type: string
     Policy:
       type: object
       properties:
-        id: { type: string }
-        version: { type: integer, readOnly: true }
-        name: { type: string }
-        enabled: { type: boolean }
-        subject_type: { type: string }
-        resource_kind: { type: string }
-        ttl_seconds: { type: integer }
-        labels: { type: object, additionalProperties: { type: string } }
+        id:
+          type: string
+        version:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+        enabled:
+          type: boolean
+        subject_type:
+          type: string
+        resource_kind:
+          type: string
+        ttl_seconds:
+          type: integer
+        labels:
+          type: object
+          additionalProperties:
+            type: string
     Catalog:
       description: Admin-only global catalog; includes proxy endpoints.
       type: object
       properties:
-        version: { type: string }
-        proxies: { type: array, items: { $ref: '#/components/schemas/Proxy' } }
-        generated_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time }
+        version:
+          type: string
+        proxies:
+          type: array
+          items:
+            $ref: '#/components/schemas/Proxy'
+        generated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
     Lease:
       type: object
       properties:
-        lease_id: { type: string }
-        tenant_id: { type: string }
-        lease_generation: { type: integer }
-        subject: { $ref: '#/components/schemas/Subject' }
-        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
-        policy_ref: { type: object }
-        gateway_url: { type: string }
-        username: { type: string }
-        password: { type: string }
-        proxy_id: { type: string }
-        expires_at: { type: string, format: date-time }
-        renew_before: { type: string, format: date-time }
-        catalog_version: { type: string }
-        candidate_set_id: { type: string }
-
-
+        lease_id:
+          type: string
+        tenant_id:
+          type: string
+        lease_generation:
+          type: integer
+        subject:
+          $ref: '#/components/schemas/Subject'
+        resource_ref:
+          $ref: '#/components/schemas/ResourceRef'
+        policy_ref:
+          type: object
+        gateway_url:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        proxy_id:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        renew_before:
+          type: string
+          format: date-time
+        catalog_version:
+          type: string
+        candidate_set_id:
+          type: string
