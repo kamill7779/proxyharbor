@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
@@ -173,18 +175,24 @@ func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domai
 		`UPDATE proxy_leases SET generation=?, subject_json=?, resource_ref_json=?, policy_ref_json=?,
 			gateway_url=?, username=?, password_hash=?, proxy_id=?, expires_at=?, renew_before=?,
 			catalog_version=?, candidate_set_id=?, revoked=?, updated_at=?
-		 WHERE tenant_id=? AND lease_id=? AND generation=?`,
+		 WHERE tenant_id=? AND lease_id=? AND generation=? AND revoked = FALSE AND expires_at > ?`,
 		lease.Generation, subjectJSON, resourceJSON, policyJSON,
 		lease.GatewayURL, lease.Username, lease.PasswordHash, lease.ProxyID,
 		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
 		lease.CandidateSetID, lease.Revoked, time.Now().UTC(),
-		lease.TenantID, lease.ID, previousGeneration,
+		lease.TenantID, lease.ID, previousGeneration, time.Now().UTC(),
 	)
 	if err != nil {
 		return domain.Lease{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		if _, err := s.GetLease(ctx, lease.TenantID, lease.ID); err == nil {
+		if existing, err := s.GetLease(ctx, lease.TenantID, lease.ID); err == nil {
+			if existing.Revoked {
+				return domain.Lease{}, domain.ErrLeaseRevoked
+			}
+			if !time.Now().UTC().Before(existing.ExpiresAt) {
+				return domain.Lease{}, domain.ErrLeaseExpired
+			}
 			return domain.Lease{}, domain.ErrStaleLease
 		}
 		return domain.Lease{}, domain.ErrNotFound
@@ -694,12 +702,84 @@ func (s *MySQLStore) AppendAuditEvents(ctx context.Context, events []domain.Audi
 	if len(events) == 0 {
 		return nil
 	}
-	// audit 落库由后续阶段实现，这里短路保留主流程不阻塞。
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("audit.begin_tx", "err", err)
+		return nil
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT IGNORE INTO proxy_audit_events (event_id, tenant_id, principal_id, action, metadata_json, occurred_at)
+		 VALUES (?,?,?,?,?,?)`)
+	if err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("audit.prepare", "err", err)
+		return nil
+	}
+	defer stmt.Close()
+	for _, e := range events {
+		if e.EventID == "" {
+			continue
+		}
+		meta := map[string]any{"resource": e.Resource}
+		for k, v := range e.Metadata {
+			meta[k] = v
+		}
+		metaJSON, _ := json.Marshal(meta)
+		if _, err := stmt.ExecContext(ctx, e.EventID, e.TenantID, e.PrincipalID, e.Action, string(metaJSON), e.OccurredAt.UTC()); err != nil {
+			metrics.AuditWriteFailures.Inc()
+			slog.Warn("audit.write_event", "event_id", e.EventID, "err", err)
+			_ = tx.Rollback()
+			return nil
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("audit.commit", "err", err)
+		return nil
+	}
 	return nil
 }
 
 func (s *MySQLStore) ListAuditEvents(ctx context.Context, tenantID string, limit int) ([]domain.AuditEvent, error) {
-	return []domain.AuditEvent{}, nil
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT event_id, tenant_id, principal_id, action, metadata_json, occurred_at
+		 FROM proxy_audit_events WHERE tenant_id = ?
+		 ORDER BY occurred_at DESC, event_id DESC LIMIT ?`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []domain.AuditEvent
+	for rows.Next() {
+		var e domain.AuditEvent
+		var metaJSON string
+		if err := rows.Scan(&e.EventID, &e.TenantID, &e.PrincipalID, &e.Action, &metaJSON, &e.OccurredAt); err != nil {
+			return nil, err
+		}
+		if metaJSON != "" {
+			var meta map[string]any
+			if json.Unmarshal([]byte(metaJSON), &meta) == nil {
+				if res, ok := meta["resource"].(string); ok {
+					e.Resource = res
+				}
+				e.Metadata = make(map[string]string)
+				for k, v := range meta {
+					if k != "resource" {
+						if sv, ok := v.(string); ok {
+							e.Metadata[k] = sv
+						}
+					}
+				}
+			}
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
 }
 
 func (s *MySQLStore) AppendUsageEvents(ctx context.Context, events []domain.UsageEvent) error {

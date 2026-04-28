@@ -15,6 +15,7 @@ import (
 
 	"github.com/kamill7779/proxyharbor/internal/cache"
 	"github.com/kamill7779/proxyharbor/internal/control/selector"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
@@ -98,9 +99,12 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if err != nil {
 		return domain.Lease{}, err
 	}
+	started := time.Now()
 	proxy, err := s.selector.Select(ctx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
+	metrics.SelectorLatencyMS.Observe(float64(time.Since(started).Milliseconds()))
 	if err != nil {
 		s.logSelectorError(principal.TenantID, len(candidates), err)
+		metrics.SelectorErrors.Inc()
 		return domain.Lease{}, err
 	}
 	now := s.now()
@@ -133,8 +137,11 @@ func (s *Service) RenewLease(ctx context.Context, principal domain.Principal, le
 		return domain.Lease{}, err
 	}
 	now := s.now()
-	if lease.Revoked || !now.Before(lease.ExpiresAt) {
+	if lease.Revoked {
 		return domain.Lease{}, domain.ErrLeaseRevoked
+	}
+	if !now.Before(lease.ExpiresAt) {
+		return domain.Lease{}, domain.ErrLeaseExpired
 	}
 	policy, err := s.store.GetPolicy(ctx, lease.PolicyRef.ID)
 	if err != nil {
@@ -183,17 +190,17 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 			_ = s.cache.PutLease(ctx, lease, ttl)
 		}
 	}
+	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
+		return domain.Lease{}, domain.ErrAuthFailed
+	}
 	if lease.Revoked {
 		return domain.Lease{}, domain.ErrLeaseRevoked
 	}
-	if s.now().After(lease.ExpiresAt) {
-		return domain.Lease{}, domain.ErrLeaseRevoked
+	if !s.now().Before(lease.ExpiresAt) {
+		return domain.Lease{}, domain.ErrLeaseExpired
 	}
 	if !resourceMatchesTarget(lease.ResourceRef, target) {
 		return domain.Lease{}, domain.ErrPolicyDenied
-	}
-	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
-		return domain.Lease{}, domain.ErrAuthFailed
 	}
 	return lease, nil
 }
@@ -207,10 +214,17 @@ func (s *Service) ValidateGatewayRequest(ctx context.Context, tenantID, leaseID,
 	if err != nil {
 		return domain.Lease{}, domain.Proxy{}, err
 	}
-	if !proxy.Healthy {
+	if !proxySelectable(proxy, s.now()) {
 		return domain.Lease{}, domain.Proxy{}, domain.ErrNoHealthyProxy
 	}
 	return lease, proxy, nil
+}
+
+func proxySelectable(proxy domain.Proxy, now time.Time) bool {
+	if !proxy.Healthy || proxy.Weight <= 0 || proxy.HealthScore <= 0 {
+		return false
+	}
+	return proxy.CircuitOpenUntil.IsZero() || !proxy.CircuitOpenUntil.After(now)
 }
 
 func (s *Service) Catalog(ctx context.Context) (domain.Catalog, error) {

@@ -30,7 +30,7 @@ func (s *MemoryAdminStore) GetTenant(ctx context.Context, id string) (domain.Ten
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tenant, ok := s.tenants[id]
-	if !ok || !tenant.Enabled {
+	if !ok {
 		return domain.Tenant{}, domain.ErrTenantNotFound
 	}
 	return tenant, nil

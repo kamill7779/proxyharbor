@@ -1,8 +1,14 @@
 ﻿openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.2.0-alpha
-  x-stability: alpha
+  version: 0.4.0
+  x-stability: release-candidate
+  description: >-
+    ProxyHarbor v0.4.0 core completion release. Admin uses `ProxyHarbor-Key`
+    header with the bootstrap admin key. To act on behalf of a tenant, Admin
+    must also include the `X-On-Behalf-Of` header with the tenant ID. Tenant
+    keys authenticate directly via `ProxyHarbor-Key` and must not attempt to
+    impersonate another tenant.
 servers:
   - url: http://localhost:8080
 security:
@@ -109,6 +115,7 @@ paths:
   /v1/leases:
     post:
       parameters:
+        - $ref: '#/components/parameters/OnBehalfOf'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -118,19 +125,32 @@ paths:
       responses:
         '201': { description: lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
         '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /v1/leases/{lease_id}:renew:
     post:
       parameters:
+        - $ref: '#/components/parameters/OnBehalfOf'
         - { name: lease_id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: renewed lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
         '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
   /v1/leases/{lease_id}:
     delete:
       parameters:
+        - $ref: '#/components/parameters/OnBehalfOf'
         - { name: lease_id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: revoked }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
   /v1/providers:
     get:
@@ -246,6 +266,28 @@ paths:
       description: Admin-only. Returns global proxy inventory including endpoints; tenant keys must not call this endpoint.
       responses:
         '200': { description: catalog, content: { application/json: { schema: { $ref: '#/components/schemas/Catalog' } } } }
+  /v1/gateway/validate:
+    get:
+      summary: Validate a lease on behalf of a gateway instance
+      description: >-
+        Admin-only endpoint for gateway instances that do not have direct MySQL access.
+        Callers must authenticate with the bootstrap admin `ProxyHarbor-Key`.
+        Validates the lease credentials, checks expiry/revocation, and
+        verifies the target matches the lease resource. Does not return
+        proxy endpoint details — only lease metadata.
+      parameters:
+        - { name: tenant_id, in: query, required: false, schema: { type: string, default: default } }
+        - { name: lease_id, in: query, required: true, schema: { type: string } }
+        - { name: password, in: query, required: true, schema: { type: string } }
+        - { name: target, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: validated lease, content: { application/json: { schema: { $ref: '#/components/schemas/Lease' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     headerKey:
@@ -261,6 +303,17 @@ components:
       in: header
       required: true
       schema: { type: string }
+    OnBehalfOf:
+      name: X-On-Behalf-Of
+      in: header
+      required: false
+      schema: { type: string }
+      description: >-
+        Admin must include this header when calling tenant-scoped APIs (e.g.,
+        /v1/leases) to specify which tenant the operation targets. Tenant keys
+        may omit it or set it to their own tenant ID. Tenant keys must NOT use
+        this header to impersonate another tenant; doing so will result in a
+        `tenant_mismatch` error.
   responses:
     Error:
       description: common error response
@@ -317,7 +370,37 @@ components:
       properties:
         error:
           type: string
-          enum: [policy_denied, subject_not_eligible, idempotency_conflict, no_healthy_proxy, lease_revoked, unsafe_destination, catalog_stale, auth_failed, tenant_disabled, not_found, unsupported]
+          enum:
+            - auth_failed
+            - forbidden
+            - tenant_mismatch
+            - tenant_not_found
+            - tenant_disabled
+            - policy_denied
+            - subject_not_eligible
+            - unsafe_destination
+            - no_healthy_proxy
+            - lease_expired
+            - lease_revoked
+            - idempotency_conflict
+            - stale_lease_generation
+            - catalog_stale
+            - not_found
+            - unsupported
+            - bad_request
+            - internal_error
+          description: Stable error code for programmatic handling.
+        reason:
+          type: string
+          enum:
+            - missing_on_behalf_of
+            - first_selectable_no_eligible_proxy
+            - ready_empty_rebuild_failed
+            - ready_empty_after_rebuild
+            - redis_eval_failed
+            - malformed_result
+            - stale_result
+          description: Human-readable reason. Present on richer errors but may be empty.
     CreateLeaseRequest:
       type: object
       required: [subject, resource_ref]

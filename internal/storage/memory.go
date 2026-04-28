@@ -64,7 +64,7 @@ func (s *MemoryStore) CreateLease(_ context.Context, scope IdempotencyScope, lea
 	if existing, ok := s.idempotency[scopeKey]; ok {
 		return copyLease(s.leases[key(scope.TenantID, existing)]), nil
 	}
-	// 不持久化明文密码。
+	// Do not persist plaintext lease passwords.
 	lease.Password = ""
 	s.leases[key(lease.TenantID, lease.ID)] = copyLease(lease)
 	s.idempotency[scopeKey] = lease.ID
@@ -93,6 +93,12 @@ func (s *MemoryStore) UpdateLease(_ context.Context, lease domain.Lease) (domain
 	}
 	if lease.Generation <= 1 || existing.Generation != lease.Generation-1 {
 		return domain.Lease{}, domain.ErrStaleLease
+	}
+	if existing.Revoked {
+		return domain.Lease{}, domain.ErrLeaseRevoked
+	}
+	if !time.Now().UTC().Before(existing.ExpiresAt) {
+		return domain.Lease{}, domain.ErrLeaseExpired
 	}
 	lease.Password = ""
 	s.leases[leaseKey] = copyLease(lease)
@@ -448,7 +454,12 @@ func (s *MemoryStore) ListAuditEvents(_ context.Context, tenantID string, limit 
 			events = append(events, copyAuditEvent(event))
 		}
 	}
-	sort.Slice(events, func(i, j int) bool { return events[i].OccurredAt.After(events[j].OccurredAt) })
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].OccurredAt.Equal(events[j].OccurredAt) {
+			return events[i].EventID > events[j].EventID
+		}
+		return events[i].OccurredAt.After(events[j].OccurredAt)
+	})
 	if limit > 0 && len(events) > limit {
 		events = events[:limit]
 	}

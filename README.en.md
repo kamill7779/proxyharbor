@@ -14,7 +14,7 @@
 
 ---
 
-ProxyHarbor v0.2.0 is a breaking reset. It keeps the runtime footprint light with **MySQL + Redis** while providing global proxy inventory, dynamic tenant keys, lease issuance, and an HTTP/HTTPS gateway. Providers, proxies, and policies are global platform resources. Tenants can only create and use leases through dynamic keys; they cannot read proxy endpoint lists.
+ProxyHarbor v0.4.0 closes the core control-plane and gateway loop. It keeps the runtime footprint light with **MySQL + Redis** while providing global proxy inventory, dynamic tenant keys, lease issuance, and an HTTP/HTTPS gateway. Providers, proxies, and policies are global platform resources. Tenants can only create and use leases through dynamic keys; they cannot read proxy endpoint lists.
 
 ## Features
 
@@ -143,7 +143,7 @@ kubectl create secret generic proxyharbor-credentials \
 
 ### Kubernetes Multi-Instance Deployment
 
-The Helm chart now defaults to an HA baseline: `replicaCount=2`, RollingUpdate `maxUnavailable=0` / `maxSurge=1`, PDB enabled, graceful termination, and optional HPA. Multi-instance deployments require shared MySQL. Redis/zfair is recommended; for production multi-instance installs, set `redis.selectorRedisRequired=true` and `auth.invalidation=redis`. Memory storage is for local development only and is not suitable for multiple Pods.
+The Helm chart defaults to a single replica so it can start without Redis. Multi-instance deployments require shared MySQL and should use `charts/proxyharbor/examples/multi-instance-values.yaml` or `dynamic-ha-values.yaml` to set `replicaCount=2`, `redis.selectorRedisRequired=true`, and `auth.invalidation=redis`. Memory storage is for local development only and is not suitable for multiple Pods.
 
 Example:
 
@@ -194,13 +194,13 @@ Success raises the score. Connection failures, timeouts, auth/protocol failures 
 ## Packaging & Deployment
 
 ```bash
-docker build -t proxyharbor:0.2.0-alpha .
+docker build -t proxyharbor:0.4.0 .
 helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
 ```
 
 ## Contributing
 
-Issues and PRs are welcome. v0.2.0 is a breaking reset and does not keep the old migration chain.
+Issues and PRs are welcome. v0.4.0 continues the v0.2.0 breaking-reset baseline and does not keep the old migration chain.
 
 ## Contact
 

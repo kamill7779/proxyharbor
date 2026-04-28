@@ -14,10 +14,11 @@
 
 ---
 
-ProxyHarbor v0.2.0 是一次 breaking reset：以 **MySQL + Redis** 为轻量依赖，提供全局代理库存、动态租户 Key、租约颁发和 HTTP/HTTPS 网关转发能力。Provider、Proxy、Policy 属于平台全局资源；租户只能通过动态 Key 创建和使用租约，不可读取代理 endpoint 列表。
+ProxyHarbor v0.4.0 是一次核心闭环收口：以 **MySQL + Redis** 为轻量依赖，提供全局代理库存、动态租户 Key、租约颁发和 HTTP/HTTPS 网关转发能力。Provider、Proxy、Policy 属于平台全局资源；租户只能通过动态 Key 创建和使用租约，不可读取代理 endpoint 列表。
 
 ## 功能特性
 
+- **核心闭环**：Lease 创建、续租、撤销、校验与网关验证形成完整链路。
 - **全局代理库存**：Admin 管理 Provider / Proxy；租户共享全局健康代理池。
 - **动态租户 Key**：Admin API 签发、撤销、轮换租户 Key；明文 Key 只在签发时返回一次。
 - **默认策略**：MVP 只允许 `default` policy；请求不传 `policy_id` 时自动使用 `default`。
@@ -143,7 +144,7 @@ kubectl create secret generic proxyharbor-credentials \
 
 ### Kubernetes 多实例部署
 
-Helm Chart 默认以 HA baseline 运行：`replicaCount=2`、RollingUpdate `maxUnavailable=0` / `maxSurge=1`，并启用 PDB、优雅终止和可选 HPA。多实例部署需要共享 MySQL；Redis/zfair 推荐开启，生产多实例建议设置 `redis.selectorRedisRequired=true` 和 `auth.invalidation=redis`。内存存储仅适合本地开发，不适合多 Pod。
+Helm Chart 默认以单副本启动，便于在未配置 Redis 时保持可用。多实例部署需要共享 MySQL，并建议使用 `charts/proxyharbor/examples/multi-instance-values.yaml` 或 `dynamic-ha-values.yaml` 显式设置 `replicaCount=2`、`redis.selectorRedisRequired=true` 和 `auth.invalidation=redis`。内存存储仅适合本地开发，不适合多 Pod。
 
 示例：
 
@@ -194,13 +195,13 @@ MVP 只允许 `default` policy。非 `default` 创建、更新、删除会被拒
 ## 打包与部署
 
 ```bash
-docker build -t proxyharbor:0.2.0-alpha .
+docker build -t proxyharbor:0.4.0 .
 helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
 ```
 
 ## 贡献指南
 
-欢迎提交 Issue 与 PR。v0.2.0 是 breaking reset，不提供旧 migration 链路。
+欢迎提交 Issue 与 PR。v0.4.0 延续 v0.2.0 的 breaking reset 基线，不提供旧 migration 链路。
 
 ## 联系方式
 

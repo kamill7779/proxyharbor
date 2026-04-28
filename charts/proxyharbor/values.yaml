@@ -5,7 +5,7 @@ image:
   pullSecrets: []
 
 role: all
-replicaCount: 2
+replicaCount: 1
 strategy:
   type: RollingUpdate
   rollingUpdate:
@@ -110,3 +110,18 @@ autoscaling:
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70
   # targetMemoryUtilizationPercentage: 80
+
+cluster:
+  enabled: false
+  heartbeatInterval: 10s
+  leaderLeaseTTL: 45s
+  maintenanceInterval: 30s
+  maintenanceBatchSize: 500
+
+scoring:
+  profile: default
+
+zfair:
+  quantum: 1000
+  defaultLatencyMS: 200
+  maxPromote: 128
