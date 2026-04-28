@@ -21,8 +21,6 @@ func runOpsCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 		return true, runBackupCommand(args[1:], stdout, stderr)
 	case "restore":
 		return true, runRestoreCommand(args[1:], stdout, stderr)
-	case "retention":
-		return true, runRetentionCommand(args[1:], stdout, stderr)
 	default:
 		return false, 0
 	}
@@ -93,6 +91,9 @@ func offlineSQLiteBackup(input, output string, offline bool) error {
 	if !offline {
 		return errors.New("file-level SQLite backup requires --offline to confirm ProxyHarbor is stopped; online backup API is reserved for SQLite Store integration")
 	}
+	if hasSQLiteSidecarFiles(input) {
+		return errors.New("offline SQLite backup requires checkpointed database; stop ProxyHarbor and remove or checkpoint -wal/-shm files first")
+	}
 	return copySQLiteFile(input, output, false)
 }
 
@@ -153,7 +154,7 @@ func copySQLiteFile(input, output string, replace bool) error {
 	} else {
 		flags |= os.O_EXCL
 	}
-	out, err := os.OpenFile(dest, flags, info.Mode().Perm())
+	out, err := os.OpenFile(dest, flags, 0o600)
 	if err != nil {
 		return err
 	}
@@ -161,5 +162,17 @@ func copySQLiteFile(input, output string, replace bool) error {
 	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
+	if err := out.Chmod(0o600); err != nil {
+		return err
+	}
 	return out.Sync()
+}
+
+func hasSQLiteSidecarFiles(path string) bool {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err == nil {
+			return true
+		}
+	}
+	return false
 }

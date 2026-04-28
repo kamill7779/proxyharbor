@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestDoctorDoesNotLeakSecrets(t *testing.T) {
@@ -51,13 +54,35 @@ func TestDoctorSQLiteChecksParentDirectory(t *testing.T) {
 	}
 }
 
-func TestInitSQLiteComingSoon(t *testing.T) {
+func TestInitSQLiteCreatesSchema(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "proxyharbor.db")
 	var out bytes.Buffer
-	code := runInit([]string{"-storage=sqlite"}, &out, nil)
-	if code == 0 {
-		t.Fatalf("init exit code = %d, want non-zero while sqlite init is not integrated", code)
+	var stderr bytes.Buffer
+	code := runInit([]string{"-storage=sqlite", "-sqlite-path=" + dbPath}, &out, &stderr)
+	if code != 0 {
+		t.Fatalf("init exit code = %d, want 0; stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
-	if !strings.Contains(out.String(), "sqlite initialization is not available yet") {
-		t.Fatalf("init output missing coming-soon message: %s", out.String())
+	if !strings.Contains(out.String(), "sqlite initialized") {
+		t.Fatalf("init output missing success message: %s", out.String())
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil {
+		t.Fatalf("query schema_version: %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("schema version = %d, want 1", version)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	code = runInit([]string{"-storage=sqlite", "-sqlite-path=" + dbPath}, &out, &stderr)
+	if code != 0 {
+		t.Fatalf("second init exit code = %d, want 0; stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 }

@@ -65,7 +65,7 @@ type SQLMigrationDB struct {
 
 func (db SQLMigrationDB) SchemaVersion(ctx context.Context) (int, error) {
 	var version int
-	err := db.DB.QueryRowContext(ctx, `SELECT version FROM schema_version ORDER BY applied_at DESC LIMIT 1`).Scan(&version)
+	err := db.DB.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) || isMissingSchemaVersionTable(err) {
 		return 0, nil
 	}
@@ -82,7 +82,7 @@ func (db SQLMigrationDB) ApplyMigration(ctx context.Context, migration Migration
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
 		return err
 	}
 	if strings.TrimSpace(migration.SQL) != "" {

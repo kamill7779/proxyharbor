@@ -244,6 +244,10 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 		}
 		if keyID == "" && r.Method == http.MethodGet {
 			// GET /admin/tenants/{id}/keys
+			if _, err := h.store.GetTenant(r.Context(), id); err != nil {
+				respond(w, nil, err, http.StatusOK)
+				return
+			}
 			keys, err := h.store.ListTenantKeys(r.Context(), id)
 			if err != nil {
 				respond(w, nil, err, http.StatusOK)

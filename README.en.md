@@ -4,48 +4,41 @@ ProxyHarbor is a lightweight proxy-pool gateway for small cloud-native workloads
 
 ## Deployment Profiles
 
-ProxyHarbor v0.4.2 is single-first:
+ProxyHarbor v0.4.1 is single-first:
 
-- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, no Redis requirement. This is the recommended local and small deployment shape once the SQLite store from the parallel v0.4.2 work lands.
+- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, no Redis requirement. This is the recommended local and small deployment shape.
 - **HA**: multiple instances with shared MySQL plus Redis for zfair selector coordination and auth/cache invalidation.
 - **Memory**: dev/demo/CI only. It is non-durable and is not a formal deployment profile.
 
-> Branch note: SQLite configuration, `doctor`, and `init` are wired for the v0.4.2 integration point. Worker A owns the SQLite store/schema, so `proxyharbor init -storage=sqlite` currently reports a clear coming-soon message instead of pretending to initialize data.
-
 ## Quick Start: Single Instance
 
-```bash
-export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
-export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
-docker compose up -d --build
+Start the lightweight single-node profile with one command. It uses SQLite persistence, does not require MySQL or Redis, and maps the service to localhost:18080 to avoid common local port conflicts.
+
+**PowerShell:**
+
+```powershell
+$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY="dev-admin-key-min-32-chars-long!!!!"; $env:PROXYHARBOR_KEY_PEPPER="dev-key-pepper-min-32-bytes-random!!!!"; docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
 ```
 
-The default `docker-compose.yaml` runs one `proxyharbor` service and mounts a local data volume for the future SQLite database at `/var/lib/proxyharbor/proxyharbor.db`.
-
-Run diagnostics before starting or when troubleshooting:
+**bash:**
 
 ```bash
-go run ./cmd/proxyharbor doctor \
-  -storage=sqlite \
-  -sqlite-path ./data/proxyharbor.db \
-  -selector-redis-required=false \
-  -admin-key "$PROXYHARBOR_ADMIN_KEY" \
-  -key-pepper "$PROXYHARBOR_KEY_PEPPER"
+PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=dev-admin-key-min-32-chars-long!!!! PROXYHARBOR_KEY_PEPPER=dev-key-pepper-min-32-bytes-random!!!! docker compose up -d --build --pull never
+curl http://localhost:18080/readyz
 ```
 
-Initialize schema when SQLite support is integrated:
+Expected readiness:
 
-```bash
-go run ./cmd/proxyharbor init -storage=sqlite -sqlite-path ./data/proxyharbor.db
+```json
+{"status":"ready","reasons":{"auth_cache":"ok","sqlite":"ok"}}
 ```
 
-Until then, use the HA compose file for a runnable MySQL+Redis bundle:
+The default `docker-compose.yaml` runs one `proxyharbor` service and stores SQLite data at `/var/lib/proxyharbor/proxyharbor.db` in the `proxyharbor-data` volume. For local loopback/private proxy tests, add `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true` before `docker compose up`.
+
+For HA, use the MySQL+Redis compose file instead of the single-instance default:
 
 ```bash
-export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
-export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
 docker compose -f docker-compose.ha.yaml up -d --build
-curl http://localhost:8080/readyz
 ```
 
 ## Basic API Flow
@@ -91,7 +84,7 @@ proxyharbor [server flags]
 
 `doctor` checks storage driver selection, required environment/config, MySQL DSN presence, Redis required settings, admin key/pepper presence and length, and SQLite path parent writability without printing secret values.
 
-`init` is reserved for schema initialization. It does not generate admin keys and does not write secrets to logs. MySQL migrations remain explicit via `migrations/mysql/init.sql`.
+`init` initializes the SQLite schema and is idempotent. It does not generate admin keys and does not write secrets to logs. MySQL migrations remain explicit via `migrations/mysql/init.sql`.
 
 ## Helm
 

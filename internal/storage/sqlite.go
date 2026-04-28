@@ -3,11 +3,12 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -20,6 +21,9 @@ import (
 
 const sqliteSchemaVersion = 1
 
+//go:embed migrations/sqlite/init.sql
+var sqliteMigrations embed.FS
+
 type SQLiteStore struct {
 	db *sql.DB
 }
@@ -28,7 +32,11 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	if strings.TrimSpace(path) == "" {
 		path = "./proxyharbor.db"
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	dsn, err := sqliteDSN(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
@@ -59,20 +67,17 @@ func (s *SQLiteStore) CheckDependencies(ctx context.Context) map[string]error {
 }
 
 func (s *SQLiteStore) ensureSchema(ctx context.Context) error {
-	var version int
-	err := s.db.QueryRowContext(ctx, `SELECT version FROM schema_version ORDER BY version DESC LIMIT 1`).Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) || strings.Contains(errorString(err), "no such table") {
-		raw, readErr := readSQLiteInitSQL()
-		if readErr != nil {
-			return fmt.Errorf("sqlite read init migration: %w", readErr)
-		}
-		if _, execErr := s.db.ExecContext(ctx, raw); execErr != nil {
-			return fmt.Errorf("sqlite init schema: %w", execErr)
-		}
-		return nil
-	}
+	raw, err := sqliteMigrations.ReadFile("migrations/sqlite/init.sql")
 	if err != nil {
-		return fmt.Errorf("sqlite schema version: %w", err)
+		return fmt.Errorf("sqlite read init migration: %w", err)
+	}
+	version, err := RunMigrations(ctx, SQLMigrationDB{DB: s.db}, []Migration{{
+		Version: sqliteSchemaVersion,
+		Name:    "init",
+		SQL:     string(raw),
+	}})
+	if err != nil {
+		return fmt.Errorf("sqlite migrate schema: %w", err)
 	}
 	if version != sqliteSchemaVersion {
 		return fmt.Errorf("sqlite schema version %d does not match expected %d", version, sqliteSchemaVersion)
@@ -80,29 +85,25 @@ func (s *SQLiteStore) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
-func readSQLiteInitSQL() (string, error) {
-	candidates := []string{
-		filepath.Join("migrations", "sqlite", "init.sql"),
-		filepath.Join("..", "..", "migrations", "sqlite", "init.sql"),
+func sqliteDSN(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", errors.New("sqlite path is empty")
 	}
-	_, file, _, ok := runtime.Caller(0)
-	if ok {
-		candidates = append(candidates, filepath.Join(filepath.Dir(file), "..", "..", "migrations", "sqlite", "init.sql"))
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", err
 	}
-	for _, candidate := range candidates {
-		raw, err := os.ReadFile(candidate)
-		if err == nil {
-			return string(raw), nil
-		}
+	uriPath := filepath.ToSlash(abs)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
 	}
-	return "", os.ErrNotExist
-}
-
-func errorString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
+	dsn := url.URL{Scheme: "file", Path: uriPath}
+	query := url.Values{}
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	dsn.RawQuery = query.Encode()
+	return dsn.String(), nil
 }
 
 func (s *SQLiteStore) GetLeaseByIdempotency(ctx context.Context, scope IdempotencyScope) (domain.Lease, bool, error) {
@@ -393,7 +394,7 @@ func (s *SQLiteStore) SaveCatalogSnapshot(ctx context.Context, catalog domain.Ca
 }
 
 func proxySelectSQL() string {
-	return `SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight, health_score, consecutive_failures, circuit_open_until, latency_ewma_ms, last_checked_at, last_success_at, last_failure_at, labels_json, COALESCE(last_seen_at, CURRENT_TIMESTAMP), COALESCE(failure_hint,'') FROM proxies`
+	return `SELECT proxy_id, COALESCE(source_id,''), endpoint, healthy, weight, health_score, consecutive_failures, circuit_open_until, latency_ewma_ms, last_checked_at, last_success_at, last_failure_at, labels_json, last_seen_at, COALESCE(failure_hint,'') FROM proxies`
 }
 
 func (s *SQLiteStore) AppendAuditEvents(ctx context.Context, events []domain.AuditEvent) error {
@@ -742,9 +743,12 @@ func (s *SQLiteStore) RevokeTenantKey(ctx context.Context, keyID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=?, updated_at=? WHERE id=?`, now, now, keyID)
+	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=?, updated_at=? WHERE id=?`, now, now, keyID)
 	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return domain.ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version=version+1 WHERE id=1`); err != nil {
 		return err

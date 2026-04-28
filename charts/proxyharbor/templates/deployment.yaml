@@ -1,4 +1,10 @@
 {{- $resources := ternary .Values.resourcesLightweight .Values.resources .Values.lightweight -}}
+{{- if and (eq .Values.storage "sqlite") (ne (int .Values.replicaCount) 1) -}}
+{{- fail "storage=sqlite requires replicaCount=1; use storage=mysql for HA" -}}
+{{- end -}}
+{{- if and (eq .Values.storage "sqlite") .Values.autoscaling.enabled -}}
+{{- fail "storage=sqlite does not support autoscaling; use storage=mysql for HA" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

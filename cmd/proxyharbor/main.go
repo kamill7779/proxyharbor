@@ -380,8 +380,17 @@ func runInit(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	switch cfg.StorageDriver {
 	case config.DriverSQLite:
-		fmt.Fprintln(stdout, "sqlite initialization is not available yet; rerun `proxyharbor init` after the sqlite store/schema lands")
-		return 1
+		store, err := storage.NewSQLiteStore(context.Background(), cfg.SQLitePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "sqlite init failed: %v\n", err)
+			return 1
+		}
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(stderr, "sqlite close failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "sqlite initialized at %s\n", cfg.SQLitePath)
+		return 0
 	case config.DriverMySQL:
 		fmt.Fprintln(stdout, "mysql initialization is not performed by proxyharbor init; apply migrations/mysql/init.sql explicitly")
 		return 1

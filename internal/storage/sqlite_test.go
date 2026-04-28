@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -166,6 +167,72 @@ func TestSQLiteTenantKeyVersion(t *testing.T) {
 	if version != 3 {
 		t.Fatalf("version after revoke = %d, want 3", version)
 	}
+}
+
+func TestSQLiteProxyRoundTripScansLastSeenAt(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	proxy, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1})
+	if err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	if proxy.LastSeenAt.IsZero() {
+		t.Fatalf("LastSeenAt is zero after UpsertProxy(): %+v", proxy)
+	}
+	proxies, err := store.ListCatalogProxies(ctx)
+	if err != nil {
+		t.Fatalf("ListCatalogProxies() error = %v", err)
+	}
+	if len(proxies) != 1 || proxies[0].ID != "proxy-a" || proxies[0].LastSeenAt.IsZero() {
+		t.Fatalf("ListCatalogProxies() = %+v, want proxy-a with LastSeenAt", proxies)
+	}
+}
+
+func TestSQLiteTenantKeyHashUnique(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	admin := store.AdminStore()
+	if err := admin.CreateTenant(ctx, domain.Tenant{ID: "tenant-a", Name: "Tenant A", Enabled: true}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	key := auth.TenantKey{ID: "key-a", TenantID: "tenant-a", KeyHash: "001122", KeyFP: "fp-a", CreatedAt: time.Now().UTC()}
+	if err := admin.CreateTenantKey(ctx, key); err != nil {
+		t.Fatalf("CreateTenantKey() error = %v", err)
+	}
+	key.ID = "key-b"
+	key.KeyFP = "fp-b"
+	if err := admin.CreateTenantKey(ctx, key); err == nil {
+		t.Fatal("CreateTenantKey() duplicate hash error = nil, want unique constraint failure")
+	}
+}
+
+func TestSQLiteRevokeTenantKeyMissingDoesNotAdvanceVersion(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	version, err := store.GetTenantKeysVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetTenantKeysVersion() error = %v", err)
+	}
+	err = store.RevokeTenantKey(ctx, "missing")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("RevokeTenantKey() error = %v, want ErrNotFound", err)
+	}
+	after, err := store.GetTenantKeysVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetTenantKeysVersion() after revoke error = %v", err)
+	}
+	if after != version {
+		t.Fatalf("version after missing revoke = %d, want %d", after, version)
+	}
+}
+
+func TestSQLitePathWithQueryCharacters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "proxy#harbor&single.db")
+	store, err := NewSQLiteStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	_ = store.Close()
 }
 
 func newTestSQLiteStore(t *testing.T) *SQLiteStore {

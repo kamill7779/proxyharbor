@@ -50,6 +50,27 @@ func TestRunMigrationsRejectsFutureSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestSQLMigrationDBSchemaVersionUsesMaxVersion(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-04-28T00:00:00Z'), (1, '2026-04-29T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	version, err := (SQLMigrationDB{DB: db}).SchemaVersion(context.Background())
+	if err != nil {
+		t.Fatalf("SchemaVersion() error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("version = %d, want 2", version)
+	}
+}
+
 func TestBuildRetentionStatements(t *testing.T) {
 	statements := BuildRetentionStatements(RetentionPolicy{AuditRetentionDays: 30, UsageRetentionDays: 7})
 	want := []RetentionStatement{

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,28 @@ func TestOfflineSQLiteBackupCopiesFileWhenOffline(t *testing.T) {
 	}
 	if string(got) != "db contents" {
 		t.Fatalf("backup contents = %q", got)
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestOfflineSQLiteBackupRejectsSidecarFiles(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "proxyharbor.db")
+	if err := os.WriteFile(source, []byte("db contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source+"-wal", []byte("wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := offlineSQLiteBackup(source, filepath.Join(dir, "backup.db"), true)
+	if err == nil || !strings.Contains(err.Error(), "checkpointed") {
+		t.Fatalf("err = %v, want sidecar checkpoint guidance", err)
 	}
 }
 

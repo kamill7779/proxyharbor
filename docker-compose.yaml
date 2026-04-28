@@ -1,6 +1,6 @@
 # ProxyHarbor docker-compose
-# Single-instance profile for local evaluation. SQLite store support is reserved
-# for v0.4.2 integration; until it lands, use docker-compose.ha.yaml.
+# Single-instance profile for local evaluation with SQLite persistence.
+# Use docker-compose.ha.yaml for MySQL+Redis HA.
 
 services:
   proxyharbor:
@@ -14,6 +14,7 @@ services:
       PROXYHARBOR_STORAGE: ${PROXYHARBOR_STORAGE:-sqlite}
       PROXYHARBOR_SQLITE_PATH: ${PROXYHARBOR_SQLITE_PATH:-/var/lib/proxyharbor/proxyharbor.db}
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: ${PROXYHARBOR_SELECTOR_REDIS_REQUIRED:-false}
+      PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: ${PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT:-false}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
       PROXYHARBOR_CACHE_TTL: ${PROXYHARBOR_CACHE_TTL:-60s}

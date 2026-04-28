@@ -10,10 +10,7 @@ role: all
 replicaCount: 1
 storage: sqlite
 strategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxUnavailable: 0
-    maxSurge: 1
+  type: Recreate
 lightweight: true
 terminationGracePeriodSeconds: 30
 preStop:

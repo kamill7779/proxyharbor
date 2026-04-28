@@ -17,7 +17,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.4.0"
+const Version = "0.4.1"
 
 type Role string
 
@@ -654,7 +654,7 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request, principal
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		respond(w, nil, err, http.StatusOK)
+		respond(w, nil, domain.NewKindedError(domain.ErrBadRequest, domain.ErrorKindUnknown, "invalid_json", nil), http.StatusOK)
 		return false
 	}
 	return true
