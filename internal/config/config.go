@@ -23,6 +23,7 @@ type StorageDriver string
 const (
 	DriverMemory StorageDriver = "memory"
 	DriverMySQL  StorageDriver = "mysql"
+	DriverSQLite StorageDriver = "sqlite"
 )
 
 type Config struct {
@@ -39,6 +40,7 @@ type Config struct {
 	MySQLMaxOpen               int
 	MySQLMaxIdle               int
 	MySQLConnMaxAge            time.Duration
+	SQLitePath                 string
 	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
@@ -83,6 +85,7 @@ func Load(args []string) (Config, error) {
 		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
 		MySQLMaxIdle:               envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
 		MySQLConnMaxAge:            envDur("PROXYHARBOR_MYSQL_CONN_MAX_AGE", 30*time.Minute),
+		SQLitePath:                 envStr("PROXYHARBOR_SQLITE_PATH", "./proxyharbor.db"),
 		RedisAddr:                  os.Getenv("PROXYHARBOR_REDIS_ADDR"),
 		RedisPassword:              os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
 		RedisDB:                    envInt("PROXYHARBOR_REDIS_DB", 0),
@@ -115,8 +118,9 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
-	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
+	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql | sqlite")
 	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
+	fs.StringVar(&cfg.SQLitePath, "sqlite-path", cfg.SQLitePath, "SQLite database path")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
 	fs.StringVar(&cfg.Selector, "selector", cfg.Selector, "proxy selector")
 	fs.BoolVar(&cfg.SelectorRedisRequired, "selector-redis-required", cfg.SelectorRedisRequired, "require Redis for selector")
@@ -137,6 +141,9 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if cfg.StorageDriver == DriverSQLite && strings.TrimSpace(cfg.RedisAddr) == "" {
+		cfg.SelectorRedisRequired = false
+	}
 	return cfg, cfg.validate()
 }
 
@@ -158,6 +165,7 @@ func (c Config) validate() error {
 	}
 	switch c.StorageDriver {
 	case DriverMemory:
+	case DriverSQLite:
 	case DriverMySQL:
 		if strings.TrimSpace(c.MySQLDSN) == "" {
 			return errors.New("storage=mysql requires -mysql-dsn or PROXYHARBOR_MYSQL_DSN")
@@ -183,9 +191,6 @@ func (c Config) validate() error {
 		return fmt.Errorf("invalid auth invalidation transport: %q", c.AuthInvalidation)
 	}
 
-	if c.StorageDriver != DriverMySQL {
-		return errors.New("v0.2.0 requires storage=mysql")
-	}
 	if c.AdminKey == "" {
 		return errors.New("PROXYHARBOR_ADMIN_KEY is required")
 	}

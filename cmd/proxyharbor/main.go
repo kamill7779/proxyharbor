@@ -196,15 +196,22 @@ func buildAdminStore(store storage.Store) server.AdminStore {
 	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
 		return server.NewMySQLAdminStore(mysqlStore.DB())
 	}
+	if sqliteStore, ok := store.(*storage.SQLiteStore); ok {
+		return sqliteStore.AdminStore()
+	}
 	return server.NewMemoryAdminStore()
 }
 
 func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, func(), error) {
-	mysqlStore, ok := store.(*storage.MySQLStore)
-	if !ok {
-		return nil, nil, func() {}, errors.New("v0.2.0 auth requires mysql storage")
+	var keyStore auth.KeyStore
+	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
+		keyStore = auth.NewMySQLKeyStore(mysqlStore.DB())
+	} else if sqliteStore, ok := store.(*storage.SQLiteStore); ok {
+		keyStore = sqliteStore
+	} else {
+		return nil, nil, func() {}, errors.New("dynamic auth requires mysql or sqlite storage")
 	}
-	dynamicStore, err := auth.NewDynamicStore(auth.NewMySQLKeyStore(mysqlStore.DB()), []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
+	dynamicStore, err := auth.NewDynamicStore(keyStore, []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
 	if err != nil {
 		return nil, nil, func() {}, err
 	}
@@ -369,6 +376,12 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 		s, err := retry(ctx, 30*time.Second, logger, "mysql", func(attemptCtx context.Context) (*storage.MySQLStore, error) {
 			return storage.NewMySQLStore(attemptCtx, cfg.MySQLDSN, cfg.MySQLMaxOpen, cfg.MySQLMaxIdle, cfg.MySQLConnMaxAge)
 		})
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return s, func() { _ = s.Close() }, nil
+	case config.DriverSQLite:
+		s, err := storage.NewSQLiteStore(ctx, cfg.SQLitePath)
 		if err != nil {
 			return nil, func() {}, err
 		}
