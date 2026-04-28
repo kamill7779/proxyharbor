@@ -1,0 +1,196 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/auth"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
+)
+
+func TestSQLiteLeaseCreateGetAndIdempotency(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	scope := testScope("idem-1")
+	lease := testLease("lease-1")
+	lease.Password = "plaintext-secret"
+
+	created, err := store.CreateLease(ctx, scope, lease)
+	if err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+	if created.Password != "" {
+		t.Fatalf("CreateLease() persisted/returned plaintext password %q", created.Password)
+	}
+
+	got, err := store.GetLease(ctx, lease.TenantID, lease.ID)
+	if err != nil {
+		t.Fatalf("GetLease() error = %v", err)
+	}
+	if got.Password != "" {
+		t.Fatalf("GetLease() returned plaintext password %q", got.Password)
+	}
+	if got.PasswordHash != lease.PasswordHash || got.Subject.ID != lease.Subject.ID {
+		t.Fatalf("GetLease() = %+v, want hash/subject from created lease", got)
+	}
+
+	replayed, ok, err := store.GetLeaseByIdempotency(ctx, scope)
+	if err != nil || !ok {
+		t.Fatalf("GetLeaseByIdempotency() = ok %t err %v", ok, err)
+	}
+	if replayed.ID != lease.ID || replayed.Password != "" {
+		t.Fatalf("GetLeaseByIdempotency() = %+v", replayed)
+	}
+
+	createdAgain, err := store.CreateLease(ctx, scope, testLease("lease-other"))
+	if err != nil {
+		t.Fatalf("CreateLease() replay error = %v", err)
+	}
+	if createdAgain.ID != lease.ID || createdAgain.Password != "" {
+		t.Fatalf("CreateLease() replay = %+v", createdAgain)
+	}
+}
+
+func TestSQLiteLeaseRenewCASFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(context.Context, *SQLiteStore, domain.Lease)
+		want   error
+	}{
+		{
+			name:   "stale",
+			mutate: func(context.Context, *SQLiteStore, domain.Lease) {},
+			want:   domain.ErrStaleLease,
+		},
+		{
+			name: "revoked",
+			mutate: func(ctx context.Context, store *SQLiteStore, lease domain.Lease) {
+				if err := store.RevokeLease(ctx, lease.TenantID, lease.ID); err != nil {
+					t.Fatalf("RevokeLease() error = %v", err)
+				}
+			},
+			want: domain.ErrLeaseRevoked,
+		},
+		{
+			name: "expired",
+			mutate: func(ctx context.Context, store *SQLiteStore, lease domain.Lease) {
+				_, err := store.db.ExecContext(ctx, `UPDATE proxy_leases SET expires_at = ? WHERE tenant_id = ? AND lease_id = ?`, time.Now().UTC().Add(-time.Minute), lease.TenantID, lease.ID)
+				if err != nil {
+					t.Fatalf("expire lease: %v", err)
+				}
+			},
+			want: domain.ErrLeaseExpired,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestSQLiteStore(t)
+			ctx := context.Background()
+			created, err := store.CreateLease(ctx, testScope("idem-"+tc.name), testLease("lease-"+tc.name))
+			if err != nil {
+				t.Fatalf("CreateLease() error = %v", err)
+			}
+			tc.mutate(ctx, store, created)
+			renewed := created
+			renewed.Generation++
+			renewed.ExpiresAt = time.Now().UTC().Add(2 * time.Hour)
+			if tc.name == "stale" {
+				renewed.Generation++
+			}
+			_, err = store.UpdateLease(ctx, renewed)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("UpdateLease() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSQLiteAuditListStableOrder(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	err := store.AppendAuditEvents(ctx, []domain.AuditEvent{
+		{EventID: "a", TenantID: "tenant-a", Action: "first", Resource: "r", OccurredAt: now},
+		{EventID: "c", TenantID: "tenant-a", Action: "third", Resource: "r", OccurredAt: now.Add(time.Second)},
+		{EventID: "b", TenantID: "tenant-a", Action: "second", Resource: "r", OccurredAt: now.Add(time.Second)},
+	})
+	if err != nil {
+		t.Fatalf("AppendAuditEvents() error = %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, "tenant-a", 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents() error = %v", err)
+	}
+	ids := []string{events[0].EventID, events[1].EventID, events[2].EventID}
+	want := []string{"c", "b", "a"}
+	for idx := range want {
+		if ids[idx] != want[idx] {
+			t.Fatalf("ListAuditEvents() ids = %v, want %v", ids, want)
+		}
+	}
+}
+
+func TestSQLiteTenantKeyVersion(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	admin := store.AdminStore()
+	if err := admin.CreateTenant(ctx, domain.Tenant{ID: "tenant-a", Name: "Tenant A", Enabled: true}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	version, err := store.GetTenantKeysVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetTenantKeysVersion() error = %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("initial version = %d, want 1", version)
+	}
+	if err := admin.CreateTenantKey(ctx, auth.TenantKey{ID: "key-a", TenantID: "tenant-a", KeyHash: "001122", KeyFP: "fp-a", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("CreateTenantKey() error = %v", err)
+	}
+	version, err = store.GetTenantKeysVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetTenantKeysVersion() after create error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("version after create = %d, want 2", version)
+	}
+	if err := admin.RevokeTenantKey(ctx, "tenant-a", "key-a"); err != nil {
+		t.Fatalf("RevokeTenantKey() error = %v", err)
+	}
+	version, err = store.GetTenantKeysVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetTenantKeysVersion() after revoke error = %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("version after revoke = %d, want 3", version)
+	}
+}
+
+func newTestSQLiteStore(t *testing.T) *SQLiteStore {
+	t.Helper()
+	store, err := NewSQLiteStore(context.Background(), t.TempDir()+"/proxyharbor.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+func testScope(key string) IdempotencyScope {
+	return IdempotencyScope{TenantID: "tenant-a", StableSubjectID: "workload:subject-a", ResourceRef: "proxy:default:resource-a", RequestKind: "create_lease", Key: key}
+}
+
+func testLease(id string) domain.Lease {
+	now := time.Now().UTC()
+	return domain.Lease{
+		ID: id, TenantID: "tenant-a", Generation: 1,
+		Subject:     domain.Subject{Type: "workload", ID: "subject-a"},
+		ResourceRef: domain.ResourceRef{Kind: "proxy", Scope: "default", ID: "resource-a"},
+		PolicyRef:   domain.PolicyRef{ID: "default", Version: 1, Hash: "hash"},
+		GatewayURL:  "http://localhost:8080", Username: "user", PasswordHash: "hash", ProxyID: "proxy-a",
+		ExpiresAt: now.Add(time.Hour), RenewBefore: now.Add(30 * time.Minute), CatalogVersion: "catalog", CandidateSetID: "candidate",
+		CreatedAt: now, UpdatedAt: now,
+	}
+}
