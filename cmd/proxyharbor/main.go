@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +31,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "doctor":
+			os.Exit(runDoctor(os.Args[2:], os.Stdout, os.Stderr))
+		case "init":
+			os.Exit(runInit(os.Args[2:], os.Stdout, os.Stderr))
+		}
+	}
+
 	cfg, err := config.Load(os.Args[1:])
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
@@ -298,6 +309,106 @@ func authInvalidationLabel(cfg config.Config, redisActive bool) string {
 	}
 }
 
+func runDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
+	cfg, err := config.LoadUnchecked(args)
+	if err != nil {
+		fmt.Fprintf(stdout, "FAIL config: %v\n", err)
+		return 2
+	}
+
+	failed := false
+	check := func(ok bool, name, detail string) {
+		status := "OK"
+		if !ok {
+			status = "FAIL"
+			failed = true
+		}
+		if detail == "" {
+			fmt.Fprintf(stdout, "%s %s\n", status, name)
+			return
+		}
+		fmt.Fprintf(stdout, "%s %s: %s\n", status, name, detail)
+	}
+
+	switch cfg.StorageDriver {
+	case config.DriverMemory:
+		check(true, "storage driver memory", "dev/demo/CI only; not for production")
+	case config.DriverMySQL:
+		check(true, "storage driver mysql", "persistent HA profile")
+		check(strings.TrimSpace(cfg.MySQLDSN) != "", "mysql dsn configured", "set PROXYHARBOR_MYSQL_DSN or -mysql-dsn")
+	case config.DriverSQLite:
+		check(true, "storage driver sqlite", "single-instance profile")
+		check(strings.TrimSpace(cfg.SQLitePath) != "", "sqlite path configured", "set PROXYHARBOR_SQLITE_PATH or -sqlite-path")
+		if strings.TrimSpace(cfg.SQLitePath) != "" {
+			check(sqliteParentWritable(cfg.SQLitePath) == nil, "sqlite path parent writable", "parent directory must be writable")
+		}
+	default:
+		check(false, "storage driver supported", "use sqlite, mysql, or memory")
+	}
+
+	if cfg.SelectorRedisRequired {
+		check(strings.TrimSpace(cfg.RedisAddr) != "", "redis required configured", "set PROXYHARBOR_REDIS_ADDR or disable selector redis requirement")
+	} else {
+		check(true, "redis requirement", "optional")
+	}
+	check(strings.TrimSpace(cfg.AdminKey) != "", "admin key configured", "set PROXYHARBOR_ADMIN_KEY or -admin-key")
+	check(len(cfg.AdminKey) >= 32, "admin key length", "must be at least 32 bytes")
+	check(strings.TrimSpace(cfg.KeyPepper) != "", "key pepper configured", "set PROXYHARBOR_KEY_PEPPER or -key-pepper")
+	check(len(cfg.KeyPepper) >= 32, "key pepper length", "must be at least 32 bytes")
+
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+func runInit(args []string, stdout io.Writer, stderr io.Writer) int {
+	cfg, err := config.LoadUnchecked(args)
+	if err != nil {
+		fmt.Fprintf(stdout, "FAIL config: %v\n", err)
+		return 2
+	}
+	switch cfg.StorageDriver {
+	case config.DriverSQLite:
+		fmt.Fprintln(stdout, "sqlite initialization is not available yet; rerun `proxyharbor init` after the sqlite store/schema lands")
+		return 1
+	case config.DriverMySQL:
+		fmt.Fprintln(stdout, "mysql initialization is not performed by proxyharbor init; apply migrations/mysql/init.sql explicitly")
+		return 1
+	case config.DriverMemory:
+		fmt.Fprintln(stdout, "memory storage has no schema to initialize; use only for dev/demo/CI")
+		return 0
+	default:
+		fmt.Fprintf(stdout, "unsupported storage driver %q\n", cfg.StorageDriver)
+		return 2
+	}
+}
+
+func sqliteParentWritable(path string) error {
+	parent := filepath.Dir(path)
+	if parent == "." || parent == "" {
+		parent = "."
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("sqlite parent is not a directory")
+	}
+	probe, err := os.CreateTemp(parent, ".proxyharbor-doctor-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	closeErr := probe.Close()
+	removeErr := os.Remove(name)
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
+}
+
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
@@ -374,8 +485,10 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 		}
 		return s, func() { _ = s.Close() }, nil
 	case config.DriverMemory:
-		logger.Warn("using memory storage; only for development and tests")
+		logger.Warn("using memory storage; only for development, demos, and CI")
 		return storage.NewMemoryStore(), func() {}, nil
+	case config.DriverSQLite:
+		return nil, func() {}, errors.New("storage=sqlite is configured but sqlite store is not available in this build")
 	default:
 		return nil, func() {}, errors.New("unknown storage driver")
 	}

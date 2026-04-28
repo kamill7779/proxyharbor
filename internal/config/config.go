@@ -23,6 +23,7 @@ type StorageDriver string
 const (
 	DriverMemory StorageDriver = "memory"
 	DriverMySQL  StorageDriver = "mysql"
+	DriverSQLite StorageDriver = "sqlite"
 )
 
 type Config struct {
@@ -39,6 +40,7 @@ type Config struct {
 	MySQLMaxOpen               int
 	MySQLMaxIdle               int
 	MySQLConnMaxAge            time.Duration
+	SQLitePath                 string
 	RedisAddr                  string
 	RedisPassword              string
 	RedisDB                    int
@@ -69,6 +71,14 @@ type Config struct {
 }
 
 func Load(args []string) (Config, error) {
+	return load(args, true)
+}
+
+func LoadUnchecked(args []string) (Config, error) {
+	return load(args, false)
+}
+
+func load(args []string, validate bool) (Config, error) {
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
@@ -78,11 +88,12 @@ func Load(args []string) (Config, error) {
 		AuthRefreshInterval:        envDur("PROXYHARBOR_AUTH_REFRESH_INTERVAL", 5*time.Second),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
-		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "mysql")),
+		StorageDriver:              StorageDriver(envStr("PROXYHARBOR_STORAGE", "sqlite")),
 		MySQLDSN:                   os.Getenv("PROXYHARBOR_MYSQL_DSN"),
 		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
 		MySQLMaxIdle:               envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
 		MySQLConnMaxAge:            envDur("PROXYHARBOR_MYSQL_CONN_MAX_AGE", 30*time.Minute),
+		SQLitePath:                 envStr("PROXYHARBOR_SQLITE_PATH", "data/proxyharbor.db"),
 		RedisAddr:                  os.Getenv("PROXYHARBOR_REDIS_ADDR"),
 		RedisPassword:              os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
 		RedisDB:                    envInt("PROXYHARBOR_REDIS_DB", 0),
@@ -90,7 +101,7 @@ func Load(args []string) (Config, error) {
 		ShutdownTimeout:            envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		AllowInternalProxyEndpoint: envBool("PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT", false),
 		Selector:                   envStr("PROXYHARBOR_SELECTOR", "zfair"),
-		SelectorRedisRequired:      envBool("PROXYHARBOR_SELECTOR_REDIS_REQUIRED", true),
+		SelectorRedisRequired:      envBool("PROXYHARBOR_SELECTOR_REDIS_REQUIRED", false),
 		ScoringProfile:             envStr("PROXYHARBOR_SCORING_PROFILE", "default"),
 		HealthFlushInterval:        envDur("PROXYHARBOR_HEALTH_FLUSH_INTERVAL", 5*time.Second),
 		HealthBufferMax:            envInt("PROXYHARBOR_HEALTH_BUFFER_MAX", 10000),
@@ -115,8 +126,9 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
-	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: memory | mysql")
+	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: sqlite | mysql | memory")
 	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
+	fs.StringVar(&cfg.SQLitePath, "sqlite-path", cfg.SQLitePath, "SQLite database path")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
 	fs.StringVar(&cfg.Selector, "selector", cfg.Selector, "proxy selector")
 	fs.BoolVar(&cfg.SelectorRedisRequired, "selector-redis-required", cfg.SelectorRedisRequired, "require Redis for selector")
@@ -137,6 +149,9 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if !validate {
+		return cfg, nil
+	}
 	return cfg, cfg.validate()
 }
 
@@ -158,6 +173,10 @@ func (c Config) validate() error {
 	}
 	switch c.StorageDriver {
 	case DriverMemory:
+	case DriverSQLite:
+		if strings.TrimSpace(c.SQLitePath) == "" {
+			return errors.New("storage=sqlite requires -sqlite-path or PROXYHARBOR_SQLITE_PATH")
+		}
 	case DriverMySQL:
 		if strings.TrimSpace(c.MySQLDSN) == "" {
 			return errors.New("storage=mysql requires -mysql-dsn or PROXYHARBOR_MYSQL_DSN")
@@ -183,9 +202,6 @@ func (c Config) validate() error {
 		return fmt.Errorf("invalid auth invalidation transport: %q", c.AuthInvalidation)
 	}
 
-	if c.StorageDriver != DriverMySQL {
-		return errors.New("v0.2.0 requires storage=mysql")
-	}
 	if c.AdminKey == "" {
 		return errors.New("PROXYHARBOR_ADMIN_KEY is required")
 	}

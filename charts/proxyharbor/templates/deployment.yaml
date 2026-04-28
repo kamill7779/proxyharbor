@@ -45,7 +45,9 @@ spec:
             - name: PROXYHARBOR_ADDR
               value: ":8080"
             - name: PROXYHARBOR_STORAGE
-              value: "mysql"
+              value: {{ .Values.storage | quote }}
+            - name: PROXYHARBOR_SQLITE_PATH
+              value: {{ .Values.sqlite.path | quote }}
             - name: PROXYHARBOR_MYSQL_MAX_OPEN
               value: {{ .Values.mysql.maxOpen | quote }}
             - name: PROXYHARBOR_MYSQL_MAX_IDLE
@@ -102,18 +104,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if eq .Values.storage "mysql" }}
             - name: PROXYHARBOR_MYSQL_DSN
-              {{- if .Values.mysql.existingSecret }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.mysql.existingSecret }}
                   key: {{ .Values.mysql.existingSecretKey }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: mysql-dsn
-              {{- end }}
+            {{- end }}
             {{- if or .Values.redis.existingSecret .Values.redis.password }}
             - name: PROXYHARBOR_REDIS_PASSWORD
               {{- if .Values.redis.existingSecret }}
@@ -148,6 +145,17 @@ spec:
           {{- end }}
           resources:
             {{- toYaml $resources | nindent 12 }}
+          {{- if and (eq .Values.storage "sqlite") .Values.sqlite.persistence.enabled }}
+          volumeMounts:
+            - name: proxyharbor-data
+              mountPath: {{ dir .Values.sqlite.path }}
+          {{- end }}
+      {{- if and (eq .Values.storage "sqlite") .Values.sqlite.persistence.enabled }}
+      volumes:
+        - name: proxyharbor-data
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "proxyharbor.fullname" .)) .Values.sqlite.persistence.existingClaim }}
+      {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
