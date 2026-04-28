@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
@@ -187,6 +190,46 @@ func (s *MySQLAdminStore) IncrementTenantKeysVersion(ctx context.Context) error 
 }
 
 func (s *MySQLAdminStore) AppendAuditEvents(ctx context.Context, events []domain.AuditEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("admin.audit.begin_tx", "err", err)
+		return nil
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT IGNORE INTO proxy_audit_events (event_id, tenant_id, principal_id, action, metadata_json, occurred_at)
+		 VALUES (?,?,?,?,?,?)`)
+	if err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("admin.audit.prepare", "err", err)
+		return nil
+	}
+	defer stmt.Close()
+	for _, e := range events {
+		if e.EventID == "" {
+			continue
+		}
+		meta := map[string]any{"resource": e.Resource}
+		for k, v := range e.Metadata {
+			meta[k] = v
+		}
+		metaJSON, _ := json.Marshal(meta)
+		if _, err := stmt.ExecContext(ctx, e.EventID, e.TenantID, e.PrincipalID, e.Action, string(metaJSON), e.OccurredAt.UTC()); err != nil {
+			metrics.AuditWriteFailures.Inc()
+			slog.Warn("admin.audit.write_event", "event_id", e.EventID, "err", err)
+			_ = tx.Rollback()
+			return nil
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		metrics.AuditWriteFailures.Add(int64(len(events)))
+		slog.Error("admin.audit.commit", "err", err)
+		return nil
+	}
 	return nil
 }
 

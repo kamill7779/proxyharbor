@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 )
 
 var staleCounter atomic.Int64
@@ -221,6 +223,7 @@ func (d *DynamicStore) markRefreshSuccess() {
 	d.lastRefreshUnix.Store(time.Now().Unix())
 	d.lastError.Store(nil)
 	d.successes.Add(1)
+	metrics.AuthRefreshSuccess.Inc()
 }
 
 func (d *DynamicStore) recordError(err error) {
@@ -230,6 +233,7 @@ func (d *DynamicStore) recordError(err error) {
 	msg := err.Error()
 	d.lastError.Store(&msg)
 	d.failures.Add(1)
+	metrics.AuthRefreshFail.Inc()
 }
 
 func (d *DynamicStore) applyRows(rows []TenantKeyRow) {

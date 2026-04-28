@@ -12,11 +12,12 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/control"
 	"github.com/kamill7779/proxyharbor/internal/control/health"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.3.0-alpha"
+const Version = "0.4.0"
 
 type Role string
 
@@ -147,7 +148,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/readyz", s.ready)
 	s.mux.HandleFunc("/version", s.version)
-	s.mux.HandleFunc("/metrics", s.metrics)
+	s.mux.HandleFunc("/metrics", s.requireAdminAuth(metrics.Handler().ServeHTTP))
 	if s.role == RoleAll || s.role == RoleController {
 		s.mux.HandleFunc("/v1/leases", s.leases)
 		s.mux.HandleFunc("/v1/leases/", s.leaseByID)
@@ -227,7 +228,7 @@ func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"version": Version, "stability": "alpha", "role": string(s.role)})
+	writeJSON(w, http.StatusOK, map[string]string{"version": Version, "stability": "release-candidate", "role": string(s.role)})
 }
 
 func (s *Server) leases(w http.ResponseWriter, r *http.Request) {
@@ -247,6 +248,10 @@ func (s *Server) leases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lease, err := s.svc.CreateLease(r.Context(), principal, r.Header.Get("Idempotency-Key"), req)
+	metrics.LeaseCreateTotal.Inc()
+	if err != nil {
+		metrics.LeaseCreateFail.Inc()
+	}
 	respond(w, lease, err, http.StatusCreated)
 }
 
@@ -265,13 +270,22 @@ func (s *Server) leaseByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out, err := s.svc.RenewLease(r.Context(), principal, strings.TrimSuffix(path, ":renew"))
+		metrics.LeaseRenewTotal.Inc()
+		if err != nil {
+			metrics.LeaseRenewFail.Inc()
+		}
 		respond(w, out, err, http.StatusOK)
 		return
 	}
 	if !allow(w, r, http.MethodDelete) {
 		return
 	}
-	respond(w, map[string]string{"status": "revoked"}, s.svc.RevokeLease(r.Context(), principal, path), http.StatusOK)
+	err := s.svc.RevokeLease(r.Context(), principal, path)
+	metrics.LeaseRevokeTotal.Inc()
+	if err != nil {
+		metrics.LeaseRevokeFail.Inc()
+	}
+	respond(w, map[string]string{"status": "revoked"}, err, http.StatusOK)
 }
 
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +566,10 @@ func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 		tenant = "default"
 	}
 	lease, err := s.svc.ValidateLease(r.Context(), tenant, r.URL.Query().Get("lease_id"), r.URL.Query().Get("password"), r.URL.Query().Get("target"))
+	metrics.LeaseValidateTotal.Inc()
+	if err != nil {
+		metrics.LeaseValidateFail.Inc()
+	}
 	respond(w, lease, err, http.StatusOK)
 }
 
@@ -603,14 +621,18 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request, principal
 
 	if principal.Type == "admin" {
 		if obo == "" {
-			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			respond(w, nil, domain.NewKindedError(domain.ErrBadRequest, domain.ErrorKindUnknown, "missing_on_behalf_of", nil), http.StatusOK)
 			return domain.Principal{}, false
 		}
 		// Verify tenant exists and is active.
 		if s.adminStore != nil {
 			tenant, err := s.adminStore.GetTenant(r.Context(), obo)
-			if err != nil || !tenant.Enabled {
+			if err != nil {
 				respond(w, nil, domain.ErrTenantNotFound, http.StatusOK)
+				return domain.Principal{}, false
+			}
+			if !tenant.Enabled {
+				respond(w, nil, domain.ErrTenantDisabled, http.StatusOK)
 				return domain.Principal{}, false
 			}
 		}
@@ -626,8 +648,8 @@ func (s *Server) requireTenant(w http.ResponseWriter, r *http.Request, principal
 		return principal, true
 	}
 
-	// Legacy / other principals pass through.
-	return principal, true
+	respond(w, nil, domain.ErrForbidden, http.StatusOK)
+	return domain.Principal{}, false
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -639,25 +661,88 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 func respond(w http.ResponseWriter, body any, err error, okStatus int) {
 	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, domain.ErrAuthFailed) {
-			status = http.StatusUnauthorized
-		} else if errors.Is(err, domain.ErrTenantMismatch) {
-			status = http.StatusForbidden
-		} else if errors.Is(err, domain.ErrNotFound) {
-			status = http.StatusNotFound
-		} else if errors.Is(err, domain.ErrBadRequest) {
-			status = http.StatusBadRequest
-		} else if errors.Is(err, domain.ErrTenantNotFound) {
-			status = http.StatusNotFound
-		} else if errors.Is(err, domain.ErrTenantMismatch) || errors.Is(err, domain.ErrForbidden) {
-			status = http.StatusForbidden
+		if errors.Is(err, domain.ErrNoHealthyProxy) {
+			metrics.NoHealthyProxy.Inc()
 		}
-		writeJSON(w, status, map[string]string{"error": domain.ErrorCode(err)})
+		code := domain.ErrInternal
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, domain.ErrAuthFailed):
+			status = http.StatusUnauthorized
+			code = domain.ErrAuthFailed
+		case errors.Is(err, domain.ErrTenantMismatch), errors.Is(err, domain.ErrForbidden), errors.Is(err, domain.ErrTenantDisabled):
+			status = http.StatusForbidden
+			code = publicError(err)
+		case errors.Is(err, domain.ErrNotFound), errors.Is(err, domain.ErrTenantNotFound):
+			status = http.StatusNotFound
+			code = publicError(err)
+		case errors.Is(err, domain.ErrBadRequest), errors.Is(err, domain.ErrUnsafeDestination), errors.Is(err, domain.ErrSubjectNotEligible):
+			status = http.StatusBadRequest
+			code = publicError(err)
+		case errors.Is(err, domain.ErrUnsupported):
+			status = http.StatusNotImplemented
+			code = domain.ErrUnsupported
+		case errors.Is(err, domain.ErrPolicyDenied), errors.Is(err, domain.ErrNoHealthyProxy), errors.Is(err, domain.ErrIdempotencyConflict):
+			status = http.StatusConflict
+			code = publicError(err)
+		case errors.Is(err, domain.ErrLeaseRevoked), errors.Is(err, domain.ErrStaleLease):
+			status = http.StatusConflict
+			code = publicError(err)
+		case errors.Is(err, domain.ErrLeaseExpired):
+			status = http.StatusGone
+			code = domain.ErrLeaseExpired
+		case errors.Is(err, domain.ErrCatalogStale):
+			status = http.StatusConflict
+			code = domain.ErrCatalogStale
+		default:
+			slog.Warn("server.response_unknown_error", "err", err)
+		}
+		payload := map[string]any{"error": domain.ErrorCode(code)}
+		if code != domain.ErrInternal {
+			if reason := domain.ErrorReason(err); reason != "" {
+				payload["reason"] = reason
+			}
+		}
+		writeJSON(w, status, payload)
 		return
 	}
 	writeJSON(w, okStatus, body)
 }
+
+func publicError(err error) error {
+	switch {
+	case errors.Is(err, domain.ErrTenantMismatch):
+		return domain.ErrTenantMismatch
+	case errors.Is(err, domain.ErrForbidden):
+		return domain.ErrForbidden
+	case errors.Is(err, domain.ErrTenantDisabled):
+		return domain.ErrTenantDisabled
+	case errors.Is(err, domain.ErrNotFound):
+		return domain.ErrNotFound
+	case errors.Is(err, domain.ErrTenantNotFound):
+		return domain.ErrTenantNotFound
+	case errors.Is(err, domain.ErrBadRequest):
+		return domain.ErrBadRequest
+	case errors.Is(err, domain.ErrUnsafeDestination):
+		return domain.ErrUnsafeDestination
+	case errors.Is(err, domain.ErrSubjectNotEligible):
+		return domain.ErrSubjectNotEligible
+	case errors.Is(err, domain.ErrUnsupported):
+		return domain.ErrUnsupported
+	case errors.Is(err, domain.ErrPolicyDenied):
+		return domain.ErrPolicyDenied
+	case errors.Is(err, domain.ErrNoHealthyProxy):
+		return domain.ErrNoHealthyProxy
+	case errors.Is(err, domain.ErrIdempotencyConflict):
+		return domain.ErrIdempotencyConflict
+	case errors.Is(err, domain.ErrLeaseRevoked):
+		return domain.ErrLeaseRevoked
+	case errors.Is(err, domain.ErrStaleLease):
+		return domain.ErrStaleLease
+	}
+	return domain.ErrInternal
+}
+
 func allow(w http.ResponseWriter, r *http.Request, method string) bool {
 	if r.Method != method {
 		methodNotAllowed(w)

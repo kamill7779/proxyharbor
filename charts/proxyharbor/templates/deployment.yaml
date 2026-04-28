@@ -78,6 +78,26 @@ spec:
             - name: PROXYHARBOR_AUTH_INVALIDATION
               value: {{ .Values.auth.invalidation | quote }}
             {{- end }}
+            {{- if .Values.cluster.enabled }}
+            - name: PROXYHARBOR_CLUSTER_ENABLED
+              value: "true"
+            - name: PROXYHARBOR_INSTANCE_HEARTBEAT_INTERVAL
+              value: {{ .Values.cluster.heartbeatInterval | quote }}
+            - name: PROXYHARBOR_LEADER_LEASE_TTL
+              value: {{ .Values.cluster.leaderLeaseTTL | quote }}
+            - name: PROXYHARBOR_MAINTENANCE_INTERVAL
+              value: {{ .Values.cluster.maintenanceInterval | quote }}
+            - name: PROXYHARBOR_MAINTENANCE_BATCH_SIZE
+              value: {{ .Values.cluster.maintenanceBatchSize | quote }}
+            {{- end }}
+            - name: PROXYHARBOR_SCORING_PROFILE
+              value: {{ .Values.scoring.profile | quote }}
+            - name: PROXYHARBOR_ZFAIR_QUANTUM
+              value: {{ .Values.zfair.quantum | quote }}
+            - name: PROXYHARBOR_ZFAIR_DEFAULT_LATENCY_MS
+              value: {{ .Values.zfair.defaultLatencyMS | quote }}
+            - name: PROXYHARBOR_ZFAIR_MAX_PROMOTE
+              value: {{ .Values.zfair.maxPromote | quote }}
             - name: PROXYHARBOR_INSTANCE_ID
               valueFrom:
                 fieldRef:

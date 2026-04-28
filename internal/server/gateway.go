@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/control/health"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
@@ -29,8 +30,10 @@ func (s *Server) gateway(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
+	metrics.GatewayValidateTotal.Inc()
 	tenantID, leaseID, password, ok := gatewayCredentials(r)
 	if !ok {
+		metrics.GatewayValidateFail.Inc()
 		respond(w, nil, domain.ErrAuthFailed, http.StatusOK)
 		return
 	}
@@ -39,6 +42,9 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 		target = r.Host
 	}
 	lease, proxy, err := s.svc.ValidateGatewayRequest(r.Context(), tenantID, leaseID, password, target)
+	if err != nil {
+		metrics.GatewayValidateFail.Inc()
+	}
 	if err != nil {
 		respond(w, nil, err, http.StatusOK)
 		return
@@ -54,9 +60,11 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 	out.RequestURI = ""
 	out.URL = cloneURL(r.URL)
 	out.Header = r.Header.Clone()
+	out.Header.Del("Authorization")
 	out.Header.Del("Proxy-Authorization")
 	out.Header.Del("ProxyHarbor-Tenant")
 	out.Header.Del("ProxyHarbor-Lease")
+	out.Header.Del("ProxyHarbor-Password")
 	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 	started := time.Now()
 	resp, err := transport.RoundTrip(out)
@@ -88,12 +96,17 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
+	metrics.GatewayValidateTotal.Inc()
 	tenantID, leaseID, password, ok := gatewayCredentials(r)
 	if !ok {
+		metrics.GatewayValidateFail.Inc()
 		respond(w, nil, domain.ErrAuthFailed, http.StatusOK)
 		return
 	}
 	lease, proxy, err := s.svc.ValidateGatewayRequest(r.Context(), tenantID, leaseID, password, r.Host)
+	if err != nil {
+		metrics.GatewayValidateFail.Inc()
+	}
 	if err != nil {
 		respond(w, nil, err, http.StatusOK)
 		return
@@ -222,6 +235,7 @@ func (s *Server) recordProxySuccess(ctx context.Context, lease domain.Lease, lat
 	if s.healthRecorder == nil {
 		return
 	}
+	metrics.HealthEventsTotal.Inc()
 	s.healthRecorder.RecordProxyResult(ctx, lease.ProxyID, health.ProxyHealthResult{Success: true, LatencyMS: int(latency.Milliseconds()), Hint: hint})
 }
 
@@ -229,6 +243,7 @@ func (s *Server) recordProxyFailure(ctx context.Context, lease domain.Lease, kin
 	if s.healthRecorder == nil {
 		return
 	}
+	metrics.HealthEventsTotal.Inc()
 	s.healthRecorder.RecordProxyResult(ctx, lease.ProxyID, health.ProxyHealthResult{Success: false, Kind: kind, Hint: hint})
 }
 

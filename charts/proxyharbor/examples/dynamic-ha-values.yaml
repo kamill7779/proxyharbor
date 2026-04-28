@@ -1,4 +1,4 @@
-# Dynamic-key HA example for ProxyHarbor v0.2.0-alpha.
+# Dynamic-key HA example for ProxyHarbor v0.4.0.
 #
 # Required preconditions:
 #   1. Initialize MySQL with migrations/mysql/init.sql.
@@ -60,5 +60,22 @@ probes:
     initialDelaySeconds: 15
     periodSeconds: 20
 
-podAnnotations:
-  prometheus.io/scrape: "false"
+# /metrics is protected by ProxyHarbor-Key. Configure a Prometheus scrape job or
+# ServiceMonitor that sends the admin key; do not enable unauthenticated scrape
+# annotations by default.
+podAnnotations: {}
+
+cluster:
+  enabled: true
+  heartbeatInterval: 10s
+  leaderLeaseTTL: 45s
+  maintenanceInterval: 30s
+  maintenanceBatchSize: 500
+
+scoring:
+  profile: default
+
+zfair:
+  quantum: 1000
+  defaultLatencyMS: 200
+  maxPromote: 128
