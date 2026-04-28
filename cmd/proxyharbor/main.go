@@ -500,8 +500,6 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 	case config.DriverMemory:
 		logger.Warn("using memory storage; only for development, demos, and CI")
 		return storage.NewMemoryStore(), func() {}, nil
-	case config.DriverSQLite:
-		return nil, func() {}, errors.New("storage=sqlite is configured but sqlite store is not available in this build")
 	default:
 		return nil, func() {}, errors.New("unknown storage driver")
 	}
