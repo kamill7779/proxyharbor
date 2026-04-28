@@ -1,36 +1,18 @@
-<div align="center">
-  <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
-</div>
+# ProxyHarbor
 
-<div align="center">
+ProxyHarbor is a lightweight proxy-pool gateway for small cloud-native workloads. It provides admin-managed providers/proxies, tenant keys, lease APIs, and HTTP/HTTPS gateway validation in one binary.
 
-**A lightweight cloud-native proxy pool for small-business integration**
+## Deployment Profiles
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](go.mod)
-[![License](https://img.shields.io/badge/License-MIT-orange)](LICENSE)
-[![中文](https://img.shields.io/badge/README-中文-blue)](README.md)
+ProxyHarbor v0.4.2 is single-first:
 
-</div>
+- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, no Redis requirement. This is the recommended local and small deployment shape once the SQLite store from the parallel v0.4.2 work lands.
+- **HA**: multiple instances with shared MySQL plus Redis for zfair selector coordination and auth/cache invalidation.
+- **Memory**: dev/demo/CI only. It is non-durable and is not a formal deployment profile.
 
----
+> Branch note: SQLite configuration, `doctor`, and `init` are wired for the v0.4.2 integration point. Worker A owns the SQLite store/schema, so `proxyharbor init -storage=sqlite` currently reports a clear coming-soon message instead of pretending to initialize data.
 
-ProxyHarbor v0.4.0 closes the core control-plane and gateway loop. It keeps the runtime footprint light with **MySQL + Redis** while providing global proxy inventory, dynamic tenant keys, lease issuance, and an HTTP/HTTPS gateway. Providers, proxies, and policies are global platform resources. Tenants can only create and use leases through dynamic keys; they cannot read proxy endpoint lists.
-
-## Features
-
-- **Global proxy inventory**: Admin manages Providers and Proxies; tenants share the global healthy proxy pool.
-- **Dynamic tenant keys**: Admin API issues, revokes, and rotates tenant keys; plaintext keys are returned only once.
-- **Default policy**: MVP only allows the `default` policy; omitted `policy_id` resolves to `default`.
-- **Default provider**: Proxies without `provider_id` are assigned to the `default` provider.
-- **Lease gateway**: Leases bind to `resource_ref`; gateway targets must match the leased resource host.
-- **zfair scheduling**: Redis ZSET + atomic Lua selection using weight, latency, and health state.
-- **Secret-first deployment**: Helm never renders plaintext credentials; production deployments reference existing Kubernetes Secrets.
-
-## Quick Start
-
-> Docker Compose is the recommended local path. MySQL initializes from `migrations/mysql/init.sql`.
-
-### 1. Start all services
+## Quick Start: Single Instance
 
 ```bash
 export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
@@ -38,18 +20,37 @@ export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
 docker compose up -d --build
 ```
 
-This starts:
-- `mysql`: tenant keys, global proxy inventory, leases, and health-state persistence
-- `redis`: zfair scheduling state and hot-path cache
-- `proxyharbor`: combined controller and gateway process
+The default `docker-compose.yaml` runs one `proxyharbor` service and mounts a local data volume for the future SQLite database at `/var/lib/proxyharbor/proxyharbor.db`.
 
-### 2. Check readiness
+Run diagnostics before starting or when troubleshooting:
 
 ```bash
+go run ./cmd/proxyharbor doctor \
+  -storage=sqlite \
+  -sqlite-path ./data/proxyharbor.db \
+  -selector-redis-required=false \
+  -admin-key "$PROXYHARBOR_ADMIN_KEY" \
+  -key-pepper "$PROXYHARBOR_KEY_PEPPER"
+```
+
+Initialize schema when SQLite support is integrated:
+
+```bash
+go run ./cmd/proxyharbor init -storage=sqlite -sqlite-path ./data/proxyharbor.db
+```
+
+Until then, use the HA compose file for a runnable MySQL+Redis bundle:
+
+```bash
+export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
+export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
+docker compose -f docker-compose.ha.yaml up -d --build
 curl http://localhost:8080/readyz
 ```
 
-### 3. Create a tenant and issue a tenant key
+## Basic API Flow
+
+Create a tenant and issue a tenant key:
 
 ```bash
 curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
@@ -63,20 +64,14 @@ curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
   http://localhost:8080/admin/tenants/tenant-a/keys
 ```
 
-### 4. Add a proxy
+Add a proxy and create a lease:
 
 ```bash
 curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"id":"proxy-1","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
   http://localhost:8080/v1/proxies
-```
 
-> For loopback or private-network endpoints during local testing, set `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true` first.
-
-### 5. Create a lease
-
-```bash
 curl -H "ProxyHarbor-Key: $TENANT_KEY" \
   -H 'Idempotency-Key: demo-lease-1' \
   -H 'Content-Type: application/json' \
@@ -84,128 +79,50 @@ curl -H "ProxyHarbor-Key: $TENANT_KEY" \
   http://localhost:8080/v1/leases
 ```
 
-## API Shape
+For loopback or private proxy endpoints in local tests, set `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true`.
 
-Admin-only:
-
-- `POST|PATCH|DELETE /admin/tenants...`
-- `POST|DELETE /admin/tenants/{id}/keys...`
-- `GET|POST|PUT|DELETE /v1/providers...`
-- `GET|POST|PUT|DELETE /v1/proxies...`
-- `GET|POST|PUT|DELETE /v1/policies/default`
-- `GET /v1/catalog/latest`
-- `POST /v1/internal/usage-events:batch`
-- `POST /v1/internal/gateway-feedback:batch`
-- `GET /v1/gateway/validate`
-
-Tenant:
-
-- `POST /v1/leases`
-- `POST /v1/leases/{id}:renew`
-- `DELETE /v1/leases/{id}`
-
-## Startup Modes
-
-### Bundled dependencies (recommended for local dev)
+## CLI
 
 ```bash
-docker compose up -d --build
+proxyharbor doctor [flags]
+proxyharbor init [flags]
+proxyharbor [server flags]
 ```
 
-### External MySQL + Redis
+`doctor` checks storage driver selection, required environment/config, MySQL DSN presence, Redis required settings, admin key/pepper presence and length, and SQLite path parent writability without printing secret values.
+
+`init` is reserved for schema initialization. It does not generate admin keys and does not write secrets to logs. MySQL migrations remain explicit via `migrations/mysql/init.sql`.
+
+## Helm
+
+The chart defaults to a single replica with SQLite persistence enabled:
 
 ```bash
-cp .env.example .env
-# edit .env with your external connection details
-docker compose up -d --build proxyharbor
+helm install proxyharbor charts/proxyharbor \
+  --set auth.existingSecret=proxyharbor-credentials
 ```
 
-### Local binary
+Create `proxyharbor-credentials` with `admin-key` and `pepper`. For HA, use MySQL+Redis examples:
 
 ```bash
-go run ./cmd/proxyharbor \
-  -admin-key "$PROXYHARBOR_ADMIN_KEY" \
-  -key-pepper "$PROXYHARBOR_KEY_PEPPER" \
-  -mysql-dsn "$PROXYHARBOR_MYSQL_DSN"
+helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
 ```
 
-## Helm Secret
-
-The chart is Secret-first and does not render plaintext credentials. Create the referenced Secret before install:
-
-```bash
-kubectl create secret generic proxyharbor-credentials \
-  --from-literal=admin-key="$(openssl rand -hex 32)" \
-  --from-literal=pepper="$(openssl rand -hex 32)" \
-  --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
-```
-
-
-### Kubernetes Multi-Instance Deployment
-
-The Helm chart defaults to a single replica so it can start without Redis. Multi-instance deployments require shared MySQL and should use `charts/proxyharbor/examples/multi-instance-values.yaml` or `dynamic-ha-values.yaml` to set `replicaCount=2`, `redis.selectorRedisRequired=true`, and `auth.invalidation=redis`. Memory storage is for local development only and is not suitable for multiple Pods.
-
-Example:
-
-```bash
-helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/multi-instance-values.yaml
-```
-
-## Data Model
-
-### Provider
-
-A global platform resource. The MVP seeds the `default` provider, and proxies without `provider_id` are assigned to it.
-
-### Proxy
-
-A global platform resource. It contains endpoint, weight, health_score, circuit-breaker state, and health feedback fields. Tenant APIs do not expose proxy endpoint lists.
-
-### Policy
-
-The MVP only allows the `default` policy. Creating, updating, or deleting non-`default` policies is rejected.
-
-### Lease
-
-A tenant resource. It keeps `tenant_id`, binds subject, resource_ref, proxy_id, expiry, and an irreversible password hash. The plaintext password is returned only once in the create response.
-
-## Scheduling & Health Model
-
-### zfair Scheduler
-
-`selector=zfair` uses Redis ZSETs and Lua to maintain ready/delayed queues. In multi-instance deployments, set `PROXYHARBOR_SELECTOR_REDIS_REQUIRED=true` to avoid split scheduling state.
-
-### Health Scoring
-
-Success raises the score. Connection failures, timeouts, auth/protocol failures lower it. Consecutive failures trip the circuit breaker and enter exponential back-off cooldown.
+HA examples require a Secret with `admin-key`, `pepper`, `mysql-dsn`, and optional `redis-password`.
 
 ## Configuration Reference
 
 | Variable | Description |
 | --- | --- |
+| `PROXYHARBOR_STORAGE` | `sqlite` for single instance, `mysql` for HA, `memory` for dev/demo/CI |
+| `PROXYHARBOR_SQLITE_PATH` | SQLite database path for single-instance storage |
+| `PROXYHARBOR_MYSQL_DSN` | MySQL DSN, required when `storage=mysql` |
+| `PROXYHARBOR_REDIS_ADDR` | Redis address; required when zfair Redis is enforced |
+| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Whether selector startup requires Redis |
 | `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes |
 | `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes |
-| `PROXYHARBOR_MYSQL_DSN` | MySQL DSN, required |
-| `PROXYHARBOR_REDIS_ADDR` | Redis address; required when zfair Redis is enforced |
 | `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | Dynamic key refresh interval, max 5s |
-| `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Whether selector startup requires Redis |
 | `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | Whether private/loopback proxy endpoints can be registered |
-
-## Packaging & Deployment
-
-```bash
-docker build -t proxyharbor:0.4.0 .
-helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
-```
-
-## Contributing
-
-Issues and PRs are welcome. v0.4.0 continues the v0.2.0 breaking-reset baseline and does not keep the old migration chain.
-
-## Contact
-
-- GitHub Issues: <https://github.com/kamill7779/proxyharbor/issues>
-- Author: Kamill
 
 ## License
 

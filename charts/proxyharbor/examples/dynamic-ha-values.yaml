@@ -8,6 +8,7 @@
 #          --from-literal=pepper="$(openssl rand -hex 32)" \
 #          --from-literal=mysql-dsn='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
 
+storage: mysql
 replicaCount: 3
 role: all
 

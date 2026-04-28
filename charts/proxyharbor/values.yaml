@@ -4,14 +4,17 @@ image:
   pullPolicy: IfNotPresent
   pullSecrets: []
 
+# Default profile is a lightweight single-instance deployment.
+# Use examples/dynamic-ha-values.yaml for MySQL+Redis HA.
 role: all
 replicaCount: 1
+storage: sqlite
 strategy:
   type: RollingUpdate
   rollingUpdate:
     maxUnavailable: 0
     maxSurge: 1
-lightweight: false
+lightweight: true
 terminationGracePeriodSeconds: 30
 preStop:
   enabled: true
@@ -34,6 +37,7 @@ ingress:
   tls: []
 
 auth:
+  # Keep secrets outside values files in production.
   existingSecret: proxyharbor-credentials
   keys:
     adminKey: admin-key
@@ -41,8 +45,17 @@ auth:
   refreshInterval: 5s
   invalidation: ""
 
+sqlite:
+  path: /var/lib/proxyharbor/proxyharbor.db
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 1Gi
+    storageClass: ""
+
 mysql:
-  existingSecret: proxyharbor-credentials
+  # Required only when storage=mysql.
+  existingSecret: ""
   existingSecretKey: mysql-dsn
   maxOpen: 20
   maxIdle: 5

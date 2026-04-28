@@ -1,6 +1,7 @@
 # ProxyHarbor multi-instance baseline.
 # Requires shared MySQL storage. Redis/zfair is recommended for multi-instance
-# selector coordination and cache invalidation; memory storage is for dev only.
+# selector coordination and cache invalidation; memory storage is for dev/demo/CI only.
+storage: mysql
 replicaCount: 2
 
 strategy:
