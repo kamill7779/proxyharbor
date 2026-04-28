@@ -1,4 +1,4 @@
-﻿// Package config loads ProxyHarbor runtime configuration.
+// Package config loads ProxyHarbor runtime configuration.
 //
 // Load order, later values override earlier values:
 //  1. built-in defaults
@@ -93,7 +93,7 @@ func load(args []string, validate bool) (Config, error) {
 		MySQLMaxOpen:               envInt("PROXYHARBOR_MYSQL_MAX_OPEN", 20),
 		MySQLMaxIdle:               envInt("PROXYHARBOR_MYSQL_MAX_IDLE", 5),
 		MySQLConnMaxAge:            envDur("PROXYHARBOR_MYSQL_CONN_MAX_AGE", 30*time.Minute),
-`t`tSQLitePath:                 envStr("PROXYHARBOR_SQLITE_PATH", "data/proxyharbor.db"),
+		SQLitePath:                 envStr("PROXYHARBOR_SQLITE_PATH", "data/proxyharbor.db"),
 		RedisAddr:                  os.Getenv("PROXYHARBOR_REDIS_ADDR"),
 		RedisPassword:              os.Getenv("PROXYHARBOR_REDIS_PASSWORD"),
 		RedisDB:                    envInt("PROXYHARBOR_REDIS_DB", 0),
@@ -126,7 +126,7 @@ func load(args []string, validate bool) (Config, error) {
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
-`tstorageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: sqlite | mysql | memory")
+	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: sqlite | mysql | memory")
 	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
 	fs.StringVar(&cfg.SQLitePath, "sqlite-path", cfg.SQLitePath, "SQLite database path")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
@@ -149,14 +149,8 @@ func load(args []string, validate bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
-`tcfg.StorageDriver = StorageDriver(*storageStr)
-`tif cfg.StorageDriver == DriverSQLite && strings.TrimSpace(cfg.RedisAddr) == "" {
-`t`tcfg.SelectorRedisRequired = false
-`t}
-`tif !validate {
-`t`treturn cfg, nil
-`t}
-`treturn cfg, cfg.validate()
+	if !validate {
+		return cfg, nil
 	}
 	return cfg, cfg.validate()
 }
@@ -176,10 +170,10 @@ func (c Config) validate() error {
 	case "info", "debug":
 	default:
 		return fmt.Errorf("invalid log level: %q", c.LogLevel)
-`tcase DriverSQLite:
-`t`tif strings.TrimSpace(c.SQLitePath) == "" {
-`t`t`treturn errors.New("storage=sqlite requires -sqlite-path or PROXYHARBOR_SQLITE_PATH")
-`t`t}
+	}
+	switch c.StorageDriver {
+	case DriverMemory:
+	case DriverSQLite:
 		if strings.TrimSpace(c.SQLitePath) == "" {
 			return errors.New("storage=sqlite requires -sqlite-path or PROXYHARBOR_SQLITE_PATH")
 		}
