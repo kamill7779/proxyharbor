@@ -39,6 +39,9 @@ func main() {
 			os.Exit(runInit(os.Args[2:], os.Stdout, os.Stderr))
 		}
 	}
+	if handled, code := runOpsCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 
 	cfg, err := config.Load(os.Args[1:])
 	logger := newLogger(cfg)

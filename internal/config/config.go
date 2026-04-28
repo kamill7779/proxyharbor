@@ -68,6 +68,9 @@ type Config struct {
 	LeaderLeaseTTL            time.Duration
 	MaintenanceInterval       time.Duration
 	MaintenanceBatchSize      int
+	AuditRetentionDays        int
+	UsageRetentionDays        int
+	RetentionInterval         time.Duration
 }
 
 func Load(args []string) (Config, error) {
@@ -115,6 +118,9 @@ func load(args []string, validate bool) (Config, error) {
 		LeaderLeaseTTL:             envDur("PROXYHARBOR_LEADER_LEASE_TTL", 45*time.Second),
 		MaintenanceInterval:        envDur("PROXYHARBOR_MAINTENANCE_INTERVAL", 30*time.Second),
 		MaintenanceBatchSize:       envInt("PROXYHARBOR_MAINTENANCE_BATCH_SIZE", 500),
+		AuditRetentionDays:         envInt("PROXYHARBOR_AUDIT_RETENTION_DAYS", 0),
+		UsageRetentionDays:         envInt("PROXYHARBOR_USAGE_RETENTION_DAYS", 0),
+		RetentionInterval:          envDur("PROXYHARBOR_RETENTION_INTERVAL", time.Hour),
 	}
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
@@ -145,6 +151,9 @@ func load(args []string, validate bool) (Config, error) {
 	fs.DurationVar(&cfg.LeaderLeaseTTL, "leader-lease-ttl", cfg.LeaderLeaseTTL, "cluster leader lock lease TTL")
 	fs.DurationVar(&cfg.MaintenanceInterval, "maintenance-interval", cfg.MaintenanceInterval, "leader maintenance interval")
 	fs.IntVar(&cfg.MaintenanceBatchSize, "maintenance-batch-size", cfg.MaintenanceBatchSize, "leader expired lease cleanup batch size")
+	fs.IntVar(&cfg.AuditRetentionDays, "audit-retention-days", cfg.AuditRetentionDays, "audit event retention in days; 0 disables cleanup")
+	fs.IntVar(&cfg.UsageRetentionDays, "usage-retention-days", cfg.UsageRetentionDays, "usage event retention in days; 0 disables cleanup")
+	fs.DurationVar(&cfg.RetentionInterval, "retention-interval", cfg.RetentionInterval, "audit/usage retention worker interval")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -231,6 +240,12 @@ func (c Config) validate() error {
 	}
 	if c.MaintenanceBatchSize <= 0 {
 		return errors.New("PROXYHARBOR_MAINTENANCE_BATCH_SIZE must be positive")
+	}
+	if c.AuditRetentionDays < 0 || c.UsageRetentionDays < 0 {
+		return errors.New("retention days must be >= 0")
+	}
+	if c.RetentionInterval <= 0 {
+		return errors.New("PROXYHARBOR_RETENTION_INTERVAL must be positive")
 	}
 	return nil
 }
