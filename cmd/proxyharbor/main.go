@@ -29,6 +29,10 @@ import (
 )
 
 func main() {
+	if handled, code := runOpsCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+
 	cfg, err := config.Load(os.Args[1:])
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
