@@ -371,11 +371,55 @@ func (s *SQLiteStore) RecordProxyOutcome(ctx context.Context, proxyID string, de
 		delta.ObservedAt = time.Now().UTC()
 	}
 	if delta.Success {
-		_, err := s.db.ExecContext(ctx, `UPDATE proxies SET healthy=TRUE, consecutive_failures=0, health_score=MIN(100, health_score + ?), latency_ewma_ms=?, last_checked_at=?, last_success_at=?, failure_hint='' WHERE proxy_id=?`, delta.Reward, nullInt(delta.LatencyMS), delta.ObservedAt, delta.ObservedAt, proxyID)
+		reward := delta.Reward
+		if reward <= 0 {
+			reward = 1
+		}
+		_, err := s.db.ExecContext(ctx, `UPDATE proxies SET healthy=TRUE, consecutive_failures=0, health_score=MIN(100, health_score + ?), latency_ewma_ms=CASE WHEN ? <= 0 THEN latency_ewma_ms WHEN latency_ewma_ms IS NULL THEN ? ELSE CAST(latency_ewma_ms * 0.8 + ? * 0.2 AS INTEGER) END, last_checked_at=?, last_success_at=?, circuit_open_until=CASE WHEN circuit_open_until IS NOT NULL AND circuit_open_until <= ? THEN NULL ELSE circuit_open_until END, failure_hint='' WHERE proxy_id=?`, reward, delta.LatencyMS, delta.LatencyMS, delta.LatencyMS, delta.ObservedAt, delta.ObservedAt, delta.ObservedAt, proxyID)
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE proxies SET consecutive_failures=consecutive_failures+1, health_score=MAX(0, health_score - ?), healthy=CASE WHEN consecutive_failures + 1 >= ? THEN FALSE ELSE healthy END, circuit_open_until=CASE WHEN consecutive_failures + 1 >= ? THEN ? ELSE circuit_open_until END, last_checked_at=?, last_failure_at=?, failure_hint=? WHERE proxy_id=?`, delta.Penalty, delta.MaxConsecutiveFailure, delta.MaxConsecutiveFailure, delta.ObservedAt.Add(delta.BaseCooldown), delta.ObservedAt, delta.ObservedAt, delta.FailureHint, proxyID)
-	return err
+	penalty := delta.Penalty
+	if penalty <= 0 {
+		penalty = 10
+	}
+	threshold := delta.MaxConsecutiveFailure
+	if threshold <= 0 {
+		threshold = 3
+	}
+	baseCooldownSeconds := int(delta.BaseCooldown.Seconds())
+	if baseCooldownSeconds <= 0 {
+		baseCooldownSeconds = 30
+	}
+	maxCooldownSeconds := int(delta.MaxCooldown.Seconds())
+	if maxCooldownSeconds <= 0 {
+		maxCooldownSeconds = 300
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var failures int
+	if err := tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM proxies WHERE proxy_id=?`, proxyID).Scan(&failures); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
+		return err
+	}
+	nextFailures := failures + 1
+	var circuitOpenUntil any
+	if nextFailures >= threshold {
+		cooldown := time.Duration(baseCooldownSeconds*nextFailures) * time.Second
+		maxCooldown := time.Duration(maxCooldownSeconds) * time.Second
+		if cooldown > maxCooldown {
+			cooldown = maxCooldown
+		}
+		circuitOpenUntil = delta.ObservedAt.Add(cooldown)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE proxies SET consecutive_failures=?, health_score=MAX(0, health_score - ?), healthy=CASE WHEN ? >= ? THEN FALSE ELSE healthy END, circuit_open_until=COALESCE(?, circuit_open_until), last_checked_at=?, last_failure_at=?, failure_hint=? WHERE proxy_id=?`, nextFailures, penalty, nextFailures, threshold, circuitOpenUntil, delta.ObservedAt, delta.ObservedAt, delta.FailureHint, proxyID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) LatestCatalog(ctx context.Context) (domain.Catalog, error) {

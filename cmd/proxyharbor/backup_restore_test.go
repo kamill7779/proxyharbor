@@ -85,3 +85,30 @@ func TestOfflineSQLiteRestoreRequiresForce(t *testing.T) {
 		t.Fatalf("err = %v, want --force guidance", err)
 	}
 }
+
+func TestOfflineSQLiteRestoreRejectsDestinationSidecarFiles(t *testing.T) {
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "backup.db")
+	target := filepath.Join(dir, "proxyharbor.db")
+	if err := os.WriteFile(backup, []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+"-wal", []byte("wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := offlineSQLiteRestore(backup, target, true)
+	if err == nil || !strings.Contains(err.Error(), "clean destination") {
+		t.Fatalf("err = %v, want clean destination guidance", err)
+	}
+}
+
+func TestRunOpsCommandDispatchesRetention(t *testing.T) {
+	var out strings.Builder
+	handled, code := runOpsCommand([]string{"retention", "--audit-days", "30"}, &out, &strings.Builder{})
+	if !handled || code != 0 {
+		t.Fatalf("handled=%v code=%d, want handled true code 0", handled, code)
+	}
+	if !strings.Contains(out.String(), "audit:") {
+		t.Fatalf("retention output = %q, want audit preview", out.String())
+	}
+}

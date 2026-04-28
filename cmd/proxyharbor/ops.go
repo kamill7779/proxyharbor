@@ -21,6 +21,8 @@ func runOpsCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 		return true, runBackupCommand(args[1:], stdout, stderr)
 	case "restore":
 		return true, runRestoreCommand(args[1:], stdout, stderr)
+	case "retention":
+		return true, runRetentionCommand(args[1:], stdout, stderr)
 	default:
 		return false, 0
 	}
@@ -108,6 +110,9 @@ func offlineSQLiteRestore(input, output string, force bool) error {
 	}
 	if !force {
 		return errors.New("restore requires --force to confirm ProxyHarbor is stopped and target DB may be replaced")
+	}
+	if hasSQLiteSidecarFiles(output) {
+		return errors.New("offline SQLite restore requires a clean destination; remove or checkpoint existing -wal/-shm files first")
 	}
 	return copySQLiteFile(input, output, true)
 }

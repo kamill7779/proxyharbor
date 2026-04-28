@@ -188,6 +188,28 @@ func TestSQLiteProxyRoundTripScansLastSeenAt(t *testing.T) {
 	}
 }
 
+func TestSQLiteProxyFailureUsesCappedCooldown(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	if _, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	observedAt := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		if err := store.RecordProxyOutcome(ctx, "proxy-a", ProxyHealthDelta{ObservedAt: observedAt, Success: false, MaxConsecutiveFailure: 1, BaseCooldown: time.Minute, MaxCooldown: 2 * time.Minute}); err != nil {
+			t.Fatalf("RecordProxyOutcome() error = %v", err)
+		}
+	}
+	proxy, err := store.GetProxy(ctx, "proxy-a")
+	if err != nil {
+		t.Fatalf("GetProxy() error = %v", err)
+	}
+	want := observedAt.Add(2 * time.Minute)
+	if !proxy.CircuitOpenUntil.Equal(want) {
+		t.Fatalf("CircuitOpenUntil = %s, want capped %s", proxy.CircuitOpenUntil, want)
+	}
+}
+
 func TestSQLiteTenantKeyHashUnique(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	ctx := context.Background()
