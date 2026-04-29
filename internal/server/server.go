@@ -534,7 +534,10 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range body.Events {
-		body.Events[i].TenantID = principal.TenantID
+		if body.Events[i].TenantID == "" {
+			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			return
+		}
 	}
 	respond(w, map[string]int{"accepted": len(body.Events)}, s.svc.RecordUsage(r.Context(), body.Events), http.StatusAccepted)
 }
@@ -556,7 +559,10 @@ func (s *Server) gatewayFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range body.Events {
-		body.Events[i].TenantID = principal.TenantID
+		if body.Events[i].TenantID == "" {
+			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			return
+		}
 		if body.Events[i].Action == "" {
 			body.Events[i].Action = "gateway_feedback"
 		}

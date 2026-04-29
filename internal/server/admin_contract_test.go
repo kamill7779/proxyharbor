@@ -98,3 +98,31 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 		t.Fatalf("gateway validate body = %#v", body)
 	}
 }
+
+func TestInternalEventBatchesRequireTenantID(t *testing.T) {
+	handler := NewWithOptions(
+		control.NewService(storage.NewMemoryStore(), "http://localhost:8080"),
+		auth.NewDynamicKeys(nil).WithAdminKey("admin-key-with-at-least-thirty-two-bytes"),
+		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
+	)
+
+	cases := []struct {
+		path string
+		body string
+	}{
+		{path: "/v1/internal/usage-events:batch", body: `{"events":[{"event_id":"evt-1","lease_id":"lease-1","bytes_sent":1,"bytes_received":2,"occurred_at":"2026-04-29T00:00:00Z"}]}`},
+		{path: "/v1/internal/gateway-feedback:batch", body: `{"events":[{"event_id":"evt-1","action":"gateway_feedback","resource":"proxy-a","occurred_at":"2026-04-29T00:00:00Z"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}

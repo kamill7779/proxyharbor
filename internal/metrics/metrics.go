@@ -209,7 +209,7 @@ func writeMetrics(w http.ResponseWriter) {
 				last += v
 			}
 			fmt.Fprintf(w, "%s_bucket%s %d\n", m.name, mergeLabels(m.labels, "le=\"+Inf\""), count)
-			fmt.Fprintf(w, "%s_sum%s %g\\n", m.name, formatLabels(m.labels), sum)
+			fmt.Fprintf(w, "%s_sum%s %g\n", m.name, formatLabels(m.labels), sum)
 			fmt.Fprintf(w, "%s_count%s %d\n\n", m.name, formatLabels(m.labels), count)
 		}
 	}

@@ -49,7 +49,10 @@ func TestWriteMetricsPreservesHistogramSumPrecision(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeMetrics(rec)
 	body := rec.Body.String()
-	if !strings.Contains(body, "proxyharbor_test_histogram_sum 1.75") {
+	if !strings.Contains(body, "\nproxyharbor_test_histogram_sum 1.75\n") {
 		t.Fatalf("metrics body = %q, want histogram sum 1.75", body)
+	}
+	if strings.Contains(body, `\nproxyharbor_test_histogram_count`) {
+		t.Fatalf("metrics body contains literal backslash-n before count: %q", body)
 	}
 }
