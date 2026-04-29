@@ -373,6 +373,56 @@ func sqliteDoctorChecks(path string) error {
 	if version != 1 {
 		return fmt.Errorf("sqlite schema version %d does not match expected 1", version)
 	}
+	if err := sqliteIntegrityCheck(path); err != nil {
+		return err
+	}
+	if err := verifySQLiteBackupMetadata(path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sqliteIntegrityCheck(path string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var result string
+	if err := db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("sqlite quick_check failed: %s", result)
+	}
+	return nil
+}
+
+func verifySQLiteBackupMetadata(path string) error {
+	metadataPath := path + ".metadata.json"
+	data, err := os.ReadFile(metadataPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var metadata sqliteBackupMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("decode backup metadata: %w", err)
+	}
+	if metadata.ChecksumSHA256 == "" {
+		return errors.New("backup metadata missing checksum")
+	}
+	checksum, err := fileSHA256(path)
+	if err != nil {
+		return err
+	}
+	if checksum != metadata.ChecksumSHA256 {
+		return fmt.Errorf("backup metadata checksum mismatch: got %s want %s", checksum, metadata.ChecksumSHA256)
+	}
 	return nil
 }
 

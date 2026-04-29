@@ -27,7 +27,7 @@ type labeledMetric struct {
 	gval    *atomic.Int64
 	bounds  []float64
 	buckets []int64
-	sum     int64
+	sum     float64
 	count   int64
 }
 
@@ -119,7 +119,7 @@ func (h *Histogram) Observe(v float64) {
 	h.m.mu.Lock()
 	defer h.m.mu.Unlock()
 	h.m.count++
-	h.m.sum += int64(v)
+	h.m.sum += v
 	for i, bound := range h.m.bounds {
 		if v <= bound {
 			h.m.buckets[i]++
@@ -209,7 +209,7 @@ func writeMetrics(w http.ResponseWriter) {
 				last += v
 			}
 			fmt.Fprintf(w, "%s_bucket%s %d\n", m.name, mergeLabels(m.labels, "le=\"+Inf\""), count)
-			fmt.Fprintf(w, "%s_sum%s %d\n", m.name, formatLabels(m.labels), sum)
+			fmt.Fprintf(w, "%s_sum%s %g\\n", m.name, formatLabels(m.labels), sum)
 			fmt.Fprintf(w, "%s_count%s %d\n\n", m.name, formatLabels(m.labels), count)
 		}
 	}

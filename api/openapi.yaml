@@ -30,6 +30,52 @@ paths:
       responses:
         '200':
           description: version
+  /v1/internal/usage-events:batch:
+    post:
+      summary: Record gateway usage events
+      description: Admin-only internal endpoint used by gateway instances to append usage events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsageEventsBatchRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+  /v1/internal/gateway-feedback:batch:
+    post:
+      summary: Record gateway health feedback events
+      description: Admin-only internal endpoint used by gateway instances to append proxy health feedback events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GatewayFeedbackBatchRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /admin/tenants:
     get:
       summary: List tenants
@@ -1013,3 +1059,64 @@ components:
           type: string
         candidate_set_id:
           type: string
+    AcceptedResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+    UsageEventsBatchRequest:
+      type: object
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageEvent'
+    GatewayFeedbackBatchRequest:
+      type: object
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+    UsageEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+        tenant_id:
+          type: string
+        lease_id:
+          type: string
+        bytes_sent:
+          type: integer
+          format: int64
+        bytes_received:
+          type: integer
+          format: int64
+        occurred_at:
+          type: string
+          format: date-time
+    AuditEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+        tenant_id:
+          type: string
+        principal_id:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties:
+            type: string

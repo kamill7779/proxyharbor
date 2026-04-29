@@ -188,6 +188,47 @@ func TestSQLiteBackupMetadataChecksumMatchesBackup(t *testing.T) {
 	}
 }
 
+func TestSQLiteDoctorRejectsMetadataChecksumMismatch(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "proxyharbor.db")
+	dest := filepath.Join(dir, "backup.db")
+	initTestOpsDB(t, source)
+	if err := sqliteBackup(source, dest, false); err != nil {
+		t.Fatalf("sqliteBackup() error = %v", err)
+	}
+	metadataBytes, err := os.ReadFile(dest + ".metadata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata sqliteBackupMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadata.ChecksumSHA256 = strings.Repeat("0", 64)
+	damaged, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest+".metadata.json", damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = sqliteDoctorChecks(dest)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("err = %v, want checksum mismatch", err)
+	}
+}
+
+func TestSQLiteDoctorRejectsCorruptDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "proxyharbor.db")
+	if err := os.WriteFile(dbPath, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := sqliteDoctorChecks(dbPath)
+	if err == nil {
+		t.Fatal("sqliteDoctorChecks() error = nil, want corrupt database error")
+	}
+}
+
 func TestRestoreCommandCanValidateWithDoctor(t *testing.T) {
 	dir := t.TempDir()
 	backup := filepath.Join(dir, "backup.db")

@@ -18,6 +18,8 @@ REQUESTS=1000 CONCURRENCY=32 PROXIES=16 OPERATION=mixed OUTPUT=json OUT=artifact
 
 By default the wrapper starts `docker-compose.yaml` with the single SQLite profile, waits for `/readyz`, creates a benchmark tenant/key, registers healthy local proxy endpoints, warms lease state, and then measures the selected operation. Use `-SkipDocker` or `SKIP_DOCKER=true` when the service is already running.
 
+The wrapper keeps internal/private proxy endpoints disabled by default. If the benchmark proxies are loopback or private-network URLs, opt in explicitly with `-AllowInternal` on PowerShell or `ALLOW_INTERNAL=true` on bash.
+
 ## Covered operations
 
 - `lease_create`: tenant-key authenticated `POST /v1/leases` with unique idempotency keys.
