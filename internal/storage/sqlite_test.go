@@ -283,3 +283,44 @@ func testLease(id string) domain.Lease {
 		CreatedAt: now, UpdatedAt: now,
 	}
 }
+
+func TestSQLitePerformancePragmasAndIndexes(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+
+	pragmaChecks := map[string]int{
+		"foreign_keys": 1,
+		"busy_timeout": 5000,
+		"synchronous":  1,
+		"temp_store":   2,
+	}
+	for name, want := range pragmaChecks {
+		var got int
+		if err := store.DB().QueryRowContext(ctx, "PRAGMA "+name).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s error = %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("PRAGMA %s = %d, want %d", name, got, want)
+		}
+	}
+
+	wantIndexes := []string{
+		"idx_proxy_leases_active",
+		"idx_proxy_leases_renew_cas",
+		"idx_proxy_leases_proxy_active",
+		"idx_proxy_idempotency_tenant_created",
+		"idx_proxy_usage_events_tenant_order",
+		"idx_proxies_selectable",
+		"idx_proxy_catalog_snapshots_fresh",
+		"idx_tenant_keys_active_refresh",
+	}
+	for _, name := range wantIndexes {
+		var count int
+		if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&count); err != nil {
+			t.Fatalf("index lookup %s error = %v", name, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", name, count)
+		}
+	}
+}
