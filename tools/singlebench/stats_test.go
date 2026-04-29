@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,20 @@ func TestSummaryComputesLatencyAndDistributions(t *testing.T) {
 	}
 	if summary.ProxyDistribution["proxy-a"] != 2 || summary.ProxyDistribution["proxy-b"] != 1 {
 		t.Fatalf("proxy distribution = %#v", summary.ProxyDistribution)
+	}
+}
+
+func TestRequestJSONStatusReturnsMarshalError(t *testing.T) {
+	_, _, err := requestJSONStatus(context.Background(), http.DefaultClient, http.MethodPost, "http://127.0.0.1", "key", "", map[string]any{"bad": make(chan int)})
+	if err == nil || !strings.Contains(err.Error(), "unsupported type") {
+		t.Fatalf("err = %v, want JSON marshal error", err)
+	}
+}
+
+func TestRunRequiresAdminKeyOutsideDocker(t *testing.T) {
+	err := run(context.Background(), config{BaseURL: "http://127.0.0.1", Timeout: time.Millisecond}, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "admin key required") {
+		t.Fatalf("err = %v, want admin key requirement", err)
 	}
 }
 

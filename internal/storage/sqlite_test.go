@@ -188,6 +188,31 @@ func TestSQLiteProxyRoundTripScansLastSeenAt(t *testing.T) {
 	}
 }
 
+func TestSQLiteUpsertProxyPreservesExistingHealthStateWhenUnset(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	if _, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1, HealthScore: 100}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	observedAt := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		if err := store.RecordProxyOutcome(ctx, "proxy-a", ProxyHealthDelta{ObservedAt: observedAt, Success: false, MaxConsecutiveFailure: 1, BaseCooldown: time.Minute, MaxCooldown: 2 * time.Minute}); err != nil {
+			t.Fatalf("RecordProxyOutcome() error = %v", err)
+		}
+	}
+	before, err := store.GetProxy(ctx, "proxy-a")
+	if err != nil {
+		t.Fatalf("GetProxy() error = %v", err)
+	}
+	updated, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:9090", Healthy: true, Weight: 2})
+	if err != nil {
+		t.Fatalf("UpsertProxy() update error = %v", err)
+	}
+	if updated.HealthScore != before.HealthScore || updated.ConsecutiveFailures != before.ConsecutiveFailures || !updated.CircuitOpenUntil.Equal(before.CircuitOpenUntil) {
+		t.Fatalf("health state was not preserved: before=%+v after=%+v", before, updated)
+	}
+}
+
 func TestSQLiteProxyFailureUsesCappedCooldown(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	ctx := context.Background()

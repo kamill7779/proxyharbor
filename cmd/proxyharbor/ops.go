@@ -159,9 +159,6 @@ func sqliteBackup(input, output string, offline bool) error {
 	if output == "" {
 		return errors.New("backup requires --output")
 	}
-	if !offline && hasSQLiteSidecarFiles(input) {
-		return errors.New("online backup found SQLite sidecar files; stop ProxyHarbor or checkpoint -wal/-shm before retrying")
-	}
 	if offline && hasSQLiteSidecarFiles(input) {
 		return errors.New("offline SQLite backup requires checkpointed database; stop ProxyHarbor and remove or checkpoint -wal/-shm files first")
 	}
@@ -202,24 +199,6 @@ func vacuumIntoSQLite(input, output string) error {
 	return os.Chmod(dest, 0o600)
 }
 
-func offlineSQLiteBackup(input, output string, offline bool) error {
-	input = strings.TrimSpace(input)
-	output = strings.TrimSpace(output)
-	if input == "" {
-		return errors.New("sqlite backup unsupported: set --sqlite-path or PROXYHARBOR_SQLITE_PATH after SQLite storage is integrated")
-	}
-	if output == "" {
-		return errors.New("backup requires --output")
-	}
-	if !offline {
-		return errors.New("file-level SQLite backup requires --offline to confirm ProxyHarbor is stopped; online backup API is reserved for SQLite Store integration")
-	}
-	if hasSQLiteSidecarFiles(input) {
-		return errors.New("offline SQLite backup requires checkpointed database; stop ProxyHarbor and remove or checkpoint -wal/-shm files first")
-	}
-	return copySQLiteFile(input, output, false)
-}
-
 func offlineSQLiteRestore(input, output string, force bool) error {
 	input = strings.TrimSpace(input)
 	output = strings.TrimSpace(output)
@@ -235,7 +214,35 @@ func offlineSQLiteRestore(input, output string, force bool) error {
 	if hasSQLiteSidecarFiles(output) {
 		return errors.New("offline SQLite restore requires a clean destination; remove or checkpoint existing -wal/-shm files first")
 	}
-	return copySQLiteFile(input, output, true)
+	return replaceSQLiteFile(input, output)
+}
+
+func replaceSQLiteFile(input, output string) error {
+	dest, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".restore-*.db")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := copySQLiteFile(input, tmpPath, true); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func copySQLiteFile(input, output string, replace bool) error {

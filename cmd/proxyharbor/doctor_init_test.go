@@ -87,7 +87,7 @@ func TestDoctorSQLiteChecksFileSchemaAndSidecars(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("doctor exit code = %d, want 1; output: %s", code, out.String())
 	}
-	for _, want := range []string{"sqlite file", "sqlite schema version", "sqlite sidecar -wal", "sqlite disk space"} {
+	for _, want := range []string{"sqlite file", "sqlite schema version", "sqlite sidecar -wal", "sqlite parent writable"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("doctor output missing %q: %s", want, out.String())
 		}

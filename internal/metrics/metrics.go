@@ -193,7 +193,7 @@ func writeMetrics(w http.ResponseWriter) {
 			fmt.Fprintf(w, "%s%s %d\n\n", m.name, formatLabels(m.labels), m.val.Load())
 		case metricGauge:
 			writeMetricHeader(w, headerWritten, m, "gauge")
-			fmt.Fprintf(w, "%s %d\n\n", m.name, m.gval.Load())
+			fmt.Fprintf(w, "%s %g\n\n", m.name, float64(m.gval.Load())/1000)
 		case metricHistogram:
 			writeMetricHeader(w, headerWritten, m, "histogram")
 			m.mu.Lock()

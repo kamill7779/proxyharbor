@@ -60,12 +60,16 @@ spec:
               value: {{ .Values.mysql.maxIdle | quote }}
             - name: PROXYHARBOR_MYSQL_CONN_MAX_AGE
               value: {{ .Values.mysql.connMaxAge | quote }}
+            {{- if .Values.redis.addr }}
             - name: PROXYHARBOR_REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
+            {{- end }}
             - name: PROXYHARBOR_SELECTOR_REDIS_REQUIRED
               value: {{ .Values.redis.selectorRedisRequired | quote }}
+            {{- if .Values.redis.addr }}
             - name: PROXYHARBOR_REDIS_DB
               value: {{ .Values.redis.db | quote }}
+            {{- end }}
             - name: PROXYHARBOR_CACHE_TTL
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT

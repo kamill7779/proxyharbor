@@ -456,7 +456,7 @@ func runSQLiteDoctorChecks(path string, check func(bool, string, string)) {
 			check(version == 1, "sqlite schema version", fmt.Sprintf("version=%d expected=1", version))
 		}
 	}
-	check(sqliteParentWritable(path) == nil, "sqlite disk space", "parent accepts writes")
+	check(sqliteParentWritable(path) == nil, "sqlite parent writable", "parent accepts writes")
 }
 
 func newLogger(cfg config.Config) *slog.Logger {

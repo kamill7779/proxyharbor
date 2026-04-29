@@ -13,47 +13,24 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestOfflineSQLiteBackupRequiresExplicitOffline(t *testing.T) {
+func TestSQLiteBackupRejectsSamePath(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "proxyharbor.db")
-	if err := os.WriteFile(source, []byte("db"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	initTestOpsDB(t, source)
 
-	err := offlineSQLiteBackup(source, filepath.Join(t.TempDir(), "backup.db"), false)
-	if err == nil || !strings.Contains(err.Error(), "--offline") {
-		t.Fatalf("err = %v, want --offline guidance", err)
-	}
-}
-
-func TestOfflineSQLiteBackupRejectsSamePath(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "proxyharbor.db")
-	if err := os.WriteFile(source, []byte("db"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := offlineSQLiteBackup(source, source, true)
+	err := sqliteBackup(source, source, false)
 	if err == nil || !strings.Contains(err.Error(), "must differ") {
 		t.Fatalf("err = %v, want same-path rejection", err)
 	}
 }
 
-func TestOfflineSQLiteBackupCopiesFileWhenOffline(t *testing.T) {
+func TestSQLiteBackupCreatesRestrictedFile(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "proxyharbor.db")
 	dest := filepath.Join(dir, "backup.db")
-	if err := os.WriteFile(source, []byte("db contents"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	initTestOpsDB(t, source)
 
-	if err := offlineSQLiteBackup(source, dest, true); err != nil {
-		t.Fatalf("offlineSQLiteBackup returned error: %v", err)
-	}
-	got, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "db contents" {
-		t.Fatalf("backup contents = %q", got)
+	if err := sqliteBackup(source, dest, false); err != nil {
+		t.Fatalf("sqliteBackup returned error: %v", err)
 	}
 	info, err := os.Stat(dest)
 	if err != nil {
@@ -73,7 +50,7 @@ func TestOfflineSQLiteBackupRejectsSidecarFiles(t *testing.T) {
 	if err := os.WriteFile(source+"-wal", []byte("wal"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := offlineSQLiteBackup(source, filepath.Join(dir, "backup.db"), true)
+	err := sqliteBackup(source, filepath.Join(dir, "backup.db"), true)
 	if err == nil || !strings.Contains(err.Error(), "checkpointed") {
 		t.Fatalf("err = %v, want sidecar checkpoint guidance", err)
 	}
@@ -104,6 +81,36 @@ func TestOfflineSQLiteRestoreRejectsDestinationSidecarFiles(t *testing.T) {
 	err := offlineSQLiteRestore(backup, target, true)
 	if err == nil || !strings.Contains(err.Error(), "clean destination") {
 		t.Fatalf("err = %v, want clean destination guidance", err)
+	}
+}
+
+func TestOfflineSQLiteRestoreReplacesTargetAtomically(t *testing.T) {
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "backup.db")
+	target := filepath.Join(dir, "proxyharbor.db")
+	if err := os.WriteFile(backup, []byte("new database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := offlineSQLiteRestore(backup, target, true); err != nil {
+		t.Fatalf("offlineSQLiteRestore() error = %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new database" {
+		t.Fatalf("target = %q, want restored backup", string(got))
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".restore-*.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary restore files left behind: %v", matches)
 	}
 }
 
@@ -153,6 +160,31 @@ func TestBackupCommandWritesMetadataAndUsableCopy(t *testing.T) {
 	}
 	if metadata.SourcePath == "" || metadata.SchemaVersion != 1 || metadata.CreatedAt == "" || metadata.ChecksumSHA256 == "" {
 		t.Fatalf("metadata missing fields: %+v", metadata)
+	}
+}
+
+func TestSQLiteBackupMetadataChecksumMatchesBackup(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "proxyharbor.db")
+	dest := filepath.Join(dir, "backup.db")
+	initTestOpsDB(t, source)
+	if err := sqliteBackup(source, dest, false); err != nil {
+		t.Fatalf("sqliteBackup() error = %v", err)
+	}
+	metadataBytes, err := os.ReadFile(dest + ".metadata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata sqliteBackupMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	checksum, err := fileSHA256(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ChecksumSHA256 != checksum {
+		t.Fatalf("metadata checksum = %s, want %s", metadata.ChecksumSHA256, checksum)
 	}
 }
 

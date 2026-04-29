@@ -1,5 +1,5 @@
 # ProxyHarbor HA compose example: MySQL + Redis + ProxyHarbor.
-# Use this profile for multi-instance parity or until SQLite store integration lands.
+# Use this profile for multi-instance parity and HA validation.
 # ProxyHarbor docker-compose
 # Local HA bundle: MySQL + Redis + ProxyHarbor.
 

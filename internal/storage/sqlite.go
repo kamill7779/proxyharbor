@@ -343,7 +343,21 @@ func (s *SQLiteStore) UpsertProxy(ctx context.Context, proxy domain.Proxy) (doma
 		proxy.Weight = 1
 	}
 	if proxy.HealthScore == 0 {
-		proxy.HealthScore = 100
+		existing, err := s.GetProxy(ctx, proxy.ID)
+		if err == nil {
+			proxy.HealthScore = existing.HealthScore
+			proxy.ConsecutiveFailures = existing.ConsecutiveFailures
+			proxy.CircuitOpenUntil = existing.CircuitOpenUntil
+			proxy.LatencyEWMAms = existing.LatencyEWMAms
+			proxy.LastCheckedAt = existing.LastCheckedAt
+			proxy.LastSuccessAt = existing.LastSuccessAt
+			proxy.LastFailureAt = existing.LastFailureAt
+			proxy.FailureHint = existing.FailureHint
+		} else if errors.Is(err, domain.ErrNotFound) {
+			proxy.HealthScore = 100
+		} else {
+			return domain.Proxy{}, err
+		}
 	}
 	if proxy.LastSeenAt.IsZero() {
 		proxy.LastSeenAt = now

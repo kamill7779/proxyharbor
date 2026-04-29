@@ -3,14 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,26 +25,24 @@ import (
 	"time"
 )
 
-const (
-	defaultAdminKey = "dev-admin-key-min-32-chars-long!!!!"
-	defaultPepper   = "dev-key-pepper-min-32-bytes-random!!!!"
-)
+const generatedSecretBytes = 32
 
 type config struct {
-	BaseURL      string
-	AdminKey     string
-	TenantID     string
-	ProxyCount   int
-	Requests     int
-	Concurrency  int
-	Operation    string
-	Output       string
-	OutPath      string
-	StartDocker  bool
-	ComposeFile  string
-	HostPort     string
-	WarmupLeases int
-	Timeout      time.Duration
+	BaseURL                    string
+	AdminKey                   string
+	TenantID                   string
+	ProxyCount                 int
+	Requests                   int
+	Concurrency                int
+	Operation                  string
+	Output                     string
+	OutPath                    string
+	StartDocker                bool
+	AllowInternalProxyEndpoint bool
+	ComposeFile                string
+	HostPort                   string
+	WarmupLeases               int
+	Timeout                    time.Duration
 }
 
 type benchmarkSummary struct {
@@ -91,7 +91,7 @@ func main() {
 func parseFlags() config {
 	cfg := config{}
 	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://localhost:18080"), "ProxyHarbor base URL")
-	flag.StringVar(&cfg.AdminKey, "admin-key", envDefault("PROXYHARBOR_ADMIN_KEY", defaultAdminKey), "admin key for setup and admin endpoints")
+	flag.StringVar(&cfg.AdminKey, "admin-key", envDefault("PROXYHARBOR_ADMIN_KEY", ""), "admin key for setup and admin endpoints")
 	flag.StringVar(&cfg.TenantID, "tenant", "bench-tenant", "tenant id used by benchmark")
 	flag.IntVar(&cfg.ProxyCount, "proxies", 8, "number of proxies to seed")
 	flag.IntVar(&cfg.Requests, "requests", 200, "number of measured requests")
@@ -100,6 +100,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.Output, "output", "json", "output format: json or csv")
 	flag.StringVar(&cfg.OutPath, "out", "", "optional output file path")
 	flag.BoolVar(&cfg.StartDocker, "docker", false, "start docker compose single profile and wait for readiness")
+	flag.BoolVar(&cfg.AllowInternalProxyEndpoint, "allow-internal-proxy-endpoint", false, "allow benchmark proxy endpoints on internal/private addresses")
 	flag.StringVar(&cfg.ComposeFile, "compose-file", "docker-compose.yaml", "compose file for -docker")
 	flag.StringVar(&cfg.HostPort, "host-port", "18080", "host port for -docker")
 	flag.IntVar(&cfg.WarmupLeases, "warmup-leases", 32, "leases to pre-create for renew/validate/mixed")
@@ -118,6 +119,16 @@ func parseFlags() config {
 }
 
 func run(ctx context.Context, cfg config, stdout io.Writer) error {
+	if cfg.AdminKey == "" {
+		if !cfg.StartDocker {
+			return errors.New("admin key required: set --admin-key or PROXYHARBOR_ADMIN_KEY")
+		}
+		secret, err := randomHexSecret()
+		if err != nil {
+			return err
+		}
+		cfg.AdminKey = secret
+	}
 	if cfg.StartDocker {
 		if err := startDocker(ctx, cfg); err != nil {
 			return err
@@ -153,14 +164,25 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 }
 
 func startDocker(ctx context.Context, cfg config) error {
+	pepper := envDefault("PROXYHARBOR_KEY_PEPPER", "")
+	if pepper == "" {
+		secret, err := randomHexSecret()
+		if err != nil {
+			return err
+		}
+		pepper = secret
+	}
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", cfg.ComposeFile, "up", "-d", "--build", "--pull", "never")
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"PROXYHARBOR_HOST_PORT="+cfg.HostPort,
 		"PROXYHARBOR_ADMIN_KEY="+cfg.AdminKey,
-		"PROXYHARBOR_KEY_PEPPER="+envDefault("PROXYHARBOR_KEY_PEPPER", defaultPepper),
-		"PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true",
+		"PROXYHARBOR_KEY_PEPPER="+pepper,
 		"PROXYHARBOR_AUTH_REFRESH_INTERVAL=1s",
 	)
+	if cfg.AllowInternalProxyEndpoint {
+		env = append(env, "PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true")
+	}
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(out)))
@@ -261,7 +283,7 @@ func exercise(ctx context.Context, client *http.Client, cfg config, tenantKey st
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano() + int64(workerID)))
 			for i := range jobs {
 				operation := pickOperation(cfg.Operation, i)
 				lease := warmups[rng.Intn(len(warmups))]
@@ -371,7 +393,10 @@ func requestJSON(ctx context.Context, client *http.Client, method, endpoint, key
 func requestJSONStatus(ctx context.Context, client *http.Client, method, endpoint, key, idempotency string, payload any) ([]byte, int, error) {
 	var reader io.Reader
 	if payload != nil {
-		raw, _ := json.Marshal(payload)
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, err
+		}
 		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
@@ -398,6 +423,14 @@ func requestJSONStatus(ctx context.Context, client *http.Client, method, endpoin
 		return body, resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, resp.StatusCode, nil
+}
+
+func randomHexSecret() (string, error) {
+	raw := make([]byte, generatedSecretBytes)
+	if _, err := cryptorand.Read(raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 func statusFromErr(err error, successStatus int) int {
