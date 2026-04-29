@@ -17,13 +17,13 @@ Start the lightweight single-node profile with one command. It uses SQLite persi
 **PowerShell:**
 
 ```powershell
-$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY="dev-admin-key-min-32-chars-long!!!!"; $env:PROXYHARBOR_KEY_PEPPER="dev-key-pepper-min-32-bytes-random!!!!"; docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
+$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); $env:PROXYHARBOR_KEY_PEPPER=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
 ```
 
 **bash:**
 
 ```bash
-PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=dev-admin-key-min-32-chars-long!!!! PROXYHARBOR_KEY_PEPPER=dev-key-pepper-min-32-bytes-random!!!! docker compose up -d --build --pull never
+PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32) PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32) docker compose up -d --build --pull never
 curl http://localhost:18080/readyz
 ```
 
