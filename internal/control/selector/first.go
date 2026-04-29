@@ -2,6 +2,7 @@ package selector
 
 import (
 	"context"
+	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
@@ -10,8 +11,9 @@ type FirstSelectable struct{}
 
 func (FirstSelectable) Select(_ context.Context, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	var selected domain.Proxy
+	now := time.Now()
 	for _, candidate := range candidates {
-		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+		if !eligible(candidate, now) {
 			continue
 		}
 		if selected.ID == "" || candidate.Weight > selected.Weight || (candidate.Weight == selected.Weight && candidate.ID < selected.ID) {

@@ -62,3 +62,32 @@ func TestCreateLeaseReturnsTenantScopedGatewayUsername(t *testing.T) {
 		t.Fatalf("created username = %q, want %q", created.Username, "tenant-a|"+created.ID)
 	}
 }
+
+func TestCreateLeaseDefaultSelectorRotatesLocalProxies(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemoryStore()
+	for _, proxy := range []domain.Proxy{
+		{ID: "proxy-a", Endpoint: "http://proxy-a.local:8080", Healthy: true, Weight: 1},
+		{ID: "proxy-b", Endpoint: "http://proxy-b.local:8080", Healthy: true, Weight: 1},
+	} {
+		if _, err := store.UpsertProxy(ctx, proxy); err != nil {
+			t.Fatalf("UpsertProxy() error = %v", err)
+		}
+	}
+	svc := NewService(store, "http://gateway.local")
+	seen := map[string]bool{}
+
+	for i := 0; i < 4; i++ {
+		created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-local-"+string(rune('a'+i)), CreateLeaseRequest{
+			Subject:     domain.Subject{Type: "user", ID: "user-a"},
+			ResourceRef: domain.ResourceRef{Kind: "url", ID: "https://example.com/resource"},
+		})
+		if err != nil {
+			t.Fatalf("CreateLease() error = %v", err)
+		}
+		seen[created.ProxyID] = true
+	}
+	if !seen["proxy-a"] || !seen["proxy-b"] {
+		t.Fatalf("seen proxies = %+v, want both proxy-a and proxy-b", seen)
+	}
+}

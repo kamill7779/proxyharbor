@@ -181,8 +181,9 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 	}
 	candidateByID := make(map[string]domain.Proxy, len(candidates))
 	pipe := s.client.Pipeline()
+	now := s.now()
 	for _, candidate := range candidates {
-		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+		if !eligible(candidate, now) {
 			continue
 		}
 		latencyMS := candidate.LatencyEWMAms
@@ -212,7 +213,7 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 	}
 
 	keys := []string{readyKey(), delayedKey(), nodePrefix()}
-	args := []any{s.now().UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
+	args := []any{now.UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
 	for proxyID := range candidateByID {
 		args = append(args, proxyID)
 	}
@@ -255,7 +256,7 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, candidates map[string
 	pipe := s.client.Pipeline()
 	nowMS := s.now().UTC().UnixMilli()
 	for proxyID, candidate := range candidates {
-		if !candidate.Healthy || candidate.Weight <= 0 || candidate.HealthScore <= 0 {
+		if !eligible(candidate, time.UnixMilli(nowMS)) {
 			continue
 		}
 		nodeKey := nodeKey(proxyID)
