@@ -351,6 +351,7 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 		check(strings.TrimSpace(cfg.SQLitePath) != "", "sqlite path configured", "set PROXYHARBOR_SQLITE_PATH or -sqlite-path")
 		if strings.TrimSpace(cfg.SQLitePath) != "" {
 			check(sqliteParentWritable(cfg.SQLitePath) == nil, "sqlite path parent writable", "parent directory must be writable")
+			runSQLiteDoctorChecks(cfg.SQLitePath, check)
 		}
 	default:
 		check(false, "storage driver supported", "use sqlite, mysql, or memory")
@@ -426,6 +427,36 @@ func sqliteParentWritable(path string) error {
 		return closeErr
 	}
 	return removeErr
+}
+
+func runSQLiteDoctorChecks(path string, check func(bool, string, string)) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		check(true, "sqlite file", "not created yet")
+	} else if err != nil {
+		check(false, "sqlite file", err.Error())
+	} else {
+		check(info.Mode().IsRegular(), "sqlite file", fmt.Sprintf("size=%d bytes", info.Size()))
+		check(info.Size() < 1<<40, "sqlite file size", fmt.Sprintf("size=%d bytes", info.Size()))
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err == nil {
+			check(false, "sqlite sidecar "+suffix, "sidecar exists; stop process or checkpoint WAL before backup/restore")
+		} else if errors.Is(err, os.ErrNotExist) {
+			check(true, "sqlite sidecar "+suffix, "absent")
+		} else {
+			check(false, "sqlite sidecar "+suffix, err.Error())
+		}
+	}
+	if err == nil && info.Mode().IsRegular() {
+		version, err := sqliteSchemaVersionOf(path)
+		if err != nil {
+			check(false, "sqlite schema version", err.Error())
+		} else {
+			check(version == 1, "sqlite schema version", fmt.Sprintf("version=%d expected=1", version))
+		}
+	}
+	check(sqliteParentWritable(path) == nil, "sqlite disk space", "parent accepts writes")
 }
 
 func newLogger(cfg config.Config) *slog.Logger {

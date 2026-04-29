@@ -1,18 +1,19 @@
 # ProxyHarbor Monolith Operations Runbook
 
-This runbook covers the v0.4.3 single-node SQLite operations path. SQLite storage may be integrated by another v0.4.3 worker; until then, the operations primitives are safe to build and call independently.
+This runbook covers the v0.4.5 single-node SQLite operations path.
 
 ## Scope
 
 - Single ProxyHarbor process or an explicitly stopped process.
 - SQLite for small monolith deployments; MySQL + Redis remains the HA path.
-- File-level SQLite backup/restore only when the process is offline. Online backup is reserved for the SQLite Store integration.
+- Backup/restore for one SQLite database file on one host.
+- MySQL + Redis remains the HA path; this runbook does not define automatic SQLite to MySQL migration.
 
 ## Init
 
 1. Choose a persistent DB path on local disk or a mounted volume/PVC.
-2. Set the future SQLite path with either `--sqlite-path` on ops commands or `PROXYHARBOR_SQLITE_PATH`.
-3. Start the service only after the SQLite Store has created and migrated the DB.
+2. Set the SQLite path with either `--sqlite-path` on ops commands or `PROXYHARBOR_SQLITE_PATH`.
+3. Run `proxyharbor init --storage sqlite --sqlite-path /var/lib/proxyharbor/proxyharbor.db` before first start.
 4. Ensure the DB file and parent directory are readable/writable only by the service account.
 
 Expected schema version table:
@@ -38,18 +39,19 @@ proxyharbor backup --sqlite-path /var/lib/proxyharbor/proxyharbor.db --output /v
 
 ## Backup
 
-Offline file-level backup is intentionally explicit:
+Backup refuses to overwrite an existing output path and writes the DB file with mode `0600` plus a sidecar metadata file:
 
 ```bash
-proxyharbor backup --sqlite-path /var/lib/proxyharbor/proxyharbor.db --output /var/backups/proxyharbor/proxyharbor-$(date +%F).db --offline
+proxyharbor backup --sqlite-path /var/lib/proxyharbor/proxyharbor.db --output /var/backups/proxyharbor/proxyharbor-$(date +%F).db
 ```
 
 Rules:
 
-- Stop ProxyHarbor before running this command.
+- If `-wal` or `-shm` sidecar files exist, stop ProxyHarbor or checkpoint WAL before running this command.
 - Do not copy a live SQLite file with generic `cp` while writes may be active.
 - The command refuses to overwrite an existing backup path.
-- When SQLite Store exposes an online backup API, wire `proxyharbor backup` to that API and remove the offline-only requirement for online mode.
+- The metadata sidecar is `<backup>.metadata.json` and includes source path, schema version, creation time, backup path, and SHA-256 checksum.
+- `--offline` remains accepted as an explicit operator assertion; the same sidecar safety checks still apply.
 
 ## Restore
 
@@ -58,18 +60,21 @@ Restore replaces the target DB, so it requires an explicit confirmation flag:
 ```bash
 systemctl stop proxyharbor
 proxyharbor restore --input /var/backups/proxyharbor/pre-upgrade.db --sqlite-path /var/lib/proxyharbor/proxyharbor.db --force
+proxyharbor restore --input /var/backups/proxyharbor/pre-upgrade.db --sqlite-path /var/lib/proxyharbor/verify.db --force --doctor
 systemctl start proxyharbor
 ```
 
 Rules:
 
 - Stop ProxyHarbor first.
+- `--force` is mandatory.
+- The command refuses to restore over a target that has `-wal` or `-shm` sidecars.
 - Restore to a different temp path first if you need manual inspection.
-- After restore, run the service health/doctor path once available for SQLite.
+- Use `--doctor` after restore to validate that the restored DB opens and has the expected schema version.
 
 ## Retention
 
-Retention defaults to disabled to avoid surprising data loss.
+Retention defaults to dry-run to avoid surprising data loss. It only targets `proxy_audit_events` and `proxy_usage_events`; it never deletes tenants, keys, proxies, policies, leases, or catalog rows.
 
 Configuration:
 
@@ -82,11 +87,36 @@ The reusable SQL builder only deletes from:
 - `proxy_audit_events` by `occurred_at`
 - `proxy_usage_events` by `occurred_at`
 
-Preview the SQL skeleton without connecting to a DB:
+Preview row counts without deleting:
 
 ```bash
-proxyharbor retention --audit-days 30 --usage-days 7
+proxyharbor retention --sqlite-path /var/lib/proxyharbor/proxyharbor.db --audit-days 30 --usage-days 7
 ```
+
+Execute in one transaction and print deleted rows:
+
+```bash
+proxyharbor retention --sqlite-path /var/lib/proxyharbor/proxyharbor.db --audit-days 30 --usage-days 7 --execute
+```
+
+If `--sqlite-path` is omitted, the command prints the SQL skeleton for compatibility and does not connect to a DB.
+
+## Doctor
+
+Run doctor before upgrades, after restore, and when investigating local storage issues:
+
+```bash
+proxyharbor doctor --storage sqlite --sqlite-path /var/lib/proxyharbor/proxyharbor.db
+```
+
+Doctor checks:
+
+- SQLite path is configured.
+- Parent directory exists and accepts writes.
+- DB file exists, is regular, and reports file size.
+- Schema version matches the binary expectation.
+- Suspicious `-wal` / `-shm` sidecars are absent for maintenance operations.
+- Basic write probe succeeds as a local disk-space/permission signal.
 
 ## Container Volumes and PVCs
 
@@ -95,6 +125,8 @@ proxyharbor retention --audit-days 30 --usage-days 7
 - Use filesystem-level snapshots only when the process is stopped or when the storage layer provides a consistent snapshot primitive.
 
 ## SQLite to MySQL Manual Path
+
+ProxyHarbor does not provide automatic SQLite to MySQL migration in v0.4.5. Use a manual, operator-reviewed path:
 
 1. Stop writes to the SQLite monolith.
 2. Take an offline SQLite backup and keep it immutable.
