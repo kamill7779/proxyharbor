@@ -101,6 +101,10 @@ func runRetentionCommand(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if strings.TrimSpace(*sqlitePath) == "" {
+		if *execute {
+			fmt.Fprintln(stderr, "retention execute requires --sqlite-path or PROXYHARBOR_SQLITE_PATH")
+			return 1
+		}
 		for _, statement := range statements {
 			fmt.Fprintf(stdout, "%s: %s; cutoff = now - %d days\n", statement.Kind, statement.SQL, statement.RetentionDays)
 		}

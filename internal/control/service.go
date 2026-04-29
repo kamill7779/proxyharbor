@@ -132,7 +132,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 		return domain.Lease{}, err
 	}
 
-	if saved.ID == lease.ID && saved.PasswordHash == lease.PasswordHash && saved.CreatedAt.Equal(lease.CreatedAt) {
+	if saved.ID == lease.ID && saved.PasswordHash == lease.PasswordHash {
 		saved.Password = plaintext
 	}
 	return saved, nil

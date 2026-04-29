@@ -125,6 +125,18 @@ func TestRunOpsCommandDispatchesRetention(t *testing.T) {
 	}
 }
 
+func TestRetentionExecuteRequiresSQLitePath(t *testing.T) {
+	var stdout strings.Builder
+	var stderr strings.Builder
+	code := runRetentionCommand([]string{"--audit-days", "30", "--execute"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires --sqlite-path") {
+		t.Fatalf("stderr = %q, want sqlite path requirement", stderr.String())
+	}
+}
+
 func TestBackupCommandWritesMetadataAndUsableCopy(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "proxyharbor.db")
