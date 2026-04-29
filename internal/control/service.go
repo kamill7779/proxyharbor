@@ -29,11 +29,12 @@ type Service struct {
 	allowInternalProxyEndpoint bool
 	resolver                   *net.Resolver
 	selector                   selector.ProxySelector
+	selectorMode               string
 	logger                     *slog.Logger
 }
 
 func NewService(store storage.Store, gatewayURL string) *Service {
-	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver, selector: selector.FirstSelectable{}}
+	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver, selector: selector.NewLocal(), selectorMode: selector.NameLocal}
 }
 
 func (s *Service) SetLogger(logger *slog.Logger) {
@@ -59,10 +60,12 @@ func (s *Service) SetCache(c cache.Cache, ttl time.Duration) {
 
 func (s *Service) SetSelector(sel selector.ProxySelector) {
 	if sel == nil {
-		s.selector = selector.FirstSelectable{}
+		s.selector = selector.NewLocal()
+		s.selectorMode = selector.NameLocal
 		return
 	}
 	s.selector = sel
+	s.selectorMode = selector.Name(sel)
 }
 
 type CreateLeaseRequest struct {
@@ -101,12 +104,16 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	}
 	started := time.Now()
 	proxy, err := s.selector.Select(ctx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
-	metrics.SelectorLatencyMS.Observe(float64(time.Since(started).Milliseconds()))
+	selectorLatency := float64(time.Since(started).Milliseconds())
+	metrics.SelectorLatencyMS.Observe(selectorLatency)
+	s.observeSelectorLatency(selectorLatency)
 	if err != nil {
 		s.logSelectorError(principal.TenantID, len(candidates), err)
 		metrics.SelectorErrors.Inc()
+		s.incrementSelectorError()
 		return domain.Lease{}, err
 	}
+	s.incrementSelectorSelected()
 	now := s.now()
 	ttl := time.Duration(policy.TTLSeconds) * time.Second
 	if req.TTLSeconds > 0 && req.TTLSeconds < policy.TTLSeconds {
@@ -405,6 +412,33 @@ func (s *Service) logSelectorError(tenantID string, candidateCount int, err erro
 		"error_kind", string(domain.ErrorKindOf(err)),
 		"reason", domain.ErrorReason(err),
 	)
+}
+
+func (s *Service) observeSelectorLatency(latencyMS float64) {
+	switch s.selectorMode {
+	case selector.NameZFair:
+		metrics.SelectorZFairLatency.Observe(latencyMS)
+	default:
+		metrics.SelectorLocalLatency.Observe(latencyMS)
+	}
+}
+
+func (s *Service) incrementSelectorError() {
+	switch s.selectorMode {
+	case selector.NameZFair:
+		metrics.SelectorZFairErrors.Inc()
+	default:
+		metrics.SelectorLocalErrors.Inc()
+	}
+}
+
+func (s *Service) incrementSelectorSelected() {
+	switch s.selectorMode {
+	case selector.NameZFair:
+		metrics.SelectorZFairSelected.Inc()
+	default:
+		metrics.SelectorLocalSelected.Inc()
+	}
 }
 
 func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }

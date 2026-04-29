@@ -467,6 +467,9 @@ func (d dependencyChecks) CheckDependencies(ctx context.Context) map[string]erro
 }
 
 func openSelector(ctx context.Context, cfg config.Config, logger *slog.Logger) (selector.ProxySelector, func(), error) {
+	if cfg.Selector == selector.NameLocal {
+		return selector.NewLocal(), func() {}, nil
+	}
 	if cfg.Selector != selector.NameZFair {
 		return nil, func() {}, errors.New("unsupported selector")
 	}
@@ -474,7 +477,8 @@ func openSelector(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if cfg.SelectorRedisRequired {
 			return nil, func() {}, errors.New("selector=zfair requires redis addr")
 		}
-		return nil, func() {}, nil
+		logger.Warn("redis selector is not configured; using local selector")
+		return selector.NewLocal(), func() {}, nil
 	}
 	sel, err := retry(ctx, 30*time.Second, logger, "redis selector", func(attemptCtx context.Context) (*selector.RedisZFair, error) {
 		return selector.NewRedisZFair(attemptCtx, selector.RedisZFairConfig{

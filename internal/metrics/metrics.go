@@ -21,6 +21,7 @@ type labeledMetric struct {
 	typ     metricType
 	name    string
 	help    string
+	labels  string
 	mu      sync.Mutex
 	val     *atomic.Int64
 	gval    *atomic.Int64
@@ -54,6 +55,12 @@ type Counter struct{ m *labeledMetric }
 
 func NewCounter(name, help string) *Counter {
 	m := &labeledMetric{typ: metricCounter, name: name, help: help, val: new(atomic.Int64)}
+	register(m)
+	return &Counter{m: m}
+}
+
+func NewCounterWithLabels(name, help, labels string) *Counter {
+	m := &labeledMetric{typ: metricCounter, name: name, help: help, labels: labels, val: new(atomic.Int64)}
 	register(m)
 	return &Counter{m: m}
 }
@@ -95,6 +102,19 @@ func NewHistogram(name, help string, bounds []float64) *Histogram {
 	return &Histogram{m: m}
 }
 
+func NewHistogramWithLabels(name, help, labels string, bounds []float64) *Histogram {
+	m := &labeledMetric{
+		typ:     metricHistogram,
+		name:    name,
+		help:    help,
+		labels:  labels,
+		bounds:  bounds,
+		buckets: make([]int64, len(bounds)),
+	}
+	register(m)
+	return &Histogram{m: m}
+}
+
 func (h *Histogram) Observe(v float64) {
 	h.m.mu.Lock()
 	defer h.m.mu.Unlock()
@@ -127,6 +147,13 @@ var (
 	NoHealthyProxy    = NewCounter("proxyharbor_no_healthy_proxy_total", "Total no-healthy-proxy responses")
 	SelectorLatencyMS = NewHistogram("proxyharbor_selector_latency_ms", "Selector latency in milliseconds", []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000})
 
+	SelectorLocalSelected = NewCounterWithLabels("proxyharbor_selector_selected_total", "Total successful selector selections by low-cardinality mode", "mode=\"local\"")
+	SelectorZFairSelected = NewCounterWithLabels("proxyharbor_selector_selected_total", "Total successful selector selections by low-cardinality mode", "mode=\"zfair\"")
+	SelectorLocalErrors   = NewCounterWithLabels("proxyharbor_selector_errors_by_mode_total", "Total selector errors by low-cardinality mode and result", "mode=\"local\",result=\"error\"")
+	SelectorZFairErrors   = NewCounterWithLabels("proxyharbor_selector_errors_by_mode_total", "Total selector errors by low-cardinality mode and result", "mode=\"zfair\",result=\"error\"")
+	SelectorLocalLatency  = NewHistogramWithLabels("proxyharbor_selector_latency_by_mode_ms", "Selector latency in milliseconds by low-cardinality mode", "mode=\"local\"", []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000})
+	SelectorZFairLatency  = NewHistogramWithLabels("proxyharbor_selector_latency_by_mode_ms", "Selector latency in milliseconds by low-cardinality mode", "mode=\"zfair\"", []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000})
+
 	AuthRefreshSuccess = NewCounter("proxyharbor_auth_refresh_success_total", "Successful auth cache refreshes")
 	AuthRefreshFail    = NewCounter("proxyharbor_auth_refresh_fail_total", "Failed auth cache refreshes")
 
@@ -153,24 +180,22 @@ func writeMetrics(w http.ResponseWriter) {
 	metrics := snapshot()
 	sort.Slice(metrics, func(i, j int) bool { return metrics[i].name < metrics[j].name })
 
-	processed := map[string]bool{}
+	processed := map[*labeledMetric]bool{}
+	headerWritten := map[string]bool{}
 	for _, m := range metrics {
-		if processed[m.name] {
+		if processed[m] {
 			continue
 		}
-		processed[m.name] = true
+		processed[m] = true
 		switch m.typ {
 		case metricCounter:
-			fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
-			fmt.Fprintf(w, "# TYPE %s counter\n", m.name)
-			fmt.Fprintf(w, "%s %d\n\n", m.name, m.val.Load())
+			writeMetricHeader(w, headerWritten, m, "counter")
+			fmt.Fprintf(w, "%s%s %d\n\n", m.name, formatLabels(m.labels), m.val.Load())
 		case metricGauge:
-			fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
-			fmt.Fprintf(w, "# TYPE %s gauge\n", m.name)
+			writeMetricHeader(w, headerWritten, m, "gauge")
 			fmt.Fprintf(w, "%s %d\n\n", m.name, m.gval.Load())
 		case metricHistogram:
-			fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
-			fmt.Fprintf(w, "# TYPE %s histogram\n", m.name)
+			writeMetricHeader(w, headerWritten, m, "histogram")
 			m.mu.Lock()
 			buckets := append([]int64(nil), m.buckets...)
 			sum := m.sum
@@ -180,12 +205,12 @@ func writeMetrics(w http.ResponseWriter) {
 			for i := range m.bounds {
 				v := buckets[i]
 				le := fmt.Sprintf("%.0f", m.bounds[i])
-				fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", m.name, le, v+last)
+				fmt.Fprintf(w, "%s_bucket%s %d\n", m.name, mergeLabels(m.labels, "le=\""+le+"\""), v+last)
 				last += v
 			}
-			fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", m.name, count)
-			fmt.Fprintf(w, "%s_sum %d\n", m.name, sum)
-			fmt.Fprintf(w, "%s_count %d\n\n", m.name, count)
+			fmt.Fprintf(w, "%s_bucket%s %d\n", m.name, mergeLabels(m.labels, "le=\"+Inf\""), count)
+			fmt.Fprintf(w, "%s_sum%s %d\n", m.name, formatLabels(m.labels), sum)
+			fmt.Fprintf(w, "%s_count%s %d\n\n", m.name, formatLabels(m.labels), count)
 		}
 	}
 
@@ -200,3 +225,26 @@ func writeMetrics(w http.ResponseWriter) {
 }
 
 var processStart = time.Now()
+
+func formatLabels(labels string) string {
+	if labels == "" {
+		return ""
+	}
+	return "{" + labels + "}"
+}
+
+func mergeLabels(labels, extra string) string {
+	if labels == "" {
+		return "{" + extra + "}"
+	}
+	return "{" + labels + "," + extra + "}"
+}
+
+func writeMetricHeader(w http.ResponseWriter, written map[string]bool, m *labeledMetric, typ string) {
+	if written[m.name] {
+		return
+	}
+	written[m.name] = true
+	fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
+	fmt.Fprintf(w, "# TYPE %s %s\n", m.name, typ)
+}
