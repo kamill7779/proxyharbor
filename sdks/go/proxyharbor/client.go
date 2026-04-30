@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,29 @@ func WithTenantKey(k string) Option { return func(c *Config) { c.TenantKey = k }
 
 // WithAdminKey sets the admin API key used for inventory APIs.
 func WithAdminKey(k string) Option { return func(c *Config) { c.AdminKey = k } }
+
+// WithSecretsFile loads local single-instance secrets from an env-style file.
+// Explicit options and environment variables still take precedence.
+func WithSecretsFile(path string) Option { return func(c *Config) { c.SecretsFile = path } }
+
+// WithLocalDefaults enables the shortest local development path. It defaults
+// the base URL to http://localhost:18080 and discovers data/secrets.env when
+// explicit keys or PROXYHARBOR_SECRETS_FILE are not set.
+func WithLocalDefaults() Option {
+	return func(c *Config) {
+		if c.BaseURL == "" {
+			c.BaseURL = "http://localhost:18080"
+		}
+		if c.SecretsFile == "" && os.Getenv("PROXYHARBOR_SECRETS_FILE") == "" {
+			for _, candidate := range localSecretsCandidates() {
+				if _, err := readSecretsFile(candidate); err == nil {
+					c.SecretsFile = candidate
+					break
+				}
+			}
+		}
+	}
+}
 
 // WithDefaultKey overrides the sticky-lease key used when callers omit one.
 func WithDefaultKey(k string) Option { return func(c *Config) { c.DefaultKey = k } }
@@ -187,6 +211,9 @@ func (c *Client) doOnce(ctx context.Context, spec requestSpec, bodyBytes []byte)
 	}
 	if err := c.applyAuth(req, spec.auth); err != nil {
 		return err
+	}
+	if spec.auth == authTenant && c.cfg.TenantKey == "" && c.cfg.AdminKey != "" {
+		req.Header.Set("X-On-Behalf-Of", "default")
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

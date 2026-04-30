@@ -1,129 +1,280 @@
-# ProxyHarbor
+﻿<div align="center">
+  <img src="docs/logo.png" alt="ProxyHarbor Logo" width="480"/>
+</div>
 
-ProxyHarbor is a lightweight proxy-pool gateway for small cloud-native workloads. It provides admin-managed providers/proxies, tenant keys, lease APIs, and HTTP/HTTPS gateway validation in one binary.
+<div align="center">
 
-## Deployment Profiles
+**A lightweight cloud-native proxy pool for small-business integration**
 
-ProxyHarbor v0.4.1 is single-first:
+[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](go.mod)
+[![License](https://img.shields.io/badge/License-MIT-orange)](LICENSE)
+[![中文](https://img.shields.io/badge/README-中文-blue)](README.md)
 
-- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, `selector=local`, no Redis requirement. This is the recommended local and small deployment shape.
-- **HA**: multiple instances with shared MySQL plus Redis for zfair selector coordination and auth/cache invalidation.
-- **Memory**: dev/demo/CI only. It is non-durable and is not a formal deployment profile.
+</div>
 
-## Quick Start: Single Instance
+---
 
-Start the lightweight single-node profile with one command. It uses SQLite persistence and an in-process weighted local selector, does not require MySQL or Redis, and maps the service to localhost:18080 to avoid common local port conflicts.
+ProxyHarbor is a single-binary proxy-pool control plane and gateway. It provides global Provider / Proxy management, dynamic tenant keys, lease issuance, HTTP/HTTPS gateway validation, and SQLite-backed single-node persistence. The v0.4.x direction is **single-first**: local and small deployments do not require MySQL, Redis, or hand-written secrets by default; switch to MySQL + Redis only when HA is needed.
 
-**PowerShell:**
+## Features
 
-```powershell
-$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); $env:PROXYHARBOR_KEY_PEPPER=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
-```
+- **Single-first runtime**: defaults to `role=all`, `storage=sqlite`, and `selector=local` in one process.
+- **Zero-config local start**: missing `PROXYHARBOR_ADMIN_KEY` / `PROXYHARBOR_KEY_PEPPER` values are generated once and persisted to `secrets.env`.
+- **Global proxy inventory**: Admin manages Providers and Proxies; tenants receive leases and never read proxy endpoint lists.
+- **Dynamic tenant keys**: Admin APIs issue and revoke tenant keys; plaintext keys are returned only once.
+- **Lease gateway**: leases bind to `resource_ref`; gateway targets must match the leased resource.
+- **Local smooth weighted round-robin**: single-node mode uses an in-process selector; HA can use Redis-backed zfair.
+- **SQLite operations loop**: built-in `doctor`, `init`, `backup`, `restore`, and `retention` commands.
+- **Go SDK**: lease caching, auto-renew/reacquire, and `WithLocalDefaults()` for local single-node setup.
 
-**bash:**
+## Quick Start
+
+> The recommended local and small-deployment path is the default Docker Compose profile: SQLite persistence, local selector, and automatically generated local secrets.
+
+### Shortest Single-Node Path
+
+The default single-node path takes only three commands:
 
 ```bash
-PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32) PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32) docker compose up -d --build --pull never
+docker compose up -d --build
+mkdir -p data
+docker compose exec -T proxyharbor cat /var/lib/proxyharbor/secrets.env > data/secrets.env
+```
+
+Then import the SDK in your application and use local defaults:
+
+```go
+client, err := proxyharbor.New(proxyharbor.WithLocalDefaults())
+```
+
+This path uses `sqlite` persistence, an in-process selector, and generated local Admin Key / pepper by default. It does not require MySQL, Redis, or hand-written secrets. See steps 4-5 for the complete SDK example.
+
+### 1. Start the single-node service
+
+```bash
+docker compose up -d --build
+```
+
+This starts:
+- `proxyharbor`: combined control plane and gateway
+- SQLite database: `/var/lib/proxyharbor/proxyharbor.db`
+- generated local secrets: `/var/lib/proxyharbor/secrets.env`
+
+### 2. Check readiness
+
+```bash
 curl http://localhost:18080/readyz
 ```
 
-Expected readiness:
+### 3. Prepare local secrets for the Go SDK
 
-```json
-{"status":"ready","reasons":{"auth_cache":"ok","sqlite":"ok"}}
-```
-
-The default `docker-compose.yaml` runs one `proxyharbor` service and stores SQLite data at `/var/lib/proxyharbor/proxyharbor.db` in the `proxyharbor-data` volume. For local loopback/private proxy tests, add `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true` before `docker compose up`.
-
-For HA, use the MySQL+Redis compose file instead of the single-instance default:
+The default single-node service generates `/var/lib/proxyharbor/secrets.env` inside the container. Copy it to `data/secrets.env` in your application working directory so the SDK can read it with `WithLocalDefaults()`:
 
 ```bash
+mkdir -p data
+docker compose exec -T proxyharbor cat /var/lib/proxyharbor/secrets.env > data/secrets.env
+```
+
+PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+docker compose exec -T proxyharbor cat /var/lib/proxyharbor/secrets.env | Out-File -Encoding utf8 data/secrets.env
+```
+
+### 4. Add the Go SDK
+
+```bash
+go get github.com/kamill7779/proxyharbor/sdks/go/proxyharbor
+```
+
+### 5. Add a proxy and use it
+
+This is the shortest all-default loop: connect to `http://localhost:18080` by default, read the local Admin Key from `data/secrets.env`, add one proxy with the SDK, then get a proxy URL ready for an HTTP client.
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/kamill7779/proxyharbor/sdks/go/proxyharbor"
+)
+
+func main() {
+    ctx := context.Background()
+
+    client, err := proxyharbor.New(proxyharbor.WithLocalDefaults())
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    if _, err := client.AddProxy(ctx, "http://proxy1.example.com:8080"); err != nil {
+        log.Fatal(err)
+    }
+
+    proxyURL, err := client.GetProxyURL(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(proxyURL)
+}
+```
+
+> For loopback or private-network proxy endpoints in local testing, set `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true` before startup.
+
+### 6. Explicit local configuration (optional)
+
+```go
+client, err := proxyharbor.New(
+    proxyharbor.WithBaseURL("http://localhost:18080"),
+    proxyharbor.WithSecretsFile("./data/secrets.env"),
+)
+```
+## API Shape
+
+| Resource | Description | Typical endpoint |
+| --- | --- | --- |
+| Tenant | Tenant identity boundary | `POST /admin/tenants` |
+| Tenant Key | Tenant credential | `POST /admin/tenants/{id}/keys` |
+| Provider | Global proxy source | `POST /v1/providers` |
+| Proxy | Global proxy node | `POST /v1/proxies` |
+| Lease | Tenant-scoped proxy lease | `POST /v1/leases` |
+| Gateway Validate | Validate lease and target | `GET /v1/gateway/validate` |
+
+## Startup Modes
+
+### SQLite single-node (default)
+
+```bash
+docker compose up -d --build
+```
+
+Best for local development, small deployments, and single-node services. Redis is not required. Missing `PROXYHARBOR_ADMIN_KEY` and `PROXYHARBOR_KEY_PEPPER` values are generated automatically.
+
+### External MySQL + Redis (HA)
+
+```bash
+export PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32)
+export PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32)
+export PROXYHARBOR_MYSQL_DSN='ph:REPLACE_ME@tcp(mysql.svc:3306)/proxyharbor?parseTime=true&loc=UTC'
+export PROXYHARBOR_REDIS_ADDR='redis:6379'
 docker compose -f docker-compose.ha.yaml up -d --build
 ```
 
-## Basic API Flow
+HA mode requires explicit secrets and does not auto-generate defaults.
 
-Create a tenant and issue a tenant key:
-
-```bash
-curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"tenant-a","display_name":"Tenant A"}' \
-  http://localhost:8080/admin/tenants
-
-curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"label":"app-1","purpose":"platform_container"}' \
-  http://localhost:8080/admin/tenants/tenant-a/keys
-```
-
-Add a proxy and create a lease:
+### Local binary
 
 ```bash
-curl -H "ProxyHarbor-Key: $PROXYHARBOR_ADMIN_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"proxy-1","endpoint":"http://proxy1.example.com:8080","healthy":true,"weight":10}' \
-  http://localhost:8080/v1/proxies
-
-curl -H "ProxyHarbor-Key: $TENANT_KEY" \
-  -H 'Idempotency-Key: demo-lease-1' \
-  -H 'Content-Type: application/json' \
-  -d '{"subject":{"subject_type":"workload","subject_id":"app-1"},"resource_ref":{"kind":"url","id":"https://example.com"}}' \
-  http://localhost:8080/v1/leases
+go run ./cmd/proxyharbor \
+  -storage sqlite \
+  -sqlite-path data/proxyharbor.db
 ```
 
-For loopback or private proxy endpoints in local tests, set `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true`.
-
-## CLI
+## CLI Operations
 
 ```bash
 proxyharbor doctor [flags]
 proxyharbor init [flags]
-proxyharbor [server flags]
+proxyharbor backup [flags]
+proxyharbor restore [flags]
+proxyharbor retention [flags]
 ```
 
-`doctor` checks storage driver selection, required environment/config, MySQL DSN presence, Redis required settings, admin key/pepper presence and length, and SQLite path parent writability without printing secret values.
+- `doctor`: checks storage, SQLite schema, Redis requirements, admin key / pepper, and path permissions.
+- `init`: initializes SQLite schema idempotently.
+- `backup` / `restore`: SQLite single-node backup and restore.
+- `retention`: cleans audit and usage events; default is dry-run, `--execute` deletes rows.
 
-`init` initializes the SQLite schema and is idempotent. It does not generate admin keys and does not write secrets to logs. MySQL migrations remain explicit via `migrations/mysql/init.sql`.
+## Helm Secret
 
-## Helm
-
-The chart defaults to a single replica with SQLite persistence enabled:
+Helm remains production Secret-first and never renders plaintext credentials in templates:
 
 ```bash
+kubectl create secret generic proxyharbor-credentials \
+  --from-literal=admin-key="$(openssl rand -hex 32)" \
+  --from-literal=pepper="$(openssl rand -hex 32)"
+
 helm install proxyharbor charts/proxyharbor \
   --set auth.existingSecret=proxyharbor-credentials
 ```
 
-Create `proxyharbor-credentials` with `admin-key` and `pepper`. For HA, use MySQL+Redis examples:
+For HA examples:
 
 ```bash
 helm install proxyharbor charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
 ```
 
-HA examples require a Secret with `admin-key`, `pepper`, `mysql-dsn`, and optional `redis-password`.
+## Data Model
+
+### Provider
+
+A global platform resource representing a proxy source or datacenter. Proxies without `provider_id` are assigned to the default Provider.
+
+### Proxy
+
+A global platform resource containing endpoint, weight, health score, circuit-breaker state, and health feedback fields. Tenant APIs do not expose proxy endpoint lists.
+
+### Policy
+
+The current release focuses on the default policy. `policy_id` can be omitted when creating leases.
+
+### Lease
+
+A tenant resource binding subject, resource_ref, proxy_id, expiry, and an irreversible password hash. The plaintext password is returned only once in the create response.
+
+## Scheduling & Health Model
+
+### local selector
+
+The default single-node selector. It keeps smooth weighted round-robin state in-process and only selects proxies that are healthy, positively weighted, have a positive health score, and are not in an open circuit window.
+
+### zfair selector
+
+HA deployments can use Redis ZSET + Lua atomic selection, combining weight, latency, and health state for shared scheduling.
+
+### Health Scoring
+
+Success raises the health score. Connection failures, timeouts, auth failures, and protocol failures lower it. Consecutive failures trip the circuit breaker and enter cooldown.
 
 ## Configuration Reference
 
 | Variable | Description |
 | --- | --- |
-| `PROXYHARBOR_STORAGE` | `sqlite` for single instance, `mysql` for HA, `memory` for dev/demo/CI |
-| `PROXYHARBOR_SQLITE_PATH` | SQLite database path for single-instance storage |
+| `PROXYHARBOR_STORAGE` | `sqlite` by default for single-node, `mysql` for HA, `memory` for dev/demo/CI |
+| `PROXYHARBOR_SQLITE_PATH` | SQLite database path |
+| `PROXYHARBOR_SECRETS_FILE` | Env-style local secrets file; defaults next to the SQLite DB |
+| `PROXYHARBOR_AUTO_SECRETS` | Generate missing admin key/pepper for SQLite single-node mode; default `true` |
+| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes; auto-generated for single-node mode |
+| `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes; auto-generated for single-node mode |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL DSN, required when `storage=mysql` |
-| `PROXYHARBOR_SELECTOR` | `local` for single instance; `zfair` for Redis-backed HA coordination |
-| `PROXYHARBOR_REDIS_ADDR` | Redis address; required when zfair Redis is enforced |
+| `PROXYHARBOR_REDIS_ADDR` | Redis address, required by HA/zfair |
+| `PROXYHARBOR_SELECTOR` | `local` or `zfair` |
 | `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Whether selector startup requires Redis |
-| `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes |
-| `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes |
 | `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | Dynamic key refresh interval, max 5s |
 | `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | Whether private/loopback proxy endpoints can be registered |
 
-## Selector Modes
+## Packaging & Deployment
 
-- `selector=local` is the default for SQLite single-instance deployments. It is process-local, concurrency-safe, and uses smooth weighted round-robin across proxies that are healthy, have positive `weight` and `health_score`, and are not in an open circuit window.
-- `selector=zfair` uses Redis for shared HA scheduling. If `PROXYHARBOR_REDIS_ADDR` is empty and `PROXYHARBOR_SELECTOR_REDIS_REQUIRED=false`, startup falls back to `local`; if `PROXYHARBOR_SELECTOR_REDIS_REQUIRED=true`, startup fails fast.
-- Selector metrics use low-cardinality `mode`/`result` labels only; proxy IDs and tenant IDs are intentionally not metric labels.
+```bash
+docker build -t proxyharbor:local .
+helm install proxyharbor charts/proxyharbor --set auth.existingSecret=proxyharbor-credentials
+```
+
+## Contributing
+
+Issues and PRs are welcome. Single-node capabilities should stay lightweight, reproducible, and easy to verify. HA capabilities should keep explicit secrets and clear cloud-native deployment boundaries.
+
+## Contact
+
+- GitHub Issues: <https://github.com/kamill7779/proxyharbor/issues>
+- Author: Kamill
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
