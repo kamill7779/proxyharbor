@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
@@ -64,6 +65,9 @@ func (s *MySQLAdminStore) CreateTenant(ctx context.Context, tenant domain.Tenant
 		tenant.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO tenants (id, display_name, status, created_by, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?)`, tenant.ID, tenant.Name, createdBy, tenant.CreatedAt.UTC(), tenant.CreatedAt.UTC())
+	if err != nil && isMySQLDuplicateKey(err) {
+		return domain.ErrIdempotencyConflict
+	}
 	return err
 }
 
@@ -158,6 +162,9 @@ func (s *MySQLAdminStore) CreateTenantKey(ctx context.Context, key auth.TenantKe
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO tenant_keys (id, tenant_id, key_hash, key_fp, label, purpose, created_by, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, key.ID, key.TenantID, hash[:], key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt.UTC(), nullTime(key.ExpiresAt), nullTime(key.RevokedAt))
 	if err != nil {
+		if isMySQLDuplicateKey(err) {
+			return domain.ErrIdempotencyConflict
+		}
 		return err
 	}
 	if err := bumpTenantKeysVersion(ctx, tx); err != nil {
@@ -272,4 +279,9 @@ func nullTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC()
+}
+
+func isMySQLDuplicateKey(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }

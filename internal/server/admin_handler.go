@@ -128,10 +128,6 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if req.Status != nil && (*req.Status == "disabled" || *req.Status == "deleted") {
-				if err := h.revokeTenantKeys(r.Context(), id); err != nil {
-					respond(w, nil, err, http.StatusOK)
-					return
-				}
 				h.emit(r.Context(), "tenant_status_change", id, "")
 				if *req.Status == "deleted" {
 					writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -146,10 +142,6 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, tenant)
 		case http.MethodDelete:
 			if err := h.store.SoftDeleteTenant(r.Context(), id); err != nil {
-				respond(w, nil, err, http.StatusOK)
-				return
-			}
-			if err := h.revokeTenantKeys(r.Context(), id); err != nil {
 				respond(w, nil, err, http.StatusOK)
 				return
 			}
@@ -170,8 +162,12 @@ func (h *adminHandler) tenantByID(w http.ResponseWriter, r *http.Request) {
 		if keyID == "" && r.Method == http.MethodPost {
 			// POST /admin/tenants/{id}/keys
 			tenant, err := h.store.GetTenant(r.Context(), id)
-			if err != nil || !tenant.Enabled {
-				respond(w, nil, domain.ErrTenantNotFound, http.StatusOK)
+			if err != nil {
+				respond(w, nil, err, http.StatusOK)
+				return
+			}
+			if !tenant.Enabled {
+				respond(w, nil, domain.ErrTenantDisabled, http.StatusOK)
 				return
 			}
 			var req struct {

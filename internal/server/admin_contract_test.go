@@ -126,3 +126,28 @@ func TestInternalEventBatchesRequireTenantID(t *testing.T) {
 		})
 	}
 }
+
+func TestDisabledTenantCannotIssueNewKey(t *testing.T) {
+	adminStore := NewMemoryAdminStore()
+	if err := adminStore.CreateTenant(context.Background(), domain.Tenant{ID: "tenant-a", Name: "Tenant A", Enabled: true}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	status := "disabled"
+	if err := adminStore.UpdateTenant(context.Background(), "tenant-a", nil, &status); err != nil {
+		t.Fatalf("UpdateTenant(disabled) error = %v", err)
+	}
+	handler := NewWithOptions(
+		control.NewService(storage.NewMemoryStore(), "http://localhost:8080"),
+		auth.NewDynamicKeys(nil).WithAdminKey("admin-key-with-at-least-thirty-two-bytes"),
+		Options{AdminStore: adminStore, Pepper: "pepper-with-at-least-thirty-two-bytes"},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/tenants/tenant-a/keys", strings.NewReader(`{"label":"app"}`))
+	req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+}

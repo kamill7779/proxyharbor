@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
 type TenantKeyRow struct {
@@ -126,6 +129,9 @@ func (s *MySQLKeyStore) CreateTenantKey(ctx context.Context, key TenantKeyRow) e
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		key.ID, key.TenantID, key.KeyHash[:], key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt, nullTime(key.ExpiresAt), nullTime(key.RevokedAt), nullTime(key.LastSeenAt))
 	if err != nil {
+		if isMySQLDuplicateKey(err) {
+			return domain.ErrIdempotencyConflict
+		}
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`); err != nil {
@@ -140,15 +146,23 @@ func (s *MySQLKeyStore) RevokeTenantKey(ctx context.Context, keyID string) error
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	_, err = tx.ExecContext(ctx,
-		`UPDATE tenant_keys SET revoked_at = ?, updated_at = ? WHERE id = ?`, time.Now().UTC(), time.Now().UTC(), keyID)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tenant_keys SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE id = ?`, time.Now().UTC(), time.Now().UTC(), keyID)
 	if err != nil {
 		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return domain.ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version = version + 1 WHERE id = 1`); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func isMySQLDuplicateKey(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
 
 func (s *MySQLKeyStore) GetTenant(ctx context.Context, tenantID string) (TenantRow, error) {

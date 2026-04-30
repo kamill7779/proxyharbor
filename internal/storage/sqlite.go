@@ -217,11 +217,14 @@ func (s *SQLiteStore) UpdateLease(ctx context.Context, lease domain.Lease) (doma
 }
 
 func (s *SQLiteStore) RevokeLease(ctx context.Context, tenantID, id string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE proxy_leases SET revoked = TRUE, updated_at = ? WHERE tenant_id = ? AND lease_id = ?`, time.Now().UTC(), tenantID, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE proxy_leases SET revoked = TRUE, updated_at = ? WHERE tenant_id = ? AND lease_id = ? AND revoked = FALSE`, time.Now().UTC(), tenantID, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := s.GetLease(ctx, tenantID, id); err == nil {
+			return nil
+		}
 		return domain.ErrNotFound
 	}
 	return nil
@@ -711,8 +714,17 @@ func (s *SQLiteAdminStore) CreateTenantKey(ctx context.Context, key auth.TenantK
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id=? AND deleted_at IS NULL AND status IN ('active','enabled')`, key.TenantID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrTenantDisabled
+	} else if err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO tenant_keys (id,tenant_id,key_hash,key_fp,label,purpose,created_by,created_at,updated_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, key.ID, key.TenantID, hash, key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt, time.Now().UTC(), nullTimePtr(key.ExpiresAt), nullTimePtr(key.RevokedAt))
 	if err != nil {
+		if isSQLiteConstraintError(err) {
+			return domain.ErrIdempotencyConflict
+		}
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version=version+1 WHERE id=1`); err != nil {
@@ -728,7 +740,7 @@ func (s *SQLiteAdminStore) RevokeTenantKey(ctx context.Context, tenantID, keyID 
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=?, updated_at=? WHERE tenant_id=? AND id=?`, now, now, tenantID, keyID)
+	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=COALESCE(revoked_at,?), updated_at=? WHERE tenant_id=? AND id=?`, now, now, tenantID, keyID)
 	if err != nil {
 		return err
 	}
@@ -811,6 +823,9 @@ func (s *SQLiteStore) CreateTenantKey(ctx context.Context, key auth.TenantKeyRow
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `INSERT INTO tenant_keys (id,tenant_id,key_hash,key_fp,label,purpose,created_by,created_at,updated_at,expires_at,revoked_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, key.ID, key.TenantID, key.KeyHash[:], key.KeyFP, key.Label, key.Purpose, key.CreatedBy, key.CreatedAt, time.Now().UTC(), nullTimePtr(key.ExpiresAt), nullTimePtr(key.RevokedAt), nullTimePtr(key.LastSeenAt))
 	if err != nil {
+		if isSQLiteConstraintError(err) {
+			return domain.ErrIdempotencyConflict
+		}
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_keys_version SET version=version+1 WHERE id=1`); err != nil {
@@ -826,7 +841,7 @@ func (s *SQLiteStore) RevokeTenantKey(ctx context.Context, keyID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=?, updated_at=? WHERE id=?`, now, now, keyID)
+	res, err := tx.ExecContext(ctx, `UPDATE tenant_keys SET revoked_at=COALESCE(revoked_at,?), updated_at=? WHERE id=?`, now, now, keyID)
 	if err != nil {
 		return err
 	}
@@ -860,4 +875,8 @@ func nullTimePtr(t *time.Time) any {
 		return nil
 	}
 	return t.UTC()
+}
+
+func isSQLiteConstraintError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "constraint")
 }
