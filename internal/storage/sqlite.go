@@ -47,6 +47,10 @@ func NewSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.ensureHotPathIndexes(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite ping: %w", err)
@@ -85,6 +89,25 @@ func (s *SQLiteStore) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
+func (s *SQLiteStore) ensureHotPathIndexes(ctx context.Context) error {
+	for _, statement := range sqliteHotPathIndexStatements {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("sqlite ensure hot path index: %w", err)
+		}
+	}
+	return nil
+}
+
+var sqliteHotPathIndexStatements = []string{
+	`CREATE INDEX IF NOT EXISTS idx_tenant_keys_active_refresh ON tenant_keys(tenant_id, revoked_at, expires_at, updated_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxies_selectable ON proxies(healthy, weight, health_score, circuit_open_until, proxy_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxy_leases_renew_cas ON proxy_leases(tenant_id, lease_id, generation, revoked, expires_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxy_leases_proxy_active ON proxy_leases(proxy_id, revoked, expires_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxy_idempotency_tenant_created ON proxy_idempotency_keys(tenant_id, created_at, idempotency_key)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxy_usage_events_tenant_order ON proxy_usage_events(tenant_id, occurred_at, event_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_proxy_catalog_snapshots_fresh ON proxy_catalog_snapshots(expires_at, generated_at)`,
+}
+
 func sqliteDSN(path string) (string, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -102,6 +125,8 @@ func sqliteDSN(path string) (string, error) {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "synchronous(NORMAL)")
+	query.Add("_pragma", "temp_store(MEMORY)")
 	dsn.RawQuery = query.Encode()
 	return dsn.String(), nil
 }
@@ -318,7 +343,21 @@ func (s *SQLiteStore) UpsertProxy(ctx context.Context, proxy domain.Proxy) (doma
 		proxy.Weight = 1
 	}
 	if proxy.HealthScore == 0 {
-		proxy.HealthScore = 100
+		existing, err := s.GetProxy(ctx, proxy.ID)
+		if err == nil {
+			proxy.HealthScore = existing.HealthScore
+			proxy.ConsecutiveFailures = existing.ConsecutiveFailures
+			proxy.CircuitOpenUntil = existing.CircuitOpenUntil
+			proxy.LatencyEWMAms = existing.LatencyEWMAms
+			proxy.LastCheckedAt = existing.LastCheckedAt
+			proxy.LastSuccessAt = existing.LastSuccessAt
+			proxy.LastFailureAt = existing.LastFailureAt
+			proxy.FailureHint = existing.FailureHint
+		} else if errors.Is(err, domain.ErrNotFound) {
+			proxy.HealthScore = 100
+		} else {
+			return domain.Proxy{}, err
+		}
 	}
 	if proxy.LastSeenAt.IsZero() {
 		proxy.LastSeenAt = now

@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.4.1
+  version: 0.4.6
   x-stability: release-candidate
-  description: ProxyHarbor v0.4.1 SQLite single-node release. Admin uses `ProxyHarbor-Key`
+  description: ProxyHarbor v0.4.6 SQLite single-node release. Admin uses `ProxyHarbor-Key`
     header with the bootstrap admin key. To act on behalf of a tenant, Admin must
     also include the `X-On-Behalf-Of` header with the tenant ID. Tenant keys authenticate
     directly via `ProxyHarbor-Key` and must not attempt to impersonate another tenant.
@@ -30,6 +30,52 @@ paths:
       responses:
         '200':
           description: version
+  /v1/internal/usage-events:batch:
+    post:
+      summary: Record gateway usage events
+      description: Admin-only internal endpoint used by gateway instances to append usage events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsageEventsBatchRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+  /v1/internal/gateway-feedback:batch:
+    post:
+      summary: Record gateway health feedback events
+      description: Admin-only internal endpoint used by gateway instances to append proxy health feedback events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GatewayFeedbackBatchRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
   /admin/tenants:
     get:
       summary: List tenants
@@ -653,7 +699,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Lease'
+                $ref: '#/components/schemas/GatewayValidationResponse'
         '400':
           $ref: '#/components/responses/Error'
         '401':
@@ -982,3 +1028,95 @@ components:
           type: string
         candidate_set_id:
           type: string
+    GatewayValidationResponse:
+      type: object
+      properties:
+        lease_id:
+          type: string
+        tenant_id:
+          type: string
+        lease_generation:
+          type: integer
+        subject:
+          $ref: '#/components/schemas/Subject'
+        resource_ref:
+          $ref: '#/components/schemas/ResourceRef'
+        policy_ref:
+          type: object
+        gateway_url:
+          type: string
+        username:
+          type: string
+        proxy_id:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        renew_before:
+          type: string
+          format: date-time
+        catalog_version:
+          type: string
+        candidate_set_id:
+          type: string
+    AcceptedResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+    UsageEventsBatchRequest:
+      type: object
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageEvent'
+    GatewayFeedbackBatchRequest:
+      type: object
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+    UsageEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+        tenant_id:
+          type: string
+        lease_id:
+          type: string
+        bytes_sent:
+          type: integer
+          format: int64
+        bytes_received:
+          type: integer
+          format: int64
+        occurred_at:
+          type: string
+          format: date-time
+    AuditEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+        tenant_id:
+          type: string
+        principal_id:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties:
+            type: string

@@ -6,24 +6,24 @@ ProxyHarbor is a lightweight proxy-pool gateway for small cloud-native workloads
 
 ProxyHarbor v0.4.1 is single-first:
 
-- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, no Redis requirement. This is the recommended local and small deployment shape.
+- **Single instance (default)**: one `proxyharbor` process, `role=all`, `storage=sqlite`, `selector=local`, no Redis requirement. This is the recommended local and small deployment shape.
 - **HA**: multiple instances with shared MySQL plus Redis for zfair selector coordination and auth/cache invalidation.
 - **Memory**: dev/demo/CI only. It is non-durable and is not a formal deployment profile.
 
 ## Quick Start: Single Instance
 
-Start the lightweight single-node profile with one command. It uses SQLite persistence, does not require MySQL or Redis, and maps the service to localhost:18080 to avoid common local port conflicts.
+Start the lightweight single-node profile with one command. It uses SQLite persistence and an in-process weighted local selector, does not require MySQL or Redis, and maps the service to localhost:18080 to avoid common local port conflicts.
 
 **PowerShell:**
 
 ```powershell
-$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY="dev-admin-key-min-32-chars-long!!!!"; $env:PROXYHARBOR_KEY_PEPPER="dev-key-pepper-min-32-bytes-random!!!!"; docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
+$env:PROXYHARBOR_HOST_PORT="18080"; $env:PROXYHARBOR_ADMIN_KEY=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); $env:PROXYHARBOR_KEY_PEPPER=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower(); docker compose up -d --build --pull never; Invoke-RestMethod http://localhost:18080/readyz
 ```
 
 **bash:**
 
 ```bash
-PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=dev-admin-key-min-32-chars-long!!!! PROXYHARBOR_KEY_PEPPER=dev-key-pepper-min-32-bytes-random!!!! docker compose up -d --build --pull never
+PROXYHARBOR_HOST_PORT=18080 PROXYHARBOR_ADMIN_KEY=$(openssl rand -hex 32) PROXYHARBOR_KEY_PEPPER=$(openssl rand -hex 32) docker compose up -d --build --pull never
 curl http://localhost:18080/readyz
 ```
 
@@ -110,12 +110,19 @@ HA examples require a Secret with `admin-key`, `pepper`, `mysql-dsn`, and option
 | `PROXYHARBOR_STORAGE` | `sqlite` for single instance, `mysql` for HA, `memory` for dev/demo/CI |
 | `PROXYHARBOR_SQLITE_PATH` | SQLite database path for single-instance storage |
 | `PROXYHARBOR_MYSQL_DSN` | MySQL DSN, required when `storage=mysql` |
+| `PROXYHARBOR_SELECTOR` | `local` for single instance; `zfair` for Redis-backed HA coordination |
 | `PROXYHARBOR_REDIS_ADDR` | Redis address; required when zfair Redis is enforced |
 | `PROXYHARBOR_SELECTOR_REDIS_REQUIRED` | Whether selector startup requires Redis |
 | `PROXYHARBOR_ADMIN_KEY` | Bootstrap admin key, at least 32 bytes |
 | `PROXYHARBOR_KEY_PEPPER` | Tenant key hash pepper, at least 32 bytes |
 | `PROXYHARBOR_AUTH_REFRESH_INTERVAL` | Dynamic key refresh interval, max 5s |
 | `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT` | Whether private/loopback proxy endpoints can be registered |
+
+## Selector Modes
+
+- `selector=local` is the default for SQLite single-instance deployments. It is process-local, concurrency-safe, and uses smooth weighted round-robin across proxies that are healthy, have positive `weight` and `health_score`, and are not in an open circuit window.
+- `selector=zfair` uses Redis for shared HA scheduling. If `PROXYHARBOR_REDIS_ADDR` is empty and `PROXYHARBOR_SELECTOR_REDIS_REQUIRED=false`, startup falls back to `local`; if `PROXYHARBOR_SELECTOR_REDIS_REQUIRED=true`, startup fails fast.
+- Selector metrics use low-cardinality `mode`/`result` labels only; proxy IDs and tenant IDs are intentionally not metric labels.
 
 ## License
 

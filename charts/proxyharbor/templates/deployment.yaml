@@ -60,12 +60,16 @@ spec:
               value: {{ .Values.mysql.maxIdle | quote }}
             - name: PROXYHARBOR_MYSQL_CONN_MAX_AGE
               value: {{ .Values.mysql.connMaxAge | quote }}
+            {{- if .Values.redis.addr }}
             - name: PROXYHARBOR_REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
+            {{- end }}
             - name: PROXYHARBOR_SELECTOR_REDIS_REQUIRED
               value: {{ .Values.redis.selectorRedisRequired | quote }}
+            {{- if .Values.redis.addr }}
             - name: PROXYHARBOR_REDIS_DB
               value: {{ .Values.redis.db | quote }}
+            {{- end }}
             - name: PROXYHARBOR_CACHE_TTL
               value: {{ .Values.cache.ttl | quote }}
             - name: PROXYHARBOR_SHUTDOWN_TIMEOUT
@@ -117,19 +121,12 @@ spec:
                   name: {{ .Values.mysql.existingSecret }}
                   key: {{ .Values.mysql.existingSecretKey }}
             {{- end }}
-            {{- if or .Values.redis.existingSecret .Values.redis.password }}
+            {{- if .Values.redis.existingSecret }}
             - name: PROXYHARBOR_REDIS_PASSWORD
-              {{- if .Values.redis.existingSecret }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.redis.existingSecret }}
                   key: {{ .Values.redis.existingSecretKey }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxyharbor.fullname" . }}-secret
-                  key: redis-password
-              {{- end }}
             {{- end }}
           readinessProbe:
             httpGet:

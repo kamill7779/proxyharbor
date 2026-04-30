@@ -1,5 +1,5 @@
 # ProxyHarbor HA compose example: MySQL + Redis + ProxyHarbor.
-# Use this profile for multi-instance parity or until SQLite store integration lands.
+# Use this profile for multi-instance parity and HA validation.
 # ProxyHarbor docker-compose
 # Local HA bundle: MySQL + Redis + ProxyHarbor.
 
@@ -12,7 +12,7 @@ services:
       MYSQL_USER: proxyharbor
       MYSQL_PASSWORD: proxyharbor
     ports:
-      - "3306:3306"
+      - "${PROXYHARBOR_HA_BIND_ADDR:-127.0.0.1}:3306:3306"
     volumes:
       - ./migrations/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - mysql-data:/var/lib/mysql
@@ -25,7 +25,7 @@ services:
   redis:
     image: redis:7.4-alpine
     ports:
-      - "6379:6379"
+      - "${PROXYHARBOR_HA_BIND_ADDR:-127.0.0.1}:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:

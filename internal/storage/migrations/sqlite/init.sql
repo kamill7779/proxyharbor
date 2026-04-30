@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tenant_keys (
 CREATE INDEX IF NOT EXISTS idx_tenant_keys_tenant_id ON tenant_keys(tenant_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_keys_key_hash ON tenant_keys(key_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_keys_key_fp ON tenant_keys(key_fp);
+CREATE INDEX IF NOT EXISTS idx_tenant_keys_active_refresh ON tenant_keys(tenant_id, revoked_at, expires_at, updated_at);
 
 CREATE TABLE IF NOT EXISTS tenant_keys_version (
   id INTEGER PRIMARY KEY,
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS proxies (
   last_seen_at DATETIME NOT NULL,
   failure_hint TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_proxies_selectable ON proxies(healthy, weight, health_score, circuit_open_until, proxy_id);
 
 CREATE TABLE IF NOT EXISTS policies (
   policy_id TEXT PRIMARY KEY,
@@ -97,6 +99,8 @@ CREATE TABLE IF NOT EXISTS proxy_leases (
   PRIMARY KEY (tenant_id, lease_id)
 );
 CREATE INDEX IF NOT EXISTS idx_proxy_leases_active ON proxy_leases(tenant_id, revoked, expires_at);
+CREATE INDEX IF NOT EXISTS idx_proxy_leases_renew_cas ON proxy_leases(tenant_id, lease_id, generation, revoked, expires_at);
+CREATE INDEX IF NOT EXISTS idx_proxy_leases_proxy_active ON proxy_leases(proxy_id, revoked, expires_at);
 
 CREATE TABLE IF NOT EXISTS proxy_idempotency_keys (
   idempotency_key TEXT PRIMARY KEY,
@@ -107,6 +111,7 @@ CREATE TABLE IF NOT EXISTS proxy_idempotency_keys (
   lease_id TEXT NOT NULL,
   created_at DATETIME NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_proxy_idempotency_tenant_created ON proxy_idempotency_keys(tenant_id, created_at, idempotency_key);
 
 CREATE TABLE IF NOT EXISTS proxy_usage_events (
   event_id TEXT PRIMARY KEY,
@@ -116,6 +121,7 @@ CREATE TABLE IF NOT EXISTS proxy_usage_events (
   bytes_received INTEGER NOT NULL,
   occurred_at DATETIME NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_proxy_usage_events_tenant_order ON proxy_usage_events(tenant_id, occurred_at, event_id);
 
 CREATE TABLE IF NOT EXISTS proxy_audit_events (
   event_id TEXT PRIMARY KEY,
@@ -135,3 +141,4 @@ CREATE TABLE IF NOT EXISTS proxy_catalog_snapshots (
   generated_at DATETIME NOT NULL,
   expires_at DATETIME NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_proxy_catalog_snapshots_fresh ON proxy_catalog_snapshots(expires_at, generated_at);

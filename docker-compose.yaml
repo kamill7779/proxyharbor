@@ -19,7 +19,7 @@ services:
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
       PROXYHARBOR_CACHE_TTL: ${PROXYHARBOR_CACHE_TTL:-60s}
     ports:
-      - "${PROXYHARBOR_HOST_PORT:-8080}:8080"
+      - "${PROXYHARBOR_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HOST_PORT:-18080}:8080"
     volumes:
       - proxyharbor-data:/var/lib/proxyharbor
     restart: unless-stopped

@@ -351,6 +351,7 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 		check(strings.TrimSpace(cfg.SQLitePath) != "", "sqlite path configured", "set PROXYHARBOR_SQLITE_PATH or -sqlite-path")
 		if strings.TrimSpace(cfg.SQLitePath) != "" {
 			check(sqliteParentWritable(cfg.SQLitePath) == nil, "sqlite path parent writable", "parent directory must be writable")
+			runSQLiteDoctorChecks(cfg.SQLitePath, check)
 		}
 	default:
 		check(false, "storage driver supported", "use sqlite, mysql, or memory")
@@ -428,6 +429,36 @@ func sqliteParentWritable(path string) error {
 	return removeErr
 }
 
+func runSQLiteDoctorChecks(path string, check func(bool, string, string)) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		check(true, "sqlite file", "not created yet")
+	} else if err != nil {
+		check(false, "sqlite file", err.Error())
+	} else {
+		check(info.Mode().IsRegular(), "sqlite file", fmt.Sprintf("size=%d bytes", info.Size()))
+		check(info.Size() < 1<<40, "sqlite file size", fmt.Sprintf("size=%d bytes", info.Size()))
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err == nil {
+			check(false, "sqlite sidecar "+suffix, "sidecar exists; stop process or checkpoint WAL before backup/restore")
+		} else if errors.Is(err, os.ErrNotExist) {
+			check(true, "sqlite sidecar "+suffix, "absent")
+		} else {
+			check(false, "sqlite sidecar "+suffix, err.Error())
+		}
+	}
+	if err == nil && info.Mode().IsRegular() {
+		version, err := sqliteSchemaVersionOf(path)
+		if err != nil {
+			check(false, "sqlite schema version", err.Error())
+		} else {
+			check(version == 1, "sqlite schema version", fmt.Sprintf("version=%d expected=1", version))
+		}
+	}
+	check(sqliteParentWritable(path) == nil, "sqlite parent writable", "parent accepts writes")
+}
+
 func newLogger(cfg config.Config) *slog.Logger {
 	level := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
@@ -467,6 +498,9 @@ func (d dependencyChecks) CheckDependencies(ctx context.Context) map[string]erro
 }
 
 func openSelector(ctx context.Context, cfg config.Config, logger *slog.Logger) (selector.ProxySelector, func(), error) {
+	if cfg.Selector == selector.NameLocal {
+		return selector.NewLocal(), func() {}, nil
+	}
 	if cfg.Selector != selector.NameZFair {
 		return nil, func() {}, errors.New("unsupported selector")
 	}
@@ -474,7 +508,8 @@ func openSelector(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if cfg.SelectorRedisRequired {
 			return nil, func() {}, errors.New("selector=zfair requires redis addr")
 		}
-		return nil, func() {}, nil
+		logger.Warn("redis selector is not configured; using local selector")
+		return selector.NewLocal(), func() {}, nil
 	}
 	sel, err := retry(ctx, 30*time.Second, logger, "redis selector", func(attemptCtx context.Context) (*selector.RedisZFair, error) {
 		return selector.NewRedisZFair(attemptCtx, selector.RedisZFairConfig{

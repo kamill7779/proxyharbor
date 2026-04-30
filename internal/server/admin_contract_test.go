@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,6 +55,73 @@ func TestAdminOnlyRoutesReturnContractErrors(t *testing.T) {
 			handler.ServeHTTP(rr, req)
 			if rr.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := control.NewService(store, "http://localhost:8080")
+	if _, err := store.UpsertProxy(context.Background(), domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.example.com:8080", Healthy: true, Weight: 1, HealthScore: 100}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	lease, err := svc.CreateLease(context.Background(), domain.Principal{TenantID: "default"}, "idem-gateway-validate", control.CreateLeaseRequest{
+		Subject:     domain.Subject{Type: "user", ID: "subj"},
+		ResourceRef: domain.ResourceRef{Kind: "host", ID: "example.com"},
+		TTLSeconds:  60,
+	})
+	if err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+	handler := NewWithOptions(
+		svc,
+		auth.NewDynamicKeys(nil).WithAdminKey("admin-key-with-at-least-thirty-two-bytes"),
+		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&password="+lease.Password+"&target=example.com", nil)
+	req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["password"]; ok {
+		t.Fatalf("gateway validate leaked password: %s", rr.Body.String())
+	}
+	if body["lease_id"] != lease.ID || body["proxy_id"] == "" {
+		t.Fatalf("gateway validate body = %#v", body)
+	}
+}
+
+func TestInternalEventBatchesRequireTenantID(t *testing.T) {
+	handler := NewWithOptions(
+		control.NewService(storage.NewMemoryStore(), "http://localhost:8080"),
+		auth.NewDynamicKeys(nil).WithAdminKey("admin-key-with-at-least-thirty-two-bytes"),
+		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
+	)
+
+	cases := []struct {
+		path string
+		body string
+	}{
+		{path: "/v1/internal/usage-events:batch", body: `{"events":[{"event_id":"evt-1","lease_id":"lease-1","bytes_sent":1,"bytes_received":2,"occurred_at":"2026-04-29T00:00:00Z"}]}`},
+		{path: "/v1/internal/gateway-feedback:batch", body: `{"events":[{"event_id":"evt-1","action":"gateway_feedback","resource":"proxy-a","occurred_at":"2026-04-29T00:00:00Z"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
 			}
 		})
 	}

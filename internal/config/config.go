@@ -103,7 +103,7 @@ func load(args []string, validate bool) (Config, error) {
 		CacheTTL:                   envDur("PROXYHARBOR_CACHE_TTL", 60*time.Second),
 		ShutdownTimeout:            envDur("PROXYHARBOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		AllowInternalProxyEndpoint: envBool("PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT", false),
-		Selector:                   envStr("PROXYHARBOR_SELECTOR", "zfair"),
+		Selector:                   envStr("PROXYHARBOR_SELECTOR", ""),
 		SelectorRedisRequired:      envBool("PROXYHARBOR_SELECTOR_REDIS_REQUIRED", false),
 		ScoringProfile:             envStr("PROXYHARBOR_SCORING_PROFILE", "default"),
 		HealthFlushInterval:        envDur("PROXYHARBOR_HEALTH_FLUSH_INTERVAL", 5*time.Second),
@@ -158,6 +158,12 @@ func load(args []string, validate bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if strings.TrimSpace(cfg.Selector) == "" {
+		cfg.Selector = "local"
+		if cfg.SelectorRedisRequired {
+			cfg.Selector = "zfair"
+		}
+	}
 	if !validate {
 		return cfg, nil
 	}
@@ -193,7 +199,7 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("unsupported storage driver: %q", c.StorageDriver)
 	}
-	if c.Selector != "zfair" {
+	if c.Selector != "local" && c.Selector != "zfair" {
 		return fmt.Errorf("unsupported selector: %q", c.Selector)
 	}
 	if c.SelectorRedisRequired && strings.TrimSpace(c.RedisAddr) == "" {

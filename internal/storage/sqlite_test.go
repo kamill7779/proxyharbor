@@ -188,6 +188,31 @@ func TestSQLiteProxyRoundTripScansLastSeenAt(t *testing.T) {
 	}
 }
 
+func TestSQLiteUpsertProxyPreservesExistingHealthStateWhenUnset(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	if _, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1, HealthScore: 100}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	observedAt := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		if err := store.RecordProxyOutcome(ctx, "proxy-a", ProxyHealthDelta{ObservedAt: observedAt, Success: false, MaxConsecutiveFailure: 1, BaseCooldown: time.Minute, MaxCooldown: 2 * time.Minute}); err != nil {
+			t.Fatalf("RecordProxyOutcome() error = %v", err)
+		}
+	}
+	before, err := store.GetProxy(ctx, "proxy-a")
+	if err != nil {
+		t.Fatalf("GetProxy() error = %v", err)
+	}
+	updated, err := store.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:9090", Healthy: true, Weight: 2})
+	if err != nil {
+		t.Fatalf("UpsertProxy() update error = %v", err)
+	}
+	if updated.HealthScore != before.HealthScore || updated.ConsecutiveFailures != before.ConsecutiveFailures || !updated.CircuitOpenUntil.Equal(before.CircuitOpenUntil) {
+		t.Fatalf("health state was not preserved: before=%+v after=%+v", before, updated)
+	}
+}
+
 func TestSQLiteProxyFailureUsesCappedCooldown(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	ctx := context.Background()
@@ -281,5 +306,46 @@ func testLease(id string) domain.Lease {
 		GatewayURL:  "http://localhost:8080", Username: "user", PasswordHash: "hash", ProxyID: "proxy-a",
 		ExpiresAt: now.Add(time.Hour), RenewBefore: now.Add(30 * time.Minute), CatalogVersion: "catalog", CandidateSetID: "candidate",
 		CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func TestSQLitePerformancePragmasAndIndexes(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+
+	pragmaChecks := map[string]int{
+		"foreign_keys": 1,
+		"busy_timeout": 5000,
+		"synchronous":  1,
+		"temp_store":   2,
+	}
+	for name, want := range pragmaChecks {
+		var got int
+		if err := store.DB().QueryRowContext(ctx, "PRAGMA "+name).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s error = %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("PRAGMA %s = %d, want %d", name, got, want)
+		}
+	}
+
+	wantIndexes := []string{
+		"idx_proxy_leases_active",
+		"idx_proxy_leases_renew_cas",
+		"idx_proxy_leases_proxy_active",
+		"idx_proxy_idempotency_tenant_created",
+		"idx_proxy_usage_events_tenant_order",
+		"idx_proxies_selectable",
+		"idx_proxy_catalog_snapshots_fresh",
+		"idx_tenant_keys_active_refresh",
+	}
+	for _, name := range wantIndexes {
+		var count int
+		if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&count); err != nil {
+			t.Fatalf("index lookup %s error = %v", name, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", name, count)
+		}
 	}
 }

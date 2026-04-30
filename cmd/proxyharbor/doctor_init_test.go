@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -51,6 +53,44 @@ func TestDoctorSQLiteChecksParentDirectory(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "sqlite path parent writable") {
 		t.Fatalf("doctor output missing sqlite parent check: %s", out.String())
+	}
+}
+
+func TestDoctorSQLiteChecksFileSchemaAndSidecars(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "proxyharbor.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (1, ?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath+"-wal", []byte("wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
+
+	var out bytes.Buffer
+	code := runDoctor([]string{
+		"-storage=sqlite",
+		"-sqlite-path=" + dbPath,
+		"-selector-redis-required=false",
+	}, &out, nil)
+	if code != 1 {
+		t.Fatalf("doctor exit code = %d, want 1; output: %s", code, out.String())
+	}
+	for _, want := range []string{"sqlite file", "sqlite schema version", "sqlite sidecar -wal", "sqlite parent writable"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("doctor output missing %q: %s", want, out.String())
+		}
 	}
 }
 

@@ -17,7 +17,23 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.4.1"
+const Version = "0.4.6"
+
+type gatewayValidationResponse struct {
+	ID             string             `json:"lease_id"`
+	TenantID       string             `json:"tenant_id"`
+	Generation     int64              `json:"lease_generation"`
+	Subject        domain.Subject     `json:"subject"`
+	ResourceRef    domain.ResourceRef `json:"resource_ref"`
+	PolicyRef      domain.PolicyRef   `json:"policy_ref"`
+	GatewayURL     string             `json:"gateway_url"`
+	Username       string             `json:"username"`
+	ProxyID        string             `json:"proxy_id"`
+	ExpiresAt      time.Time          `json:"expires_at"`
+	RenewBefore    time.Time          `json:"renew_before"`
+	CatalogVersion string             `json:"catalog_version"`
+	CandidateSetID string             `json:"candidate_set_id"`
+}
 
 type Role string
 
@@ -518,7 +534,10 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range body.Events {
-		body.Events[i].TenantID = principal.TenantID
+		if body.Events[i].TenantID == "" {
+			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			return
+		}
 	}
 	respond(w, map[string]int{"accepted": len(body.Events)}, s.svc.RecordUsage(r.Context(), body.Events), http.StatusAccepted)
 }
@@ -540,7 +559,10 @@ func (s *Server) gatewayFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range body.Events {
-		body.Events[i].TenantID = principal.TenantID
+		if body.Events[i].TenantID == "" {
+			respond(w, nil, domain.ErrBadRequest, http.StatusOK)
+			return
+		}
 		if body.Events[i].Action == "" {
 			body.Events[i].Action = "gateway_feedback"
 		}
@@ -570,7 +592,29 @@ func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		metrics.LeaseValidateFail.Inc()
 	}
-	respond(w, lease, err, http.StatusOK)
+	if err != nil {
+		respond(w, nil, err, http.StatusOK)
+		return
+	}
+	respond(w, gatewayValidationFromLease(lease), nil, http.StatusOK)
+}
+
+func gatewayValidationFromLease(lease domain.Lease) gatewayValidationResponse {
+	return gatewayValidationResponse{
+		ID:             lease.ID,
+		TenantID:       lease.TenantID,
+		Generation:     lease.Generation,
+		Subject:        lease.Subject,
+		ResourceRef:    lease.ResourceRef,
+		PolicyRef:      lease.PolicyRef,
+		GatewayURL:     lease.GatewayURL,
+		Username:       lease.Username,
+		ProxyID:        lease.ProxyID,
+		ExpiresAt:      lease.ExpiresAt,
+		RenewBefore:    lease.RenewBefore,
+		CatalogVersion: lease.CatalogVersion,
+		CandidateSetID: lease.CandidateSetID,
+	}
 }
 
 // requireAdminAuth wraps a handler to enforce admin-only access for /admin/* routes.
