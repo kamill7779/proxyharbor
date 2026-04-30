@@ -1,11 +1,10 @@
 package config
 
-import "testing"
-
 import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 )
 
 func TestDefaultSelectorIsLocal(t *testing.T) {
