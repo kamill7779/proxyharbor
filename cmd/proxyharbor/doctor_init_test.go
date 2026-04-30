@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/server"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 
 	_ "modernc.org/sqlite"
 )
@@ -144,5 +145,22 @@ func TestEnsureDefaultTenantCreatesTenant(t *testing.T) {
 	}
 	if err := ensureDefaultTenant(context.Background(), store); err != nil {
 		t.Fatalf("ensureDefaultTenant() second error = %v", err)
+	}
+}
+
+func TestEnsureDefaultTenantLeavesDisabledExistingTenant(t *testing.T) {
+	store := server.NewMemoryAdminStore()
+	if err := store.CreateTenant(context.Background(), domain.Tenant{ID: "default", Name: "Default Tenant", Enabled: false}); err != nil {
+		t.Fatalf("CreateTenant(default) error = %v", err)
+	}
+	if err := ensureDefaultTenant(context.Background(), store); err != nil {
+		t.Fatalf("ensureDefaultTenant() error = %v", err)
+	}
+	tenant, err := store.GetTenant(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("GetTenant(default) error = %v", err)
+	}
+	if tenant.Enabled {
+		t.Fatalf("default tenant was re-enabled unexpectedly: %+v", tenant)
 	}
 }

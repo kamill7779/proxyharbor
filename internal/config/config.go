@@ -168,8 +168,9 @@ func load(args []string, validate bool) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	secretsFileFromFlag := flagWasProvided(fs, "secrets-file")
 	cfg.StorageDriver = StorageDriver(*storageStr)
-	if secretsFileFromEnv == "" {
+	if secretsFileFromEnv == "" && !secretsFileFromFlag {
 		cfg.SecretsFile = defaultSecretsFile(string(cfg.StorageDriver), cfg.SQLitePath)
 	}
 	if strings.TrimSpace(cfg.Selector) == "" {
@@ -411,4 +412,14 @@ func envBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func flagWasProvided(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }

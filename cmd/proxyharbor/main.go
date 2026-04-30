@@ -230,7 +230,7 @@ func ensureDefaultTenant(ctx context.Context, adminStore server.AdminStore) erro
 	if adminStore == nil {
 		return nil
 	}
-	if tenant, err := adminStore.GetTenant(ctx, "default"); err == nil && tenant.Enabled {
+	if _, err := adminStore.GetTenant(ctx, "default"); err == nil {
 		return nil
 	}
 	return adminStore.CreateTenant(ctx, domain.Tenant{ID: "default", Name: "Default Tenant", Enabled: true, CreatedAt: time.Now().UTC()})

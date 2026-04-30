@@ -77,6 +77,26 @@ func TestEnvOverridesSecretsFile(t *testing.T) {
 	}
 }
 
+func TestSecretsFileFlagSurvivesSQLiteDefaultPathRewrite(t *testing.T) {
+	dir := t.TempDir()
+	secretsPath := filepath.Join(dir, "custom", "secrets.env")
+	dbPath := filepath.Join(dir, "proxyharbor.db")
+	t.Setenv("PROXYHARBOR_SECRETS_FILE", "")
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "")
+
+	cfg, err := Load([]string{"-storage=sqlite", "-sqlite-path=" + dbPath, "-secrets-file=" + secretsPath})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SecretsFile != secretsPath {
+		t.Fatalf("SecretsFile = %q, want explicit flag path %q", cfg.SecretsFile, secretsPath)
+	}
+	if _, err := os.Stat(secretsPath); err != nil {
+		t.Fatalf("explicit secrets file was not written: %v", err)
+	}
+}
+
 func TestRedisRequiredDefaultSelectorIsZFair(t *testing.T) {
 	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
 	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
