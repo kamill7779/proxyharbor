@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -33,6 +35,63 @@ func TestNewRequiresBaseURL(t *testing.T) {
 	t.Setenv("PROXYHARBOR_BASE_URL", "")
 	if _, err := New(); !errors.Is(err, ErrNoBaseURL) {
 		t.Fatalf("expected ErrNoBaseURL, got %v", err)
+	}
+}
+
+func TestNewReadsSecretsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.env")
+	if err := os.WriteFile(path, []byte("PROXYHARBOR_ADMIN_KEY=file-admin\nPROXYHARBOR_TENANT_KEY=file-tenant\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(WithBaseURL("http://proxyharbor.local"), WithSecretsFile(path))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.Config().AdminKey != "file-admin" || c.Config().TenantKey != "file-tenant" {
+		t.Fatalf("secrets not loaded: %+v", c.Config())
+	}
+}
+
+func TestEnvOverridesSecretsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.env")
+	if err := os.WriteFile(path, []byte("PROXYHARBOR_ADMIN_KEY=file-admin\nPROXYHARBOR_TENANT_KEY=file-tenant\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "env-admin")
+	t.Setenv("PROXYHARBOR_TENANT_KEY", "env-tenant")
+	c, err := New(WithBaseURL("http://proxyharbor.local"), WithSecretsFile(path))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.Config().AdminKey != "env-admin" || c.Config().TenantKey != "env-tenant" {
+		t.Fatalf("env did not override secrets file: %+v", c.Config())
+	}
+}
+
+func TestWithLocalDefaultsDiscoversDataSecrets(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "secrets.env"), []byte("PROXYHARBOR_ADMIN_KEY=local-admin\nPROXYHARBOR_TENANT_KEY=local-tenant\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(WithLocalDefaults())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.Config().BaseURL != "http://localhost:18080" || c.Config().AdminKey != "local-admin" || c.Config().TenantKey != "local-tenant" {
+		t.Fatalf("local defaults not applied: %+v", c.Config())
 	}
 }
 
@@ -67,6 +126,28 @@ func TestGetProxyURLEmbedsCredentials(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Errorf("expected exactly 1 lease call, got %d", calls)
+	}
+}
+
+func TestAdminFallbackSetsDefaultOnBehalfOf(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("ProxyHarbor-Key"); got != "admin-key" {
+			t.Errorf("auth header = %q", got)
+		}
+		if got := r.Header.Get("X-On-Behalf-Of"); got != "default" {
+			t.Errorf("X-On-Behalf-Of = %q, want default", got)
+		}
+		_ = json.NewEncoder(w).Encode(leaseDTO{
+			LeaseID:    "lease-1",
+			Username:   "u",
+			Password:   "p",
+			GatewayURL: "http://gw.local:1080",
+			ProxyID:    "proxy-1",
+			ExpiresAt:  time.Now().Add(5 * time.Minute),
+		})
+	}, WithTenantKey(""))
+	if _, err := c.GetProxyURL(context.Background(), WithForceNew()); err != nil {
+		t.Fatalf("GetProxyURL: %v", err)
 	}
 }
 

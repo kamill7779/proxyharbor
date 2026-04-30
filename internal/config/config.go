@@ -9,10 +9,13 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +35,8 @@ type Config struct {
 	GatewayURL                 string
 	AdminKey                   string
 	KeyPepper                  string
+	SecretsFile                string
+	AutoSecrets                bool
 	AuthRefreshInterval        time.Duration
 	LogFormat                  string
 	LogLevel                   string
@@ -82,12 +87,16 @@ func LoadUnchecked(args []string) (Config, error) {
 }
 
 func load(args []string, validate bool) (Config, error) {
+	secretsFileFromEnv := os.Getenv("PROXYHARBOR_SECRETS_FILE")
+	secretsFile := envStr("PROXYHARBOR_SECRETS_FILE", defaultSecretsFile(envStr("PROXYHARBOR_STORAGE", "sqlite"), envStr("PROXYHARBOR_SQLITE_PATH", "data/proxyharbor.db")))
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
 		Addr:                       envStr("PROXYHARBOR_ADDR", ":8080"),
 		GatewayURL:                 envStr("PROXYHARBOR_GATEWAY_URL", "http://localhost:8080"),
 		AdminKey:                   os.Getenv("PROXYHARBOR_ADMIN_KEY"),
 		KeyPepper:                  os.Getenv("PROXYHARBOR_KEY_PEPPER"),
+		SecretsFile:                secretsFile,
+		AutoSecrets:                envBool("PROXYHARBOR_AUTO_SECRETS", true),
 		AuthRefreshInterval:        envDur("PROXYHARBOR_AUTH_REFRESH_INTERVAL", 5*time.Second),
 		LogFormat:                  envStr("PROXYHARBOR_LOG_FORMAT", "json"),
 		LogLevel:                   envStr("PROXYHARBOR_LOG_LEVEL", "info"),
@@ -129,6 +138,8 @@ func load(args []string, validate bool) (Config, error) {
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
 	fs.StringVar(&cfg.AdminKey, "admin-key", cfg.AdminKey, "bootstrap admin key")
 	fs.StringVar(&cfg.KeyPepper, "key-pepper", cfg.KeyPepper, "key hashing pepper for dynamic mode")
+	fs.StringVar(&cfg.SecretsFile, "secrets-file", cfg.SecretsFile, "local secrets env file for generated admin key and pepper")
+	fs.BoolVar(&cfg.AutoSecrets, "auto-secrets", cfg.AutoSecrets, "generate local secrets when admin key or pepper is missing")
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
@@ -157,17 +168,127 @@ func load(args []string, validate bool) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	secretsFileFromFlag := flagWasProvided(fs, "secrets-file")
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if secretsFileFromEnv == "" && !secretsFileFromFlag {
+		cfg.SecretsFile = defaultSecretsFile(string(cfg.StorageDriver), cfg.SQLitePath)
+	}
 	if strings.TrimSpace(cfg.Selector) == "" {
 		cfg.Selector = "local"
 		if cfg.SelectorRedisRequired {
 			cfg.Selector = "zfair"
 		}
 	}
+	if err := cfg.resolveSecrets(); err != nil {
+		return Config{}, err
+	}
 	if !validate {
 		return cfg, nil
 	}
 	return cfg, cfg.validate()
+}
+
+func (c *Config) resolveSecrets() error {
+	if c.SecretsFile != "" {
+		values, err := readSecretsFile(c.SecretsFile)
+		if err != nil {
+			return err
+		}
+		if c.AdminKey == "" {
+			c.AdminKey = values["PROXYHARBOR_ADMIN_KEY"]
+		}
+		if c.KeyPepper == "" {
+			c.KeyPepper = values["PROXYHARBOR_KEY_PEPPER"]
+		}
+	}
+	if c.AdminKey != "" && c.KeyPepper != "" {
+		return nil
+	}
+	if !c.AutoSecrets || c.StorageDriver != DriverSQLite || c.ClusterEnabled {
+		return nil
+	}
+	if c.SecretsFile == "" {
+		c.SecretsFile = defaultSecretsFile(string(c.StorageDriver), c.SQLitePath)
+	}
+	adminKey := c.AdminKey
+	pepper := c.KeyPepper
+	if adminKey == "" {
+		secret, err := randomSecretHex(32)
+		if err != nil {
+			return err
+		}
+		adminKey = secret
+	}
+	if pepper == "" {
+		secret, err := randomSecretHex(32)
+		if err != nil {
+			return err
+		}
+		pepper = secret
+	}
+	if err := writeSecretsFile(c.SecretsFile, adminKey, pepper); err != nil {
+		return err
+	}
+	c.AdminKey = adminKey
+	c.KeyPepper = pepper
+	return nil
+}
+
+func defaultSecretsFile(storage, sqlitePath string) string {
+	if StorageDriver(storage) != DriverSQLite {
+		return ""
+	}
+	if strings.TrimSpace(sqlitePath) == "" {
+		return filepath.Join("data", "secrets.env")
+	}
+	return filepath.Join(filepath.Dir(sqlitePath), "secrets.env")
+}
+
+func readSecretsFile(path string) (map[string]string, error) {
+	out := map[string]string{}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read secrets file: %w", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return out, nil
+}
+
+func writeSecretsFile(path, adminKey, pepper string) error {
+	if path == "" {
+		return errors.New("secrets file path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create secrets directory: %w", err)
+	}
+	content := "# Generated by ProxyHarbor for single-instance local mode. Do not commit.\n" +
+		"PROXYHARBOR_ADMIN_KEY=" + adminKey + "\n" +
+		"PROXYHARBOR_KEY_PEPPER=" + pepper + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write secrets file: %w", err)
+	}
+	return nil
+}
+
+func randomSecretHex(bytes int) (string, error) {
+	raw := make([]byte, bytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate secret: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 func (c Config) validate() error {
@@ -291,4 +412,14 @@ func envBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func flagWasProvided(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }

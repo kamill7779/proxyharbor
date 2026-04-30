@@ -3,6 +3,8 @@ package proxyharbor
 import (
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,7 @@ type Config struct {
 	BaseURL           string
 	AdminKey          string
 	TenantKey         string
+	SecretsFile       string
 	DefaultKey        string
 	DefaultProviderID string
 
@@ -61,8 +64,19 @@ func envOrDefault(value, env, fallback string) string {
 
 func (c Config) withDefaults() Config {
 	c.BaseURL = envOrDefault(c.BaseURL, "PROXYHARBOR_BASE_URL", "")
+	c.SecretsFile = envOrDefault(c.SecretsFile, "PROXYHARBOR_SECRETS_FILE", "")
 	c.AdminKey = envOrDefault(c.AdminKey, "PROXYHARBOR_ADMIN_KEY", "")
 	c.TenantKey = envOrDefault(c.TenantKey, "PROXYHARBOR_TENANT_KEY", "")
+	if c.SecretsFile != "" {
+		if values, err := readSecretsFile(c.SecretsFile); err == nil {
+			if c.AdminKey == "" {
+				c.AdminKey = values["PROXYHARBOR_ADMIN_KEY"]
+			}
+			if c.TenantKey == "" {
+				c.TenantKey = values["PROXYHARBOR_TENANT_KEY"]
+			}
+		}
+	}
 	if c.DefaultKey == "" {
 		c.DefaultKey = defaultDefaultKey
 	}
@@ -91,4 +105,31 @@ func (c Config) withDefaults() Config {
 		c.DefaultTarget = defaultLeaseTarget
 	}
 	return c
+}
+
+func readSecretsFile(path string) (map[string]string, error) {
+	out := map[string]string{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return out, nil
+}
+
+func localSecretsCandidates() []string {
+	return []string{
+		filepath.Join("data", "secrets.env"),
+		filepath.Join(".", "secrets.env"),
+	}
 }

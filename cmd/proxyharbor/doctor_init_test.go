@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kamill7779/proxyharbor/internal/server"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 
 	_ "modernc.org/sqlite"
 )
@@ -124,5 +128,39 @@ func TestInitSQLiteCreatesSchema(t *testing.T) {
 	code = runInit([]string{"-storage=sqlite", "-sqlite-path=" + dbPath}, &out, &stderr)
 	if code != 0 {
 		t.Fatalf("second init exit code = %d, want 0; stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+}
+
+func TestEnsureDefaultTenantCreatesTenant(t *testing.T) {
+	store := server.NewMemoryAdminStore()
+	if err := ensureDefaultTenant(context.Background(), store); err != nil {
+		t.Fatalf("ensureDefaultTenant() error = %v", err)
+	}
+	tenant, err := store.GetTenant(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("GetTenant(default) error = %v", err)
+	}
+	if tenant.ID != "default" || !tenant.Enabled {
+		t.Fatalf("default tenant = %+v", tenant)
+	}
+	if err := ensureDefaultTenant(context.Background(), store); err != nil {
+		t.Fatalf("ensureDefaultTenant() second error = %v", err)
+	}
+}
+
+func TestEnsureDefaultTenantLeavesDisabledExistingTenant(t *testing.T) {
+	store := server.NewMemoryAdminStore()
+	if err := store.CreateTenant(context.Background(), domain.Tenant{ID: "default", Name: "Default Tenant", Enabled: false}); err != nil {
+		t.Fatalf("CreateTenant(default) error = %v", err)
+	}
+	if err := ensureDefaultTenant(context.Background(), store); err != nil {
+		t.Fatalf("ensureDefaultTenant() error = %v", err)
+	}
+	tenant, err := store.GetTenant(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("GetTenant(default) error = %v", err)
+	}
+	if tenant.Enabled {
+		t.Fatalf("default tenant was re-enabled unexpectedly: %+v", tenant)
 	}
 }

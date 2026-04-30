@@ -26,6 +26,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/control/health"
 	"github.com/kamill7779/proxyharbor/internal/control/selector"
 	"github.com/kamill7779/proxyharbor/internal/server"
+	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 	"github.com/redis/go-redis/v9"
 )
@@ -49,6 +50,9 @@ func main() {
 	if err != nil {
 		logger.Error("load config", "err", err)
 		os.Exit(2)
+	}
+	if cfg.SecretsFile != "" {
+		logger.Info("local secrets ready", "path", cfg.SecretsFile, "admin_key_fp", auth.Fingerprint(cfg.AdminKey))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -156,6 +160,12 @@ func main() {
 	}
 
 	adminStore := buildAdminStore(store)
+	if cfg.AutoSecrets && cfg.StorageDriver == config.DriverSQLite && !cfg.ClusterEnabled {
+		if err := ensureDefaultTenant(ctx, adminStore); err != nil {
+			logger.Error("ensure default tenant", "err", err)
+			os.Exit(1)
+		}
+	}
 	opts := server.Options{
 		Role:           role,
 		HealthRecorder: healthRecorder,
@@ -214,6 +224,16 @@ func buildAdminStore(store storage.Store) server.AdminStore {
 		return sqliteStore.AdminStore()
 	}
 	return server.NewMemoryAdminStore()
+}
+
+func ensureDefaultTenant(ctx context.Context, adminStore server.AdminStore) error {
+	if adminStore == nil {
+		return nil
+	}
+	if _, err := adminStore.GetTenant(ctx, "default"); err == nil {
+		return nil
+	}
+	return adminStore.CreateTenant(ctx, domain.Tenant{ID: "default", Name: "Default Tenant", Enabled: true, CreatedAt: time.Now().UTC()})
 }
 
 func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, func(), error) {
