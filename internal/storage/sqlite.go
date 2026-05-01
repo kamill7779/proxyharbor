@@ -224,6 +224,8 @@ func (s *SQLiteStore) RevokeLease(ctx context.Context, tenantID, id string) erro
 	if n, _ := res.RowsAffected(); n == 0 {
 		if _, err := s.GetLease(ctx, tenantID, id); err == nil {
 			return nil
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return err
 		}
 		return domain.ErrNotFound
 	}
