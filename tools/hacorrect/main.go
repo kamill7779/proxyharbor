@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,14 +23,16 @@ import (
 )
 
 type config struct {
-	BaseURL     string
-	AdminKey    string
-	KeyPepper   string
-	TenantID    string
-	Concurrency int
-	Docker      bool
-	ComposeFile string
-	Timeout     time.Duration
+	BaseURL         string
+	AdminKey        string
+	KeyPepper       string
+	TenantID        string
+	Concurrency     int
+	SelectorSamples int
+	DisableSamples  int
+	Docker          bool
+	ComposeFile     string
+	Timeout         time.Duration
 }
 
 type runner struct {
@@ -72,12 +75,20 @@ func parseFlags() config {
 	flag.StringVar(&cfg.KeyPepper, "key-pepper", envDefault("PROXYHARBOR_KEY_PEPPER", ""), "key pepper used when -docker starts compose")
 	flag.StringVar(&cfg.TenantID, "tenant", "ha-correct", "tenant id")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 24, "concurrent requests per scenario")
+	flag.IntVar(&cfg.SelectorSamples, "selector-samples", 500, "lease creates for zfair weight distribution check")
+	flag.IntVar(&cfg.DisableSamples, "disable-samples", 100, "lease creates after disabling one proxy")
 	flag.BoolVar(&cfg.Docker, "docker", false, "start docker-compose HA test topology")
 	flag.StringVar(&cfg.ComposeFile, "compose-file", "docker-compose.ha-test.yaml", "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 4*time.Minute, "overall timeout")
 	flag.Parse()
 	if cfg.Concurrency < 2 {
 		cfg.Concurrency = 2
+	}
+	if cfg.SelectorSamples < 100 {
+		cfg.SelectorSamples = 100
+	}
+	if cfg.DisableSamples < 20 {
+		cfg.DisableSamples = 20
 	}
 	return cfg
 }
@@ -113,6 +124,8 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 		{name: "setup", fn: r.setup},
 		{name: "idempotent concurrent create", fn: r.checkConcurrentIdempotentCreate},
 		{name: "unique concurrent create", fn: r.checkConcurrentUniqueCreate},
+		{name: "zfair weighted distribution", fn: r.checkZFairWeightedDistribution},
+		{name: "zfair disabled proxy excluded", fn: r.checkDisabledProxyExcluded},
 		{name: "renew revoke race", fn: r.checkRenewRevokeRace},
 		{name: "disabled tenant rejects key", fn: r.checkDisabledTenantRejectsKey},
 	}
@@ -128,15 +141,32 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 
 func (r runner) setup(ctx context.Context) error {
 	_, _, _ = r.request(ctx, http.MethodPost, "/admin/tenants", r.cfg.AdminKey, "", map[string]any{"id": r.cfg.TenantID, "display_name": "HA Correctness"})
-	for i := 0; i < 6; i++ {
-		payload := map[string]any{"id": fmt.Sprintf("ha-proxy-%02d", i), "endpoint": fmt.Sprintf("http://127.0.0.1:%d", 19100+i), "healthy": true, "weight": 1 + i, "health_score": 100}
-		status, body, err := r.request(ctx, http.MethodPost, "/v1/proxies", r.cfg.AdminKey, "", payload)
-		if err != nil {
+	for i := 0; i < 10; i++ {
+		if err := r.upsertProxy(ctx, fmt.Sprintf("ha-proxy-%02d", i), 1+i, true); err != nil {
 			return err
 		}
-		if status != http.StatusCreated && status != http.StatusConflict {
-			return fmt.Errorf("seed proxy status %d: %s", status, body)
-		}
+	}
+	return nil
+}
+
+func (r runner) upsertProxy(ctx context.Context, id string, weight int, healthy bool) error {
+	payload := map[string]any{"id": id, "endpoint": proxyEndpoint(id), "healthy": healthy, "weight": weight, "health_score": 100}
+	status, body, err := r.request(ctx, http.MethodPost, "/v1/proxies", r.cfg.AdminKey, "", payload)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusCreated {
+		return nil
+	}
+	if status != http.StatusConflict {
+		return fmt.Errorf("seed proxy %s status %d: %s", id, status, body)
+	}
+	status, body, err = r.request(ctx, http.MethodPut, "/v1/proxies/"+url.PathEscape(id), r.cfg.AdminKey, "", payload)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("update proxy %s status %d: %s", id, status, body)
 	}
 	return nil
 }
@@ -178,6 +208,48 @@ func (r runner) checkConcurrentUniqueCreate(ctx context.Context) error {
 		return fmt.Errorf("unique create produced duplicate lease ids: %d unique for %d creates", len(ids), len(leases))
 	}
 	return nil
+}
+
+func (r runner) checkZFairWeightedDistribution(ctx context.Context) error {
+	tenantKey, err := r.issueTenantKey(ctx, "zfair-distribution")
+	if err != nil {
+		return err
+	}
+	counts, err := r.createManyLeases(ctx, tenantKey, "zfair-dist", r.cfg.SelectorSamples)
+	if err != nil {
+		return err
+	}
+	totalWeight := 55.0
+	for i := 0; i < 10; i++ {
+		proxyID := fmt.Sprintf("ha-proxy-%02d", i)
+		want := float64(i+1) / totalWeight * float64(r.cfg.SelectorSamples)
+		got := float64(counts[proxyID])
+		lower := math.Max(1, want*0.45)
+		upper := want*1.75 + 2
+		if got < lower || got > upper {
+			return fmt.Errorf("weighted distribution proxy=%s got=%.0f want≈%.1f counts=%v", proxyID, got, want, counts)
+		}
+	}
+	return nil
+}
+
+func (r runner) checkDisabledProxyExcluded(ctx context.Context) error {
+	proxyID := "ha-proxy-09"
+	if err := r.upsertProxy(ctx, proxyID, 10, false); err != nil {
+		return err
+	}
+	tenantKey, err := r.issueTenantKey(ctx, "zfair-disabled")
+	if err != nil {
+		return err
+	}
+	counts, err := r.createManyLeases(ctx, tenantKey, "zfair-disabled", r.cfg.DisableSamples)
+	if err != nil {
+		return err
+	}
+	if counts[proxyID] != 0 {
+		return fmt.Errorf("disabled proxy %s received %d new leases; counts=%v", proxyID, counts[proxyID], counts)
+	}
+	return r.upsertProxy(ctx, proxyID, 10, true)
 }
 
 func (r runner) checkRenewRevokeRace(ctx context.Context) error {
@@ -288,6 +360,56 @@ func (r runner) concurrentCreate(ctx context.Context, tenantKey, idemPrefix stri
 	}
 	wg.Wait()
 	return leases, errs
+}
+
+func (r runner) createManyLeases(ctx context.Context, tenantKey, idemPrefix string, total int) (map[string]int, error) {
+	counts := map[string]int{}
+	errCh := make(chan error, total)
+	leaseCh := make(chan leaseResponse, total)
+	workers := r.cfg.Concurrency
+	if workers > total {
+		workers = total
+	}
+	jobs := make(chan int, total)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				lease, err := r.createLease(ctx, tenantKey, fmt.Sprintf("%s-%d-%d", idemPrefix, time.Now().UnixNano(), job), true)
+				if err != nil {
+					errCh <- err
+					continue
+				}
+				leaseCh <- lease
+			}
+		}()
+	}
+	for i := 0; i < total; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	close(errCh)
+	close(leaseCh)
+	if err := firstErrChan(errCh); err != nil {
+		return nil, err
+	}
+	for lease := range leaseCh {
+		counts[lease.ProxyID]++
+	}
+	if got := len(leaseCh); got != 0 {
+		return nil, fmt.Errorf("internal lease channel not drained: %d", got)
+	}
+	seen := 0
+	for _, count := range counts {
+		seen += count
+	}
+	if seen != total {
+		return nil, fmt.Errorf("created %d leases, want %d; counts=%v", seen, total, counts)
+	}
+	return counts, nil
 }
 
 func (r runner) issueTenantKey(ctx context.Context, label string) (string, error) {
@@ -420,6 +542,16 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func proxyEndpoint(id string) string {
+	_, suffix, ok := strings.Cut(id, "ha-proxy-")
+	if !ok {
+		return "http://127.0.0.1:19100"
+	}
+	var index int
+	_, _ = fmt.Sscanf(suffix, "%02d", &index)
+	return fmt.Sprintf("http://127.0.0.1:%d", 19100+index)
 }
 
 func envDefault(key, fallback string) string {

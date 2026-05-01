@@ -326,6 +326,11 @@ func (c Config) validate() error {
 	if c.SelectorRedisRequired && strings.TrimSpace(c.RedisAddr) == "" {
 		return errors.New("selector=zfair requires PROXYHARBOR_REDIS_ADDR when selector redis is required")
 	}
+	if c.ClusterEnabled && c.StorageDriver == DriverMySQL {
+		if c.Selector != "zfair" || !c.SelectorRedisRequired || strings.TrimSpace(c.RedisAddr) == "" {
+			return errors.New("ha mode requires storage=mysql with selector=zfair, selector-redis-required=true, and PROXYHARBOR_REDIS_ADDR")
+		}
+	}
 	if c.HealthBufferMax <= 0 {
 		return errors.New("health buffer max must be positive")
 	}

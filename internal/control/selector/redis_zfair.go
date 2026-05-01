@@ -131,6 +131,12 @@ type RedisZFair struct {
 	maxScan          int64
 }
 
+type zfairSelectionRequest struct {
+	candidates map[string]domain.Proxy
+	keys       []string
+	args       []any
+}
+
 type RedisZFairConfig struct {
 	Addr             string
 	Password         string
@@ -177,13 +183,19 @@ func (s *RedisZFair) Check(ctx context.Context) error {
 
 func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	if len(candidates) == 0 {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoCandidates, "zfair_no_candidates", nil)
 	}
-	candidateByID := make(map[string]domain.Proxy, len(candidates))
+	req, err := s.buildSelectionRequest(candidates)
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	if len(req.candidates) == 0 {
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoEligible, "zfair_no_eligible_proxy", nil)
+	}
+
 	pipe := s.client.Pipeline()
-	now := s.now()
 	for _, candidate := range candidates {
-		if !eligible(candidate, now) {
+		if _, ok := req.candidates[candidate.ID]; !ok {
 			continue
 		}
 		latencyMS := candidate.LatencyEWMAms
@@ -194,7 +206,6 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 		if !candidate.CircuitOpenUntil.IsZero() {
 			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
 		}
-		candidateByID[candidate.ID] = candidate
 		pipe.HSet(ctx, nodeKey(candidate.ID), map[string]any{
 			"proxy_id":           candidate.ID,
 			"weight":             candidate.Weight,
@@ -205,37 +216,49 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 		pipe.HSetNX(ctx, nodeKey(candidate.ID), "virtual_runtime", 0)
 		pipe.HSetNX(ctx, nodeKey(candidate.ID), "next_eligible_at", 0)
 	}
-	if len(candidateByID) == 0 {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
-	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		return domain.Proxy{}, err
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_candidate_sync_failed", err)
 	}
 
-	keys := []string{readyKey(), delayedKey(), nodePrefix()}
-	args := []any{now.UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
-	for proxyID := range candidateByID {
-		args = append(args, proxyID)
-	}
-	result, err := s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
+	result, err := s.client.Eval(ctx, zfairSelectScript, req.keys, req.args...).Result()
 	if errors.Is(err, redis.Nil) || result == nil {
-		if rebuildErr := s.ensureCandidates(ctx, candidateByID); rebuildErr != nil {
+		if rebuildErr := s.ensureCandidates(ctx, req.candidates); rebuildErr != nil {
 			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_rebuild_failed", rebuildErr)
 		}
-		result, err = s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
+		result, err = s.client.Eval(ctx, zfairSelectScript, req.keys, req.args...).Result()
 		if errors.Is(err, redis.Nil) || result == nil {
-			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_after_rebuild", nil)
+			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorEmptyResult, "redis_empty_result", nil)
 		}
 	}
 	if err != nil {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_eval_failed", err)
 	}
 	values, ok := result.([]any)
+	return parseSelectionResult(values, ok, req.candidates)
+}
+
+func (s *RedisZFair) buildSelectionRequest(candidates []domain.Proxy) (zfairSelectionRequest, error) {
+	now := s.now()
+	eligibleByID := make(map[string]domain.Proxy, len(candidates))
+	for _, candidate := range candidates {
+		if !eligible(candidate, now) {
+			continue
+		}
+		eligibleByID[candidate.ID] = candidate
+	}
+	args := []any{now.UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
+	for proxyID := range eligibleByID {
+		args = append(args, proxyID)
+	}
+	return zfairSelectionRequest{candidates: eligibleByID, keys: []string{readyKey(), delayedKey(), nodePrefix()}, args: args}, nil
+}
+
+func parseSelectionResult(values []any, ok bool, candidates map[string]domain.Proxy) (domain.Proxy, error) {
 	if !ok || len(values) == 0 {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorMalformedResult, "malformed_result", nil)
 	}
 	proxyID := fmt.Sprint(values[0])
-	selected, ok := candidateByID[proxyID]
+	selected, ok := candidates[proxyID]
 	if !ok {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorStaleResult, "stale_result", nil)
 	}

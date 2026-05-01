@@ -111,3 +111,34 @@ func TestRedisRequiredDefaultSelectorIsZFair(t *testing.T) {
 		t.Fatalf("Selector = %q, want zfair", cfg.Selector)
 	}
 }
+
+func TestHAModeRequiresStrictRedisZFair(t *testing.T) {
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
+
+	_, err := Load([]string{
+		"-storage=mysql",
+		"-mysql-dsn=user:pass@tcp(localhost:3306)/proxyharbor",
+		"-cluster-enabled=true",
+		"-selector=local",
+		"-selector-redis-required=false",
+	})
+	if err == nil || !strings.Contains(err.Error(), "ha mode requires storage=mysql with selector=zfair") {
+		t.Fatalf("Load() error = %v, want HA strict zfair requirement", err)
+	}
+
+	cfg, err := Load([]string{
+		"-storage=mysql",
+		"-mysql-dsn=user:pass@tcp(localhost:3306)/proxyharbor",
+		"-cluster-enabled=true",
+		"-selector=zfair",
+		"-selector-redis-required=true",
+		"-redis-addr=redis:6379",
+	})
+	if err != nil {
+		t.Fatalf("Load() strict zfair error = %v", err)
+	}
+	if cfg.Selector != "zfair" || !cfg.SelectorRedisRequired || cfg.RedisAddr == "" {
+		t.Fatalf("cfg = %+v, want strict zfair redis", cfg)
+	}
+}
