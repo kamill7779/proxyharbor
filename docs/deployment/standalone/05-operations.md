@@ -24,7 +24,7 @@ proxyharbor init -storage=sqlite -sqlite-path=./data/proxyharbor.db
 
 ```bash
 proxyharbor backup  -sqlite-path=./data/proxyharbor.db -output=./backup/proxyharbor.db
-proxyharbor restore -sqlite-path=./data/proxyharbor.db -input=./backup/proxyharbor.db
+proxyharbor restore -sqlite-path=./data/proxyharbor.db -input=./backup/proxyharbor.db --force
 ```
 
 ## retention
@@ -32,7 +32,7 @@ proxyharbor restore -sqlite-path=./data/proxyharbor.db -input=./backup/proxyharb
 retention 用来清理审计和使用记录。默认不强制清理，生产可以按磁盘容量设置保留天数。
 
 ```bash
-proxyharbor retention -storage=sqlite -sqlite-path=./data/proxyharbor.db -audit-retention-days=30 -usage-retention-days=30
+proxyharbor retention -sqlite-path=./data/proxyharbor.db -audit-days=30 -usage-days=30 --execute
 ```
 
 ## 升级建议
@@ -40,4 +40,3 @@ proxyharbor retention -storage=sqlite -sqlite-path=./data/proxyharbor.db -audit-
 - 先备份 SQLite DB 和 `secrets.env`。
 - 再替换 binary / image。
 - 最后访问 `/readyz` 和 `/metrics` 确认服务恢复。
-

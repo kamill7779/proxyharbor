@@ -49,7 +49,7 @@ client, err := proxyharbor.New(proxyharbor.WithLocalDefaults())
 - `BaseURL=http://localhost:18080`
 - `data/secrets.env`
 
-如果环境变量已经显式设置，环境变量仍然优先。
+`WithLocalDefaults()` 本身也是显式 Option：它会在没有其他 Option 覆盖时把 `BaseURL` 设为 `http://localhost:18080`，并自动发现 `data/secrets.env`。如果你希望使用 `PROXYHARBOR_BASE_URL`，不要调用 `WithLocalDefaults()`，或者在它后面再传 `WithBaseURL(os.Getenv("PROXYHARBOR_BASE_URL"))`。
 
 ## RetryConfig
 
@@ -76,4 +76,3 @@ proxyharbor.LeasePolicy{
 ```
 
 `BackgroundKeepAlive` 当前预留给后续后台保活能力。当前主路径是在 `GetProxy` 调用时按需 renew / reacquire。
-
