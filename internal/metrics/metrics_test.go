@@ -56,3 +56,18 @@ func TestWriteMetricsPreservesHistogramSumPrecision(t *testing.T) {
 		t.Fatalf("metrics body contains literal backslash-n before count: %q", body)
 	}
 }
+
+func TestSelectorResultMetricsUseLowCardinalityLabels(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeMetrics(rec)
+	body := rec.Body.String()
+	if !strings.Contains(body, `proxyharbor_selector_results_total{mode="zfair",result="redis_error",error_kind="selector_redis"}`) {
+		t.Fatalf("metrics body missing zfair redis_error selector result: %q", body)
+	}
+	if !strings.Contains(body, `proxyharbor_selector_results_total{mode="zfair",result="selected",error_kind="none"}`) {
+		t.Fatalf("metrics body missing zfair selected selector result: %q", body)
+	}
+	if strings.Contains(body, "tenant_id=") || strings.Contains(body, "proxy_id=") {
+		t.Fatalf("selector metrics contain high-cardinality labels: %q", body)
+	}
+}

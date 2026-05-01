@@ -58,7 +58,7 @@ end
 if redis.call('ZCARD', ready) == 0 then
   for proxy_id, _ in pairs(allowed) do
     local node_key = node_prefix .. proxy_id
-    if redis.call('EXISTS', node_key) == 1 and redis.call('ZSCORE', delayed, proxy_id) == false then
+    if redis.call('EXISTS', node_key) == 1 then
       local node = redis.call('HMGET', node_key, 'weight', 'health_score', 'circuit_open_until', 'next_eligible_at', 'virtual_runtime')
       local weight = tonumber(node[1]) or 0
       local health_score = tonumber(node[2]) or 0
@@ -71,6 +71,7 @@ if redis.call('ZCARD', ready) == 0 then
         elseif next_eligible_at > now_ms then
           redis.call('ZADD', delayed, next_eligible_at, proxy_id)
         else
+          redis.call('ZREM', delayed, proxy_id)
           redis.call('ZADD', ready, vr, proxy_id)
         end
       end
@@ -122,6 +123,47 @@ end
 return nil
 `
 
+const zfairFallbackScript = `
+local node_prefix = KEYS[1]
+local quantum = tonumber(ARGV[1])
+local default_latency_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local best_id = nil
+local best_vr = nil
+local best_weight = nil
+for i = 4, #ARGV do
+  local proxy_id = ARGV[i]
+  local node_key = node_prefix .. proxy_id
+  if redis.call('EXISTS', node_key) == 1 then
+    local node = redis.call('HMGET', node_key, 'weight', 'health_score', 'latency_ewma_ms', 'circuit_open_until', 'virtual_runtime')
+    local weight = tonumber(node[1]) or 0
+    local health_score = tonumber(node[2]) or 0
+    local latency_ms = tonumber(node[3]) or default_latency_ms
+    local circuit_open_until = tonumber(node[4]) or 0
+    local vr = tonumber(node[5]) or 0
+    if weight > 0 and health_score > 0 and circuit_open_until <= now_ms then
+      local health_factor = health_score / 100
+      local latency_factor = 1 / (1 + latency_ms / 1000)
+      local effective_weight = weight * health_factor * latency_factor
+      if effective_weight <= 0 then
+        effective_weight = 1
+      end
+      if best_id == nil or vr < best_vr then
+        best_id = proxy_id
+        best_vr = vr
+        best_weight = effective_weight
+      end
+    end
+  end
+end
+if best_id == nil then
+  return nil
+end
+local new_vr = best_vr + quantum / best_weight
+redis.call('HSET', node_prefix .. best_id, 'virtual_runtime', new_vr, 'next_eligible_at', now_ms)
+return {best_id, tostring(new_vr), tostring(best_weight), tostring(now_ms)}
+`
+
 type RedisZFair struct {
 	client           *redis.Client
 	now              func() time.Time
@@ -129,6 +171,12 @@ type RedisZFair struct {
 	defaultLatencyMS int64
 	maxPromote       int64
 	maxScan          int64
+}
+
+type zfairSelectionRequest struct {
+	candidates map[string]domain.Proxy
+	keys       []string
+	args       []any
 }
 
 type RedisZFairConfig struct {
@@ -177,13 +225,19 @@ func (s *RedisZFair) Check(ctx context.Context) error {
 
 func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ SelectOptions) (domain.Proxy, error) {
 	if len(candidates) == 0 {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoCandidates, "zfair_no_candidates", nil)
 	}
-	candidateByID := make(map[string]domain.Proxy, len(candidates))
+	req, err := s.buildSelectionRequest(candidates)
+	if err != nil {
+		return domain.Proxy{}, err
+	}
+	if len(req.candidates) == 0 {
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoEligible, "zfair_no_eligible_proxy", nil)
+	}
+
 	pipe := s.client.Pipeline()
-	now := s.now()
 	for _, candidate := range candidates {
-		if !eligible(candidate, now) {
+		if _, ok := req.candidates[candidate.ID]; !ok {
 			continue
 		}
 		latencyMS := candidate.LatencyEWMAms
@@ -194,7 +248,6 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 		if !candidate.CircuitOpenUntil.IsZero() {
 			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
 		}
-		candidateByID[candidate.ID] = candidate
 		pipe.HSet(ctx, nodeKey(candidate.ID), map[string]any{
 			"proxy_id":           candidate.ID,
 			"weight":             candidate.Weight,
@@ -205,37 +258,80 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 		pipe.HSetNX(ctx, nodeKey(candidate.ID), "virtual_runtime", 0)
 		pipe.HSetNX(ctx, nodeKey(candidate.ID), "next_eligible_at", 0)
 	}
-	if len(candidateByID) == 0 {
-		return domain.Proxy{}, domain.ErrNoHealthyProxy
-	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		return domain.Proxy{}, err
+		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_candidate_sync_failed", err)
 	}
 
-	keys := []string{readyKey(), delayedKey(), nodePrefix()}
-	args := []any{now.UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
-	for proxyID := range candidateByID {
-		args = append(args, proxyID)
-	}
-	result, err := s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
+	result, err := s.evalSelect(ctx, req)
 	if errors.Is(err, redis.Nil) || result == nil {
-		if rebuildErr := s.ensureCandidates(ctx, candidateByID); rebuildErr != nil {
+		if rebuildErr := s.ensureCandidates(ctx, req.candidates); rebuildErr != nil {
 			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_rebuild_failed", rebuildErr)
 		}
-		result, err = s.client.Eval(ctx, zfairSelectScript, keys, args...).Result()
+		result, err = s.evalSelect(ctx, req)
 		if errors.Is(err, redis.Nil) || result == nil {
-			return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorReadyRebuild, "ready_empty_after_rebuild", nil)
+			result, err = s.evalFallback(ctx, req)
+			if errors.Is(err, redis.Nil) || result == nil {
+				return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorEmptyResult, "redis_empty_result", nil)
+			}
 		}
 	}
 	if err != nil {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_eval_failed", err)
 	}
 	values, ok := result.([]any)
+	return parseSelectionResult(values, ok, req.candidates)
+}
+
+func (s *RedisZFair) evalFallback(ctx context.Context, req zfairSelectionRequest) (any, error) {
+	args := []any{s.quantum, s.defaultLatencyMS, s.now().UTC().UnixMilli()}
+	args = append(args, req.args[5:]...)
+	return s.client.Eval(ctx, zfairFallbackScript, []string{nodePrefix()}, args...).Result()
+}
+
+func (s *RedisZFair) evalSelect(ctx context.Context, req zfairSelectionRequest) (any, error) {
+	var result any
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		result, err = s.client.Eval(ctx, zfairSelectScript, req.keys, req.args...).Result()
+		if !errors.Is(err, redis.Nil) && result != nil {
+			return result, err
+		}
+		if seedErr := s.seedCandidates(ctx, req.candidates); seedErr != nil {
+			return nil, seedErr
+		}
+		if attempt > 0 {
+			select {
+			case <-time.After(time.Duration(attempt) * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return result, err
+}
+
+func (s *RedisZFair) buildSelectionRequest(candidates []domain.Proxy) (zfairSelectionRequest, error) {
+	now := s.now()
+	eligibleByID := make(map[string]domain.Proxy, len(candidates))
+	for _, candidate := range candidates {
+		if !eligible(candidate, now) {
+			continue
+		}
+		eligibleByID[candidate.ID] = candidate
+	}
+	args := []any{now.UTC().UnixMilli(), s.quantum, s.defaultLatencyMS, s.maxPromote, s.maxScan}
+	for proxyID := range eligibleByID {
+		args = append(args, proxyID)
+	}
+	return zfairSelectionRequest{candidates: eligibleByID, keys: []string{readyKey(), delayedKey(), nodePrefix()}, args: args}, nil
+}
+
+func parseSelectionResult(values []any, ok bool, candidates map[string]domain.Proxy) (domain.Proxy, error) {
 	if !ok || len(values) == 0 {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorMalformedResult, "malformed_result", nil)
 	}
 	proxyID := fmt.Sprint(values[0])
-	selected, ok := candidateByID[proxyID]
+	selected, ok := candidates[proxyID]
 	if !ok {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorStaleResult, "stale_result", nil)
 	}
@@ -249,10 +345,16 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, candidates map[string
 		return err
 	}
 	if !locked {
-		return s.waitForRebuild(ctx)
+		if err := s.waitForRebuild(ctx); err != nil {
+			return err
+		}
+		return s.seedCandidates(ctx, candidates)
 	}
 	defer s.client.Del(context.Background(), lockKey)
+	return s.seedCandidates(ctx, candidates)
+}
 
+func (s *RedisZFair) seedCandidates(ctx context.Context, candidates map[string]domain.Proxy) error {
 	pipe := s.client.Pipeline()
 	nowMS := s.now().UTC().UnixMilli()
 	for proxyID, candidate := range candidates {
@@ -274,7 +376,7 @@ func (s *RedisZFair) ensureCandidates(ctx context.Context, candidates map[string
 		}
 		pipe.ZAdd(ctx, readyKey(), redis.Z{Score: score, Member: proxyID})
 	}
-	_, err = pipe.Exec(ctx)
+	_, err := pipe.Exec(ctx)
 	return err
 }
 

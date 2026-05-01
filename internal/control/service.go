@@ -110,7 +110,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if err != nil {
 		s.logSelectorError(principal.TenantID, len(candidates), err)
 		metrics.SelectorErrors.Inc()
-		s.incrementSelectorError()
+		s.incrementSelectorError(err)
 		return domain.Lease{}, err
 	}
 	s.incrementSelectorSelected()
@@ -423,12 +423,38 @@ func (s *Service) observeSelectorLatency(latencyMS float64) {
 	}
 }
 
-func (s *Service) incrementSelectorError() {
+func (s *Service) incrementSelectorError(err error) {
 	switch s.selectorMode {
 	case selector.NameZFair:
 		metrics.SelectorZFairErrors.Inc()
+		switch domain.ErrorKindOf(err) {
+		case domain.ErrorKindSelectorNoCandidates:
+			metrics.SelectorZFairNoCandidateErrors.Inc()
+		case domain.ErrorKindSelectorNoEligible:
+			metrics.SelectorZFairNoEligibleErrors.Inc()
+		case domain.ErrorKindSelectorRedis:
+			metrics.SelectorZFairRedisErrors.Inc()
+		case domain.ErrorKindSelectorMalformedResult:
+			metrics.SelectorZFairMalformedErrors.Inc()
+		case domain.ErrorKindSelectorStaleResult:
+			metrics.SelectorZFairStaleErrors.Inc()
+		case domain.ErrorKindSelectorEmptyResult:
+			metrics.SelectorZFairEmptyErrors.Inc()
+		case domain.ErrorKindSelectorReadyRebuild:
+			metrics.SelectorZFairRebuildErrors.Inc()
+		default:
+			metrics.SelectorZFairUnknownErrors.Inc()
+		}
 	default:
 		metrics.SelectorLocalErrors.Inc()
+		switch domain.ErrorKindOf(err) {
+		case domain.ErrorKindSelectorNoCandidates:
+			metrics.SelectorLocalNoCandidateErrors.Inc()
+		case domain.ErrorKindSelectorNoEligible:
+			metrics.SelectorLocalNoEligibleErrors.Inc()
+		default:
+			metrics.SelectorLocalUnknownErrors.Inc()
+		}
 	}
 }
 
@@ -436,6 +462,7 @@ func (s *Service) incrementSelectorSelected() {
 	switch s.selectorMode {
 	case selector.NameZFair:
 		metrics.SelectorZFairSelected.Inc()
+		metrics.SelectorZFairSelectedResult.Inc()
 	default:
 		metrics.SelectorLocalSelected.Inc()
 	}
