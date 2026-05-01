@@ -108,6 +108,21 @@ func TestSQLiteLeaseRenewCASFailures(t *testing.T) {
 	}
 }
 
+func TestSQLiteRevokeLeaseIsIdempotentForExistingLease(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	lease := testLease("lease-revoke-idempotent")
+	if _, err := store.CreateLease(ctx, testScope("idem-revoke-idempotent"), lease); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+	if err := store.RevokeLease(ctx, lease.TenantID, lease.ID); err != nil {
+		t.Fatalf("RevokeLease() first error = %v", err)
+	}
+	if err := store.RevokeLease(ctx, lease.TenantID, lease.ID); err != nil {
+		t.Fatalf("RevokeLease() second error = %v", err)
+	}
+}
+
 func TestSQLiteAuditListStableOrder(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	ctx := context.Background()
@@ -248,8 +263,25 @@ func TestSQLiteTenantKeyHashUnique(t *testing.T) {
 	}
 	key.ID = "key-b"
 	key.KeyFP = "fp-b"
-	if err := admin.CreateTenantKey(ctx, key); err == nil {
-		t.Fatal("CreateTenantKey() duplicate hash error = nil, want unique constraint failure")
+	if err := admin.CreateTenantKey(ctx, key); !errors.Is(err, domain.ErrIdempotencyConflict) {
+		t.Fatalf("CreateTenantKey() duplicate error = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
+func TestSQLiteAdminStoreCreateTenantKeyRejectsDisabledTenant(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	admin := store.AdminStore()
+	if err := admin.CreateTenant(ctx, domain.Tenant{ID: "tenant-a", Name: "Tenant A", Enabled: true}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	status := "disabled"
+	if err := admin.UpdateTenant(ctx, "tenant-a", nil, &status); err != nil {
+		t.Fatalf("UpdateTenant(disabled) error = %v", err)
+	}
+	err := admin.CreateTenantKey(ctx, auth.TenantKey{ID: "key-a", TenantID: "tenant-a", KeyHash: "001122", KeyFP: "fp-a", CreatedAt: time.Now().UTC()})
+	if !errors.Is(err, domain.ErrTenantDisabled) {
+		t.Fatalf("CreateTenantKey() error = %v, want ErrTenantDisabled", err)
 	}
 }
 

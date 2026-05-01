@@ -123,7 +123,7 @@ func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, le
 		 VALUES (?,?,?,?,?,?,?)`,
 		scope.String(), scope.TenantID, scope.StableSubjectID, scope.ResourceRef, scope.RequestKind, lease.ID, time.Now().UTC(),
 	); err != nil {
-		if isDuplicateKey(err) {
+		if isMySQLDuplicateKey(err) {
 			_ = tx.Rollback()
 			return s.leaseByIdempotencyAfterConflict(ctx, scope)
 		}
@@ -146,7 +146,7 @@ func (s *MySQLStore) leaseByIdempotencyAfterConflict(ctx context.Context, scope 
 	return s.GetLease(ctx, scope.TenantID, existing)
 }
 
-func isDuplicateKey(err error) bool {
+func isMySQLDuplicateKey(err error) bool {
 	var mysqlErr *mysql.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
 }
@@ -202,13 +202,18 @@ func (s *MySQLStore) UpdateLease(ctx context.Context, lease domain.Lease) (domai
 
 func (s *MySQLStore) RevokeLease(ctx context.Context, tenantID, id string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE proxy_leases SET revoked = TRUE, updated_at = ? WHERE tenant_id = ? AND lease_id = ?`,
+		`UPDATE proxy_leases SET revoked = TRUE, updated_at = ? WHERE tenant_id = ? AND lease_id = ? AND revoked = FALSE`,
 		time.Now().UTC(), tenantID, id,
 	)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := s.GetLease(ctx, tenantID, id); err == nil {
+			return nil
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
 		return domain.ErrNotFound
 	}
 	return nil

@@ -114,6 +114,9 @@ func (s *MemoryStore) RevokeLease(_ context.Context, tenantID, id string) error 
 	if !ok {
 		return domain.ErrNotFound
 	}
+	if lease.Revoked {
+		return nil
+	}
 	lease.Revoked = true
 	lease.UpdatedAt = time.Now().UTC()
 	s.leases[leaseKey] = lease
