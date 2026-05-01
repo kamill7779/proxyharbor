@@ -3,7 +3,9 @@ package selector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +94,60 @@ func TestRedisZFairSelectMapsMalformedAndStaleResults(t *testing.T) {
 	_, err = parseSelectionResult([]any{"stale"}, true, candidates)
 	if !errors.Is(err, domain.ErrNoHealthyProxy) || domain.ErrorKindOf(err) != domain.ErrorKindSelectorStaleResult {
 		t.Fatalf("stale error mapping = %v kind=%q", err, domain.ErrorKindOf(err))
+	}
+}
+
+func TestRedisZFairFallbackSelectsFromRedisNodes(t *testing.T) {
+	server := miniredis.RunT(t)
+	sel := newTestRedisZFair(t, server)
+	candidates := []domain.Proxy{{ID: "a", Healthy: true, Weight: 1, HealthScore: 100}, {ID: "b", Healthy: true, Weight: 2, HealthScore: 100}}
+	request, err := sel.buildSelectionRequest(candidates)
+	if err != nil {
+		t.Fatalf("buildSelectionRequest() error = %v", err)
+	}
+	for _, candidate := range candidates {
+		if err := sel.client.HSet(context.Background(), nodeKey(candidate.ID), map[string]any{"weight": candidate.Weight, "health_score": candidate.HealthScore, "latency_ewma_ms": 200, "circuit_open_until": 0, "virtual_runtime": 0, "next_eligible_at": 0}).Err(); err != nil {
+			t.Fatalf("HSet node error = %v", err)
+		}
+	}
+	if err := sel.seedCandidates(context.Background(), request.candidates); err != nil {
+		t.Fatalf("seedCandidates() error = %v", err)
+	}
+	selected, err := sel.evalFallback(context.Background(), request)
+	if err != nil {
+		t.Fatalf("evalFallback() error = %v", err)
+	}
+	proxy, err := parseSelectionResult(selected.([]any), true, request.candidates)
+	if err != nil {
+		t.Fatalf("parseSelectionResult() error = %v", err)
+	}
+	if proxy.ID == "" {
+		t.Fatalf("fallback selected empty proxy: %+v", proxy)
+	}
+}
+func TestRedisZFairConcurrentSelectDoesNotReturnEmpty(t *testing.T) {
+	server := miniredis.RunT(t)
+	sel := newTestRedisZFair(t, server)
+	candidates := make([]domain.Proxy, 10)
+	for i := range candidates {
+		candidates[i] = domain.Proxy{ID: fmt.Sprintf("proxy-%02d", i), Healthy: true, Weight: i + 1, HealthScore: 100}
+	}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1200)
+	for i := 0; i < 1200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := sel.Select(context.Background(), candidates, SelectOptions{})
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Select() error = %v kind=%q reason=%q", err, domain.ErrorKindOf(err), domain.ErrorReason(err))
+		}
 	}
 }
 
