@@ -112,6 +112,7 @@ func (d *DynamicStore) Snapshot() Snapshot {
 	if lastUnix > 0 {
 		last = time.Unix(lastUnix, 0).UTC()
 		stale = int64(time.Since(last).Seconds())
+		metrics.AuthCacheStaleSeconds.Set(float64(stale))
 	}
 	var lastErr string
 	if p := d.lastError.Load(); p != nil {
@@ -224,6 +225,7 @@ func (d *DynamicStore) markRefreshSuccess() {
 	d.lastError.Store(nil)
 	d.successes.Add(1)
 	metrics.AuthRefreshSuccess.Inc()
+	metrics.AuthCacheStaleSeconds.Set(0)
 }
 
 func (d *DynamicStore) recordError(err error) {
@@ -234,6 +236,9 @@ func (d *DynamicStore) recordError(err error) {
 	d.lastError.Store(&msg)
 	d.failures.Add(1)
 	metrics.AuthRefreshFail.Inc()
+	if last := d.lastRefreshUnix.Load(); last > 0 {
+		metrics.AuthCacheStaleSeconds.Set(time.Since(time.Unix(last, 0)).Seconds())
+	}
 }
 
 func (d *DynamicStore) applyRows(rows []TenantKeyRow) {

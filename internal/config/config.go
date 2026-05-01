@@ -342,6 +342,9 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("invalid auth invalidation transport: %q", c.AuthInvalidation)
 	}
+	if strings.EqualFold(strings.TrimSpace(c.AuthInvalidation), "redis") && strings.TrimSpace(c.RedisAddr) == "" {
+		return errors.New("auth invalidation redis mode requires PROXYHARBOR_REDIS_ADDR")
+	}
 
 	if c.AdminKey == "" {
 		return errors.New("PROXYHARBOR_ADMIN_KEY is required")

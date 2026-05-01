@@ -181,21 +181,20 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 	if !safeTarget(target) {
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
-	lease, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID)
-	if !hit {
-		var err error
-		lease, err = s.store.GetLease(ctx, tenantID, leaseID)
-		if err != nil {
-			return domain.Lease{}, err
+	if cached, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID); hit {
+		_ = cached
+	}
+	lease, err := s.store.GetLease(ctx, tenantID, leaseID)
+	if err != nil {
+		return domain.Lease{}, err
+	}
+	remain := time.Until(lease.ExpiresAt)
+	if remain > 0 {
+		ttl := s.cacheTTL
+		if remain < ttl {
+			ttl = remain
 		}
-		remain := time.Until(lease.ExpiresAt)
-		if remain > 0 {
-			ttl := s.cacheTTL
-			if remain < ttl {
-				ttl = remain
-			}
-			_ = s.cache.PutLease(ctx, lease, ttl)
-		}
+		_ = s.cache.PutLease(ctx, lease, ttl)
 	}
 	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
 		return domain.Lease{}, domain.ErrAuthFailed
@@ -235,9 +234,6 @@ func proxySelectable(proxy domain.Proxy, now time.Time) bool {
 }
 
 func (s *Service) Catalog(ctx context.Context) (domain.Catalog, error) {
-	if cat, hit, _ := s.cache.GetCatalog(ctx); hit {
-		return cat, nil
-	}
 	cat, err := s.store.LatestCatalog(ctx)
 	if err == nil {
 		_ = s.cache.PutCatalog(ctx, cat, s.cacheTTL)

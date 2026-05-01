@@ -96,7 +96,15 @@ func main() {
 	// this client is dedicated to pub/sub so subscribe blocking does not
 	// stall normal traffic.
 	var invalidationClient *redis.Client
-	if cfg.RedisAddr != "" && cfg.AuthInvalidation != "polling" {
+	authInvalidationMode := strings.ToLower(strings.TrimSpace(cfg.AuthInvalidation))
+	if authInvalidationMode == "" {
+		authInvalidationMode = "auto"
+	}
+	if authInvalidationMode == "redis" && strings.TrimSpace(cfg.RedisAddr) == "" {
+		logger.Error("auth invalidation redis mode requires redis address")
+		os.Exit(1)
+	}
+	if cfg.RedisAddr != "" {
 		invalidationClient = redis.NewClient(&redis.Options{
 			Addr:         cfg.RedisAddr,
 			Password:     cfg.RedisPassword,
@@ -150,11 +158,19 @@ func main() {
 	defer authClose()
 
 	var invalidator auth.Invalidator = auth.NoopInvalidator{}
+	var invalidationStatus auth.StatusReporter = auth.NewStatusReporter("polling", "fallback")
+	hotCache := cacheHotInvalidator(cacheImpl)
 	if invalidationClient != nil {
 		invalidator = auth.NewRedisInvalidator(invalidationClient, auth.DefaultInvalidationChannel, logger)
-		if dynamicStore != nil {
+		if dynamicStore != nil || hotCache != nil {
+			statusTracker := auth.NewStatusTrackerWithRequired("redis", "configured", authInvalidationMode == "redis" || hotCache != nil)
+			invalidationStatus = statusTracker
+			subDynamicStore := dynamicStore
+			if authInvalidationMode == "polling" {
+				subDynamicStore = nil
+			}
 			subCtx, subCancel := context.WithCancel(ctx)
-			go auth.SubscribeInvalidations(subCtx, invalidationClient, auth.DefaultInvalidationChannel, dynamicStore, logger)
+			go auth.SubscribeCacheInvalidationsWithStatus(subCtx, invalidationClient, auth.DefaultInvalidationChannel, subDynamicStore, hotCache, statusTracker, logger)
 			defer subCancel()
 		}
 	}
@@ -167,15 +183,16 @@ func main() {
 		}
 	}
 	opts := server.Options{
-		Role:           role,
-		HealthRecorder: healthRecorder,
-		Dependency:     dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl},
-		AdminStore:     adminStore,
-		Pepper:         cfg.KeyPepper,
-		Invalidator:    invalidator,
-		InstanceID:     instanceID,
-		ClusterStore:   clusterStoreForOptions(store),
-		ClusterSummary: clusterSummary(cfg),
+		Role:               role,
+		HealthRecorder:     healthRecorder,
+		Dependency:         dependencyChecks{store: store, cache: cacheImpl, selector: selectorImpl},
+		AdminStore:         adminStore,
+		Pepper:             cfg.KeyPepper,
+		Invalidator:        invalidator,
+		InvalidationStatus: invalidationStatus,
+		InstanceID:         instanceID,
+		ClusterStore:       clusterStoreForOptions(store),
+		ClusterSummary:     clusterSummary(cfg),
 	}
 	if dynamicStore != nil {
 		readyChecker := dynamicAuthReady{store: dynamicStore}
@@ -214,6 +231,14 @@ func main() {
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer drainCancel()
 	healthRecorder.Close(drainCtx)
+}
+
+func cacheHotInvalidator(cacheImpl cache.Cache) auth.HotCacheInvalidator {
+	hot, ok := cacheImpl.(auth.HotCacheInvalidator)
+	if !ok {
+		return nil
+	}
+	return hot
 }
 
 func buildAdminStore(store storage.Store) server.AdminStore {

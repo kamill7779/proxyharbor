@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/redis/go-redis/v9"
 )
 
-// Redis 用 Redis 作为热路径缓存。所有 key 形如 "ph:{kind}:{tenant}:{id}"。
 type Redis struct {
-	client *redis.Client
+	client      *redis.Client
+	invalidator auth.Invalidator
 }
 
 type cachedLease struct {
@@ -21,12 +22,11 @@ type cachedLease struct {
 	PasswordHash string `json:"password_hash"`
 }
 
-// NewRedis 建立一个 ping 通过的 Redis 缓存。如果 addr 为空，调用方应使用 Noop。
 func NewRedis(ctx context.Context, addr, password string, db int) (*Redis, error) {
 	if addr == "" {
-		return nil, errors.New("redis addr 为空")
+		return nil, errors.New("redis addr is empty")
 	}
-	c := redis.NewClient(&redis.Options{
+	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
 		Password:     password,
 		DB:           db,
@@ -36,11 +36,11 @@ func NewRedis(ctx context.Context, addr, password string, db int) (*Redis, error
 	})
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := c.Ping(pingCtx).Err(); err != nil {
-		_ = c.Close()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		_ = client.Close()
 		return nil, fmt.Errorf("redis ping: %w", err)
 	}
-	return &Redis{client: c}, nil
+	return &Redis{client: client, invalidator: auth.NewRedisInvalidator(client, auth.DefaultInvalidationChannel, nil)}, nil
 }
 
 func (r *Redis) Close() error { return r.client.Close() }
@@ -89,7 +89,11 @@ func (r *Redis) PutLease(ctx context.Context, lease domain.Lease, ttl time.Durat
 }
 
 func (r *Redis) InvalidateLease(ctx context.Context, tenantID, leaseID string) error {
-	return r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err()
+	if err := r.InvalidateLeaseLocal(ctx, tenantID, leaseID); err != nil {
+		return err
+	}
+	_ = r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheLease, Action: auth.ActionInvalidate, Reason: "lease_change"})
+	return nil
 }
 
 func (r *Redis) GetCatalog(ctx context.Context) (domain.Catalog, bool, error) {
@@ -118,6 +122,37 @@ func (r *Redis) PutCatalog(ctx context.Context, catalog domain.Catalog, ttl time
 	return r.client.Set(ctx, catalogKey(), raw, ttl).Err()
 }
 
-func (r *Redis) InvalidateCatalog(ctx context.Context) error {
+func (r *Redis) InvalidateCatalogLocal(ctx context.Context) error {
 	return r.client.Del(ctx, catalogKey()).Err()
+}
+
+func (r *Redis) InvalidateLeaseLocal(ctx context.Context, tenantID, leaseID string) error {
+	return r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err()
+}
+
+func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
+	var cursor uint64
+	for {
+		keys, next, err := r.client.Scan(ctx, cursor, "ph:lease:*", 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := r.client.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
+func (r *Redis) InvalidateCatalog(ctx context.Context) error {
+	if err := r.InvalidateCatalogLocal(ctx); err != nil {
+		return err
+	}
+	_ = r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheCatalog, Action: auth.ActionInvalidate, Reason: "catalog_change"})
+	return nil
 }

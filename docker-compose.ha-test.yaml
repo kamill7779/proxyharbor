@@ -42,7 +42,10 @@ services:
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
-      PROXYHARBOR_CACHE_TTL: 1s
+      PROXYHARBOR_CACHE_TTL: 30s
+      PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+    ports:
+      - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_A:-18083}:8080"
     depends_on:
       mysql:
         condition: service_healthy
@@ -64,7 +67,10 @@ services:
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
-      PROXYHARBOR_CACHE_TTL: 1s
+      PROXYHARBOR_CACHE_TTL: 30s
+      PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+    ports:
+      - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_B:-18084}:8080"
 
   proxyharbor-c:
     <<: *proxyharbor
@@ -81,7 +87,10 @@ services:
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
-      PROXYHARBOR_CACHE_TTL: 1s
+      PROXYHARBOR_CACHE_TTL: 30s
+      PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+    ports:
+      - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_C:-18085}:8080"
 
   nginx:
     image: nginx:1.27-alpine
@@ -93,4 +102,3 @@ services:
       - proxyharbor-a
       - proxyharbor-b
       - proxyharbor-c
-

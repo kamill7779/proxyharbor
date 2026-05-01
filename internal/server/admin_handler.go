@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -43,18 +44,20 @@ func newAdminHandler(store AdminStore, pepper string, invalidator auth.Invalidat
 	return &adminHandler{store: store, pepper: pepper, invalidator: invalidator, instanceID: instanceID}
 }
 
-func (h *adminHandler) emit(ctx context.Context, reason, tenantID, keyID string) {
+func (h *adminHandler) emit(_ context.Context, reason, tenantID, keyID string) {
+	_ = tenantID
+	_ = keyID
 	ev := auth.InvalidationEvent{
-		Reason:     reason,
-		TenantID:   tenantID,
-		KeyID:      keyID,
-		InstanceID: h.instanceID,
+		Cache:    auth.CacheAuth,
+		Action:   auth.ActionRefresh,
+		Reason:   reason,
+		Instance: h.instanceID,
 	}
-	go func() {
-		publishCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		_ = h.invalidator.Publish(publishCtx, ev)
-	}()
+	publishCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := h.invalidator.Publish(publishCtx, ev); err != nil {
+		slog.Warn("admin.auth_invalidation.publish_failed", "transport", "redis", "error_kind", auth.ClassifyInvalidationError(err))
+	}
 }
 
 func (h *adminHandler) register(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
