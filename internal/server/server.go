@@ -58,6 +58,7 @@ type Server struct {
 	authSnapshot   AuthSnapshotProvider
 	clusterStore   storage.ClusterStore
 	clusterSummary map[string]any
+	invalidStatus  auth.StatusReporter
 }
 
 // AuthReadyChecker reports whether the auth subsystem is ready to handle
@@ -74,17 +75,18 @@ type AuthSnapshotProvider interface {
 
 // Options bundles optional dependencies for the HTTP server.
 type Options struct {
-	Role           Role
-	HealthRecorder health.HealthRecorder
-	Dependency     storage.DependencyChecker
-	AdminStore     AdminStore
-	Pepper         string
-	AuthReady      AuthReadyChecker
-	AuthSnapshot   AuthSnapshotProvider
-	Invalidator    auth.Invalidator
-	InstanceID     string
-	ClusterStore   storage.ClusterStore
-	ClusterSummary map[string]any
+	Role               Role
+	HealthRecorder     health.HealthRecorder
+	Dependency         storage.DependencyChecker
+	AdminStore         AdminStore
+	Pepper             string
+	AuthReady          AuthReadyChecker
+	AuthSnapshot       AuthSnapshotProvider
+	Invalidator        auth.Invalidator
+	InstanceID         string
+	ClusterStore       storage.ClusterStore
+	ClusterSummary     map[string]any
+	InvalidationStatus auth.StatusReporter
 }
 
 // NewWithOptions builds the HTTP handler with the supplied optional
@@ -109,6 +111,7 @@ func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Option
 		instanceID:     opts.InstanceID,
 		clusterStore:   opts.ClusterStore,
 		clusterSummary: opts.ClusterSummary,
+		invalidStatus:  opts.InvalidationStatus,
 	}
 	s.routes()
 	return Recover(s)
@@ -220,6 +223,13 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 			reasons[name] = "ok"
 		}
 	}
+	if s.invalidStatus != nil {
+		status := s.invalidStatus.InvalidationStatus()
+		reasons["cache_invalidation"] = status.State
+		if status.Transport == "redis" && status.Required && status.State != "subscribed" {
+			ready = false
+		}
+	}
 	if s.authReady != nil {
 		if err := s.authReady.CheckAuthReady(ctx); err != nil {
 			reasons["auth_cache"] = "not_initialized"
@@ -229,6 +239,9 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	body := map[string]any{"role": string(s.role), "reasons": reasons}
+	if s.invalidStatus != nil {
+		body["cache_invalidation"] = s.invalidStatus.InvalidationStatus()
+	}
 	if s.instanceID != "" {
 		body["instance_id"] = s.instanceID
 	}

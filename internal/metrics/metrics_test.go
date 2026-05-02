@@ -71,3 +71,33 @@ func TestSelectorResultMetricsUseLowCardinalityLabels(t *testing.T) {
 		t.Fatalf("selector metrics contain high-cardinality labels: %q", body)
 	}
 }
+
+func TestCacheInvalidationMetricsUseLowCardinalityLabels(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeMetrics(rec)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`proxyharbor_cache_invalidation_total{cache="auth",action="refresh",transport="redis",result="published",error_kind="none"}`,
+		`proxyharbor_cache_invalidation_total{cache="catalog",action="invalidate",transport="redis",result="applied",error_kind="none"}`,
+		`proxyharbor_cache_invalidation_total{cache="lease",action="invalidate",transport="redis",result="error",error_kind="redis"}`,
+		`proxyharbor_cache_invalidation_total{cache="auth",action="refresh",transport="polling",result="applied",error_kind="none"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %s: %q", want, body)
+		}
+	}
+	for _, forbidden := range []string{"tenant_id=", "key_id=", "proxy_id=", "lease_id=", "request_id="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("cache invalidation metrics contain high-cardinality label %s: %q", forbidden, body)
+		}
+	}
+}
+
+func TestAuthCacheStaleSecondsMetricExists(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeMetrics(rec)
+	body := rec.Body.String()
+	if !strings.Contains(body, "proxyharbor_auth_cache_stale_seconds") {
+		t.Fatalf("metrics body missing auth stale seconds gauge: %q", body)
+	}
+}
