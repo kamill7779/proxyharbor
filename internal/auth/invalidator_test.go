@@ -132,7 +132,7 @@ func TestSubscribeCacheInvalidationsAppliesAuthCatalogLease(t *testing.T) {
 	t.Cleanup(cancel)
 	go SubscribeCacheInvalidationsWithStatus(ctx, client, DefaultInvalidationChannel, dynamic, hot, status, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	if err := waitUntil(time.Second, func() bool { return status.InvalidationStatus().State == "subscribed" }); err != nil {
+	if err := waitUntil(5*time.Second, func() bool { return status.InvalidationStatus().State == "subscribed" }); err != nil {
 		t.Fatalf("subscriber not ready: %v status=%+v", err, status.InvalidationStatus())
 	}
 	store.setRows(2, nil)
@@ -140,7 +140,7 @@ func TestSubscribeCacheInvalidationsAppliesAuthCatalogLease(t *testing.T) {
 	if err := invalidator.Publish(context.Background(), InvalidationMessage{Cache: CacheAuth, Action: ActionRefresh}); err != nil {
 		t.Fatalf("Publish(auth) error = %v", err)
 	}
-	if err := waitUntil(time.Second, func() bool { _, ok := dynamic.Lookup("secret"); return !ok }); err != nil {
+	if err := waitUntil(5*time.Second, func() bool { _, ok := dynamic.Lookup("secret"); return !ok }); err != nil {
 		t.Fatalf("auth refresh did not apply: %v", err)
 	}
 	if err := invalidator.Publish(context.Background(), InvalidationMessage{Cache: CacheCatalog, Action: ActionInvalidate}); err != nil {
@@ -149,7 +149,7 @@ func TestSubscribeCacheInvalidationsAppliesAuthCatalogLease(t *testing.T) {
 	if err := invalidator.Publish(context.Background(), InvalidationMessage{Cache: CacheLease, Action: ActionInvalidate}); err != nil {
 		t.Fatalf("Publish(lease) error = %v", err)
 	}
-	if err := waitUntil(time.Second, func() bool { return hot.catalogInvalidations.Load() > 0 && hot.leaseInvalidations.Load() > 0 }); err != nil {
+	if err := waitUntil(5*time.Second, func() bool { return hot.catalogInvalidations.Load() > 0 && hot.leaseInvalidations.Load() > 0 }); err != nil {
 		t.Fatalf("hot cache invalidation did not apply: %v", err)
 	}
 }

@@ -93,6 +93,40 @@ func TestCacheInvalidationMetricsUseLowCardinalityLabels(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsUseLowCardinalityLabels(t *testing.T) {
+	RecordRuntimeStartupResult("started", "none")
+	RecordRuntimeStartupResult("error", "config")
+	RecordRuntimeShutdownResult("graceful", "none")
+	RecordRuntimeShutdownResult("started", "none")
+	RecordRuntimeConfigValidationResult("error", "missing_secret")
+	RecordRuntimeDependencyStatus("mysql", "degraded", "mysql")
+	RecordRuntimeDependencyStatus("sqlite", "ready", "none")
+	RecordRuntimeDependencyStatus("memory", "degraded", "backend")
+
+	rec := httptest.NewRecorder()
+	writeMetrics(rec)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`proxyharbor_runtime_startup_total{component="server",result="started",error_kind="none"}`,
+		`proxyharbor_runtime_startup_total{component="server",result="error",error_kind="config"}`,
+		`proxyharbor_runtime_shutdown_total{component="server",result="graceful",error_kind="none"}`,
+		`proxyharbor_runtime_shutdown_total{component="server",result="started",error_kind="none"}`,
+		`proxyharbor_runtime_config_validation_total{component="config",result="error",error_kind="missing_secret"}`,
+		`proxyharbor_runtime_dependency_status{dependency="mysql",result="degraded",error_kind="mysql"} 1`,
+		`proxyharbor_runtime_dependency_status{dependency="sqlite",result="ready",error_kind="none"} 1`,
+		`proxyharbor_runtime_dependency_status{dependency="memory",result="degraded",error_kind="backend"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %s: %q", want, body)
+		}
+	}
+	for _, forbidden := range []string{"tenant_id=", "key_id=", "proxy_id=", "lease_id=", "request_id=", "secret=", "password="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("runtime metrics contain forbidden label/content %s: %q", forbidden, body)
+		}
+	}
+}
+
 func TestAuthCacheStaleSecondsMetricExists(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeMetrics(rec)

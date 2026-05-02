@@ -70,9 +70,9 @@ func main() {
 
 func parseFlags() config {
 	cfg := config{}
-	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://localhost:18081"), "ProxyHarbor HA load-balancer URL")
-	flag.StringVar(&cfg.AdminKey, "admin-key", envDefault("PROXYHARBOR_ADMIN_KEY", ""), "admin key")
-	flag.StringVar(&cfg.KeyPepper, "key-pepper", envDefault("PROXYHARBOR_KEY_PEPPER", ""), "key pepper used when -docker starts compose")
+	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://127.0.0.1:18081"), "ProxyHarbor HA load-balancer URL")
+	flag.StringVar(&cfg.AdminKey, "admin-key", "", "admin key; defaults to PROXYHARBOR_ADMIN_KEY")
+	flag.StringVar(&cfg.KeyPepper, "key-pepper", "", "key pepper used when -docker starts compose; defaults to PROXYHARBOR_KEY_PEPPER")
 	flag.StringVar(&cfg.TenantID, "tenant", "ha-correct", "tenant id")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 24, "concurrent requests per scenario")
 	flag.IntVar(&cfg.SelectorSamples, "selector-samples", 500, "lease creates for zfair weight distribution check")
@@ -81,6 +81,12 @@ func parseFlags() config {
 	flag.StringVar(&cfg.ComposeFile, "compose-file", "docker-compose.ha-test.yaml", "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 4*time.Minute, "overall timeout")
 	flag.Parse()
+	if cfg.AdminKey == "" {
+		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
+	}
+	if cfg.KeyPepper == "" {
+		cfg.KeyPepper = os.Getenv("PROXYHARBOR_KEY_PEPPER")
+	}
 	if cfg.Concurrency < 2 {
 		cfg.Concurrency = 2
 	}
@@ -110,8 +116,10 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	}
 	if cfg.Docker {
 		if err := startDocker(ctx, cfg); err != nil {
+			cleanupDocker(cfg, 90*time.Second)
 			return err
 		}
+		defer cleanupDocker(cfg, 90*time.Second)
 	}
 	r := runner{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, base: strings.TrimRight(cfg.BaseURL, "/")}
 	if err := r.waitReady(ctx); err != nil {
@@ -159,14 +167,14 @@ func (r runner) upsertProxy(ctx context.Context, id string, weight int, healthy 
 		return nil
 	}
 	if status != http.StatusConflict {
-		return fmt.Errorf("seed proxy %s status %d: %s", id, status, body)
+		return fmt.Errorf("seed proxy %s status %d: %s", id, status, bodySummary(body))
 	}
 	status, body, err = r.request(ctx, http.MethodPut, "/v1/proxies/"+url.PathEscape(id), r.cfg.AdminKey, "", payload)
 	if err != nil {
 		return err
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("update proxy %s status %d: %s", id, status, body)
+		return fmt.Errorf("update proxy %s status %d: %s", id, status, bodySummary(body))
 	}
 	return nil
 }
@@ -273,7 +281,7 @@ func (r runner) checkRenewRevokeRace(ctx context.Context) error {
 			return
 		}
 		if status != http.StatusOK {
-			errs <- fmt.Errorf("revoke status %d: %s", status, body)
+			errs <- fmt.Errorf("revoke status %d: %s", status, bodySummary(body))
 		}
 	}()
 	for i := 0; i < r.cfg.Concurrency; i++ {
@@ -291,7 +299,7 @@ func (r runner) checkRenewRevokeRace(ctx context.Context) error {
 			case http.StatusConflict, http.StatusGone, http.StatusNotFound:
 				conflictOrGone.Add(1)
 			default:
-				errs <- fmt.Errorf("renew status %d: %s", status, body)
+				errs <- fmt.Errorf("renew status %d: %s", status, bodySummary(body))
 			}
 		}()
 	}
@@ -305,7 +313,7 @@ func (r runner) checkRenewRevokeRace(ctx context.Context) error {
 		return err
 	}
 	if status == http.StatusOK {
-		return fmt.Errorf("renew after revoke succeeded; body=%s renewOKDuringRace=%d conflicts=%d", body, renewOK.Load(), conflictOrGone.Load())
+		return fmt.Errorf("renew after revoke succeeded; body=%s renewOKDuringRace=%d conflicts=%d", bodySummary(body), renewOK.Load(), conflictOrGone.Load())
 	}
 	return nil
 }
@@ -317,26 +325,26 @@ func (r runner) checkDisabledTenantRejectsKey(ctx context.Context) error {
 		return err
 	}
 	if status != http.StatusCreated {
-		return fmt.Errorf("create disabled-test tenant status %d: %s", status, body)
+		return fmt.Errorf("create disabled-test tenant status %d: %s", status, bodySummary(body))
 	}
 	status, body, err = r.request(ctx, http.MethodPatch, "/admin/tenants/"+url.PathEscape(tenantID), r.cfg.AdminKey, "", map[string]any{"status": "disabled"})
 	if err != nil {
 		return err
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("disable tenant status %d: %s", status, body)
+		return fmt.Errorf("disable tenant status %d: %s", status, bodySummary(body))
 	}
 	status, body, err = r.request(ctx, http.MethodPost, "/admin/tenants/"+url.PathEscape(tenantID)+"/keys", r.cfg.AdminKey, "", map[string]any{"label": "after-disable"})
 	if err != nil {
 		return err
 	}
 	if status != http.StatusForbidden {
-		return fmt.Errorf("create key for disabled tenant status %d, want 403: %s", status, body)
+		return fmt.Errorf("create key for disabled tenant status %d, want 403: %s", status, bodySummary(body))
 	}
 	var errBody errorResponse
 	_ = json.Unmarshal(body, &errBody)
 	if errBody.Error != "tenant_disabled" {
-		return fmt.Errorf("disabled tenant error = %q, want tenant_disabled; body=%s", errBody.Error, body)
+		return fmt.Errorf("disabled tenant error = %q, want tenant_disabled; body=%s", errBody.Error, bodySummary(body))
 	}
 	return nil
 }
@@ -418,7 +426,7 @@ func (r runner) issueTenantKey(ctx context.Context, label string) (string, error
 		return "", err
 	}
 	if status != http.StatusCreated {
-		return "", fmt.Errorf("issue tenant key status %d: %s", status, body)
+		return "", fmt.Errorf("issue tenant key status %d: %s", status, bodySummary(body))
 	}
 	var resp tenantKeyResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -434,14 +442,14 @@ func (r runner) createLease(ctx context.Context, tenantKey, idempotency string, 
 		return leaseResponse{}, err
 	}
 	if status != http.StatusCreated {
-		return leaseResponse{}, fmt.Errorf("create lease status %d: %s", status, body)
+		return leaseResponse{}, fmt.Errorf("create lease status %d: %s", status, bodySummary(body))
 	}
 	var lease leaseResponse
 	if err := json.Unmarshal(body, &lease); err != nil {
 		return leaseResponse{}, err
 	}
 	if lease.LeaseID == "" || lease.ProxyID == "" || (requirePassword && lease.Password == "") {
-		return leaseResponse{}, fmt.Errorf("incomplete lease response: %s", body)
+		return leaseResponse{}, fmt.Errorf("incomplete lease response: %s", bodySummary(body))
 	}
 	return lease, nil
 }
@@ -488,7 +496,7 @@ func (r runner) waitReady(ctx context.Context) error {
 		if err != nil {
 			last = err.Error()
 		} else {
-			last = fmt.Sprintf("status %d: %s", status, body)
+			last = fmt.Sprintf("status %d: %s", status, bodySummary(body))
 		}
 		select {
 		case <-ctx.Done():
@@ -500,21 +508,116 @@ func (r runner) waitReady(ctx context.Context) error {
 }
 
 func startDocker(ctx context.Context, cfg config) error {
-	env := append(os.Environ(), "PROXYHARBOR_ADMIN_KEY="+cfg.AdminKey, "PROXYHARBOR_KEY_PEPPER="+cfg.KeyPepper)
+	envFile, cleanup, err := composeEnvFile(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	commands := [][]string{
 		{"compose", "-f", cfg.ComposeFile, "down", "-v", "--remove-orphans"},
-		{"build", "-t", "proxyharbor:ha-test", "."},
+		{"build", "--pull=false", "-t", "proxyharbor:ha-test", "."},
 		{"compose", "-f", cfg.ComposeFile, "up", "-d", "--no-build", "--remove-orphans"},
 	}
 	for _, args := range commands {
+		args = addComposeEnvFile(args, envFile)
 		cmd := exec.CommandContext(ctx, "docker", args...)
-		cmd.Env = env
+		cmd.Env = scrubSecretEnv(os.Environ())
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("docker %s: %w\n%s", strings.Join(args, " "), err, out)
+			return fmt.Errorf("docker %s: %w\n%s", strings.Join(args, " "), err, bodySummary(out))
 		}
 	}
 	return nil
+}
+
+func cleanupDocker(cfg config, timeout time.Duration) {
+	envFile, cleanup, err := composeEnvFile(cfg)
+	if err != nil {
+		return
+	}
+	defer cleanup()
+	args := addComposeEnvFile([]string{"compose", "-f", cfg.ComposeFile, "down", "-v", "--remove-orphans"}, envFile)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = scrubSecretEnv(os.Environ())
+	_ = cmd.Run()
+}
+
+func bodySummary(body []byte) string {
+	var doc struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &doc); err == nil {
+		switch {
+		case doc.Error != "":
+			return fmt.Sprintf("<redacted len=%d error=%q>", len(body), doc.Error)
+		case doc.Status != "":
+			return fmt.Sprintf("<redacted len=%d status=%q>", len(body), doc.Status)
+		}
+	}
+	return fmt.Sprintf("<redacted len=%d>", len(body))
+}
+
+func addComposeEnvFile(args []string, envFile string) []string {
+	if len(args) > 0 && args[0] == "compose" {
+		out := []string{"compose", "--env-file", envFile}
+		out = append(out, args[1:]...)
+		return out
+	}
+	return args
+}
+
+func composeEnvFile(cfg config) (string, func(), error) {
+	file, err := os.CreateTemp("", "proxyharbor-compose-*.env")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	_, writeErr := fmt.Fprintf(file, "PROXYHARBOR_ADMIN_KEY=%s\nPROXYHARBOR_KEY_PEPPER=%s\n", envFileValue(cfg.AdminKey), envFileValue(cfg.KeyPepper))
+	closeErr := file.Close()
+	if writeErr != nil {
+		cleanup()
+		return "", func() {}, writeErr
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", func() {}, closeErr
+	}
+	return path, cleanup, nil
+}
+
+func envFileValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", "")
+	return strings.ReplaceAll(value, "\n", "")
+}
+
+func scrubSecretEnv(env []string) []string {
+	out := env[:0]
+	for _, entry := range env {
+		if isSecretEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isSecretEnv(entry string) bool {
+	for _, prefix := range []string{
+		"PROXYHARBOR_ADMIN_KEY=",
+		"PROXYHARBOR_KEY_PEPPER=",
+		"PROXYHARBOR_MYSQL_DSN=",
+		"PROXYHARBOR_REDIS_PASSWORD=",
+		"PROXYHARBOR_TENANT_KEY=",
+	} {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstErr(errs []error) error {

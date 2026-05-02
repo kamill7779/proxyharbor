@@ -402,7 +402,7 @@ func (s *Service) logSelectorError(tenantID string, candidateCount int, err erro
 		logger = slog.Default()
 	}
 	logger.Warn("selector.select.failed",
-		"tenant_id", tenantID,
+		"tenant_present", tenantID != "",
 		"candidate_count", candidateCount,
 		"error", domain.ErrorCode(err),
 		"error_kind", string(domain.ErrorKindOf(err)),

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,81 @@ func TestMySQLDoesNotAutoGenerateSecrets(t *testing.T) {
 	_, err := Load([]string{"-storage=mysql", "-mysql-dsn=user:pass@tcp(localhost:3306)/proxyharbor"})
 	if err == nil || !strings.Contains(err.Error(), "PROXYHARBOR_ADMIN_KEY is required") {
 		t.Fatalf("Load() error = %v, want explicit admin key requirement", err)
+	}
+}
+
+func TestFlagParseErrorDoesNotPrintSecretDefaults(t *testing.T) {
+	secrets := []string{
+		"admin-parse-secret-with-at-least-thirty-two-bytes",
+		"pepper-parse-secret-with-at-least-thirty-two-bytes",
+		"user:parse-secret@tcp(localhost:3306)/proxyharbor",
+	}
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", secrets[0])
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", secrets[1])
+	t.Setenv("PROXYHARBOR_MYSQL_DSN", secrets[2])
+
+	var err error
+	output := captureStderr(t, func() {
+		_, err = Load([]string{"-definitely-not-a-real-flag"})
+	})
+	if err == nil {
+		t.Fatal("Load() error = nil, want parse error")
+	}
+	for _, secret := range secrets {
+		if strings.Contains(output, secret) {
+			t.Fatalf("flag parse stderr leaked secret %q in: %s", secret, output)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("flag parse error leaked secret %q in: %v", secret, err)
+		}
+	}
+}
+
+func TestMySQLDefaultsAutoSecretsOff(t *testing.T) {
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
+
+	cfg, err := Load([]string{"-storage=mysql", "-mysql-dsn=user:pass@tcp(localhost:3306)/proxyharbor"})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AutoSecrets {
+		t.Fatal("AutoSecrets = true for mysql, want false by default")
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+		_ = r.Close()
+	}()
+	fn()
+	_ = w.Close()
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestAutoSecretsRejectedOutsideSQLiteLocalMode(t *testing.T) {
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
+
+	_, err := Load([]string{
+		"-storage=mysql",
+		"-mysql-dsn=user:pass@tcp(localhost:3306)/proxyharbor",
+		"-auto-secrets=true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "PROXYHARBOR_AUTO_SECRETS is only supported with storage=sqlite without cluster mode") {
+		t.Fatalf("Load() error = %v, want auto-secrets local-mode error", err)
 	}
 }
 
@@ -140,5 +216,17 @@ func TestHAModeRequiresStrictRedisZFair(t *testing.T) {
 	}
 	if cfg.Selector != "zfair" || !cfg.SelectorRedisRequired || cfg.RedisAddr == "" {
 		t.Fatalf("cfg = %+v, want strict zfair redis", cfg)
+	}
+}
+
+func TestShutdownTimeoutMustBePositive(t *testing.T) {
+	t.Setenv("PROXYHARBOR_ADMIN_KEY", "admin-key-with-at-least-thirty-two-bytes")
+	t.Setenv("PROXYHARBOR_KEY_PEPPER", "pepper-with-at-least-thirty-two-bytes")
+
+	for _, value := range []string{"0s", "-1s"} {
+		_, err := Load([]string{"-shutdown-timeout=" + value})
+		if err == nil || !strings.Contains(err.Error(), "PROXYHARBOR_SHUTDOWN_TIMEOUT must be positive") {
+			t.Fatalf("Load(-shutdown-timeout=%s) error = %v, want positive shutdown timeout error", value, err)
+		}
 	}
 }

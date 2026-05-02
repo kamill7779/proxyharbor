@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,13 +66,17 @@ type DynamicStore struct {
 // returned error must be treated as fatal by the caller; do not start the
 // process with an uninitialized DynamicStore.
 func NewDynamicStore(store KeyStore, pepper []byte, refresh time.Duration) (*DynamicStore, error) {
+	return NewDynamicStoreWithContext(context.Background(), store, pepper, refresh)
+}
+
+func NewDynamicStoreWithContext(ctx context.Context, store KeyStore, pepper []byte, refresh time.Duration) (*DynamicStore, error) {
 	d := &DynamicStore{
 		byHash:  make(map[[32]byte]entry),
 		store:   store,
 		pepper:  pepper,
 		refresh: refresh,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	rows, err := d.store.GetTenantKeys(ctx)
 	if err != nil {
@@ -232,12 +238,33 @@ func (d *DynamicStore) recordError(err error) {
 	if err == nil {
 		return
 	}
-	msg := err.Error()
+	msg := classifyRefreshError(err)
 	d.lastError.Store(&msg)
 	d.failures.Add(1)
 	metrics.AuthRefreshFail.Inc()
 	if last := d.lastRefreshUnix.Load(); last > 0 {
 		metrics.AuthCacheStaleSeconds.Set(time.Since(time.Unix(last, 0)).Seconds())
+	}
+}
+
+func classifyRefreshError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "mysql"):
+		return "mysql"
+	case strings.Contains(text, "redis"):
+		return "redis"
+	default:
+		return "store_error"
 	}
 }
 

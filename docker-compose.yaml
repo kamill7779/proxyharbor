@@ -24,6 +24,12 @@ services:
       - "${PROXYHARBOR_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HOST_PORT:-18080}:8080"
     volumes:
       - proxyharbor-data:/var/lib/proxyharbor
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 25s
     restart: unless-stopped
 
 volumes:

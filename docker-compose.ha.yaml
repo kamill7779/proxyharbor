@@ -44,11 +44,14 @@ services:
       PROXYHARBOR_GATEWAY_URL: ${PROXYHARBOR_GATEWAY_URL:-http://localhost:8080}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
+      PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: ${PROXYHARBOR_STORAGE:-mysql}
       PROXYHARBOR_MYSQL_DSN: ${PROXYHARBOR_MYSQL_DSN:-proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC}
       PROXYHARBOR_REDIS_ADDR: ${PROXYHARBOR_REDIS_ADDR:-redis:6379}
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: ${PROXYHARBOR_SELECTOR_REDIS_REQUIRED:-true}
+      PROXYHARBOR_AUTH_INVALIDATION: ${PROXYHARBOR_AUTH_INVALIDATION:-redis}
       PROXYHARBOR_CACHE_TTL: ${PROXYHARBOR_CACHE_TTL:-60s}
+      PROXYHARBOR_SHUTDOWN_TIMEOUT: ${PROXYHARBOR_SHUTDOWN_TIMEOUT:-15s}
     ports:
       - "${PROXYHARBOR_HOST_PORT:-8080}:8080"
     depends_on:
@@ -56,6 +59,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 25s
     restart: unless-stopped
 
 volumes:

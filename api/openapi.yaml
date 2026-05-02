@@ -683,8 +683,8 @@ paths:
         required: true
         schema:
           type: string
-      - name: password
-        in: query
+      - name: ProxyHarbor-Password
+        in: header
         required: true
         schema:
           type: string
@@ -1016,6 +1016,9 @@ components:
           type: string
         password:
           type: string
+          format: password
+          description: Plaintext lease password returned only on initial lease creation. Treat as secret and never log.
+          x-sensitive: true
         proxy_id:
           type: string
         expires_at:

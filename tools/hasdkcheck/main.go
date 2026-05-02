@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -50,10 +51,10 @@ func main() {
 
 func parseFlags() config {
 	cfg := config{}
-	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://localhost:18081"), "ProxyHarbor HA load-balancer URL")
-	flag.StringVar(&cfg.AdminKey, "admin-key", envDefault("PROXYHARBOR_ADMIN_KEY", ""), "admin key")
-	flag.StringVar(&cfg.KeyPepper, "key-pepper", envDefault("PROXYHARBOR_KEY_PEPPER", ""), "key pepper used when -docker starts compose")
-	flag.StringVar(&cfg.TenantKey, "tenant-key", envDefault("PROXYHARBOR_TENANT_KEY", ""), "existing tenant key; when empty the runner issues one with the admin key")
+	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://127.0.0.1:18081"), "ProxyHarbor HA load-balancer URL")
+	flag.StringVar(&cfg.AdminKey, "admin-key", "", "admin key; defaults to PROXYHARBOR_ADMIN_KEY")
+	flag.StringVar(&cfg.KeyPepper, "key-pepper", "", "key pepper used when -docker starts compose; defaults to PROXYHARBOR_KEY_PEPPER")
+	flag.StringVar(&cfg.TenantKey, "tenant-key", "", "existing tenant key; defaults to PROXYHARBOR_TENANT_KEY; when empty the runner issues one with the admin key")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 96, "concurrent SDK GetProxy workers")
 	flag.IntVar(&cfg.Samples, "samples", 2000, "SDK forced lease acquisitions for weighted distribution")
 	flag.IntVar(&cfg.DisableSamples, "disable-samples", 300, "SDK forced lease acquisitions after disabling one proxy")
@@ -61,6 +62,15 @@ func parseFlags() config {
 	flag.StringVar(&cfg.ComposeFile, "compose-file", defaultComposeFile(), "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 10*time.Minute, "overall timeout")
 	flag.Parse()
+	if cfg.AdminKey == "" {
+		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
+	}
+	if cfg.KeyPepper == "" {
+		cfg.KeyPepper = os.Getenv("PROXYHARBOR_KEY_PEPPER")
+	}
+	if cfg.TenantKey == "" {
+		cfg.TenantKey = os.Getenv("PROXYHARBOR_TENANT_KEY")
+	}
 	if cfg.Concurrency < 2 {
 		cfg.Concurrency = 2
 	}
@@ -76,12 +86,20 @@ func parseFlags() config {
 func defaultComposeFile() string { return "docker-compose.ha-test.yaml" }
 
 func projectRoot() string {
-	for _, candidate := range []string{".", "../.."} {
-		if _, err := os.Stat(candidate + "/Dockerfile"); err == nil {
-			return candidate
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for _, candidate := range []string{cwd, filepath.Join(cwd, "..", "..")} {
+		abs, absErr := filepath.Abs(candidate)
+		if absErr != nil {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(abs, "Dockerfile")); statErr == nil {
+			return abs
 		}
 	}
-	return "."
+	return cwd
 }
 func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	if cfg.AdminKey == "" {
@@ -100,8 +118,10 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	}
 	if cfg.Docker {
 		if err := startDocker(ctx, cfg); err != nil {
+			cleanupDocker(cfg, 90*time.Second)
 			return err
 		}
+		defer cleanupDocker(cfg, 90*time.Second)
 	}
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
 	if err := waitReady(ctx, baseURL); err != nil {
@@ -240,21 +260,21 @@ func issueTenantKey(ctx context.Context, baseURL, adminKey, tenantID string) (st
 	if status, body, err := jsonRequest(ctx, client, http.MethodPost, baseURL+"/admin/tenants", adminKey, map[string]any{"id": tenantID, "display_name": "SDK HA"}); err != nil {
 		return "", err
 	} else if status != http.StatusCreated && status != http.StatusConflict {
-		return "", fmt.Errorf("create sdk tenant status %d: %s", status, body)
+		return "", fmt.Errorf("create sdk tenant status %d: %s", status, bodySummary(body))
 	}
 	status, body, err := jsonRequest(ctx, client, http.MethodPost, baseURL+"/admin/tenants/"+tenantID+"/keys", adminKey, map[string]any{"label": "sdk-ha", "purpose": "sdk_ha_check"})
 	if err != nil {
 		return "", err
 	}
 	if status != http.StatusCreated {
-		return "", fmt.Errorf("issue sdk tenant key status %d: %s", status, body)
+		return "", fmt.Errorf("issue sdk tenant key status %d: %s", status, bodySummary(body))
 	}
 	var resp tenantKeyResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return "", err
 	}
 	if resp.Key == "" {
-		return "", fmt.Errorf("tenant key missing from response: %s", body)
+		return "", fmt.Errorf("tenant key missing from response: %s", bodySummary(body))
 	}
 	return resp.Key, nil
 }
@@ -292,7 +312,7 @@ func waitReady(ctx context.Context, baseURL string) error {
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
-			last = fmt.Sprintf("status=%d body=%s", resp.StatusCode, raw)
+			last = fmt.Sprintf("status=%d body=%s", resp.StatusCode, bodySummary(raw))
 		} else {
 			last = err.Error()
 		}
@@ -307,18 +327,123 @@ func waitReady(ctx context.Context, baseURL string) error {
 
 func startDocker(ctx context.Context, cfg config) error {
 	root := projectRoot()
-	env := append(os.Environ(), "PROXYHARBOR_ADMIN_KEY="+cfg.AdminKey, "PROXYHARBOR_KEY_PEPPER="+cfg.KeyPepper)
-	commands := [][]string{{"compose", "-f", cfg.ComposeFile, "down", "-v", "--remove-orphans"}, {"build", "-t", "proxyharbor:ha-test", "."}, {"compose", "-f", cfg.ComposeFile, "up", "-d", "--no-build", "--remove-orphans"}}
+	composeFile := cfg.ComposeFile
+	if !filepath.IsAbs(composeFile) {
+		composeFile = filepath.Join(root, composeFile)
+	}
+	envFile, cleanup, err := composeEnvFile(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	commands := [][]string{{"compose", "-f", composeFile, "down", "-v", "--remove-orphans"}, {"build", "--pull=false", "-t", "proxyharbor:ha-test", "."}, {"compose", "-f", composeFile, "up", "-d", "--no-build", "--remove-orphans"}}
 	for _, args := range commands {
+		args = addComposeEnvFile(args, envFile)
 		cmd := exec.CommandContext(ctx, "docker", args...)
 		cmd.Dir = root
-		cmd.Env = env
+		cmd.Env = scrubSecretEnv(os.Environ())
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("docker %s: %w\n%s", strings.Join(args, " "), err, out)
+			return fmt.Errorf("docker %s: %w\n%s", strings.Join(args, " "), err, bodySummary(out))
 		}
 	}
 	return nil
+}
+
+func cleanupDocker(cfg config, timeout time.Duration) {
+	root := projectRoot()
+	composeFile := cfg.ComposeFile
+	if !filepath.IsAbs(composeFile) {
+		composeFile = filepath.Join(root, composeFile)
+	}
+	envFile, cleanup, err := composeEnvFile(cfg)
+	if err != nil {
+		return
+	}
+	defer cleanup()
+	args := addComposeEnvFile([]string{"compose", "-f", composeFile, "down", "-v", "--remove-orphans"}, envFile)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = root
+	cmd.Env = scrubSecretEnv(os.Environ())
+	_ = cmd.Run()
+}
+
+func bodySummary(body []byte) string {
+	var doc struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &doc); err == nil {
+		switch {
+		case doc.Error != "":
+			return fmt.Sprintf("<redacted len=%d error=%q>", len(body), doc.Error)
+		case doc.Status != "":
+			return fmt.Sprintf("<redacted len=%d status=%q>", len(body), doc.Status)
+		}
+	}
+	return fmt.Sprintf("<redacted len=%d>", len(body))
+}
+
+func addComposeEnvFile(args []string, envFile string) []string {
+	if len(args) > 0 && args[0] == "compose" {
+		out := []string{"compose", "--env-file", envFile}
+		out = append(out, args[1:]...)
+		return out
+	}
+	return args
+}
+
+func composeEnvFile(cfg config) (string, func(), error) {
+	file, err := os.CreateTemp("", "proxyharbor-compose-*.env")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	_, writeErr := fmt.Fprintf(file, "PROXYHARBOR_ADMIN_KEY=%s\nPROXYHARBOR_KEY_PEPPER=%s\n", envFileValue(cfg.AdminKey), envFileValue(cfg.KeyPepper))
+	closeErr := file.Close()
+	if writeErr != nil {
+		cleanup()
+		return "", func() {}, writeErr
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", func() {}, closeErr
+	}
+	return path, cleanup, nil
+}
+
+func envFileValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", "")
+	return strings.ReplaceAll(value, "\n", "")
+}
+
+func scrubSecretEnv(env []string) []string {
+	out := env[:0]
+	for _, entry := range env {
+		if isSecretEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isSecretEnv(entry string) bool {
+	for _, prefix := range []string{
+		"PROXYHARBOR_ADMIN_KEY=",
+		"PROXYHARBOR_KEY_PEPPER=",
+		"PROXYHARBOR_MYSQL_DSN=",
+		"PROXYHARBOR_REDIS_PASSWORD=",
+		"PROXYHARBOR_TENANT_KEY=",
+	} {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyEndpoint(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", 19200+i) }

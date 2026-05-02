@@ -42,6 +42,8 @@ type CoalescingRecorder struct {
 	closed  bool
 	done    chan struct{}
 	stopped chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 type proxyEvent struct {
@@ -75,6 +77,7 @@ func NewCoalescingRecorder(store OutcomeStore, options RecorderOptions) *Coalesc
 	if policy.SuccessReward == 0 || policy.FailurePenalty == nil {
 		policy = DefaultScoringPolicy()
 	}
+	runCtx, cancel := context.WithCancel(context.Background())
 	recorder := &CoalescingRecorder{
 		store:         store,
 		policy:        policy,
@@ -82,6 +85,8 @@ func NewCoalescingRecorder(store OutcomeStore, options RecorderOptions) *Coalesc
 		events:        make([]proxyEvent, 0, bufferSize),
 		done:          make(chan struct{}),
 		stopped:       make(chan struct{}),
+		ctx:           runCtx,
+		cancel:        cancel,
 	}
 	go recorder.run()
 	return recorder
@@ -118,6 +123,7 @@ func (r *CoalescingRecorder) Close(ctx context.Context) {
 		return
 	}
 	r.closed = true
+	r.cancel()
 	close(r.done)
 	r.mu.Unlock()
 
@@ -125,12 +131,27 @@ func (r *CoalescingRecorder) Close(ctx context.Context) {
 	case <-r.stopped:
 	case <-ctx.Done():
 	}
-	drained, failed := r.flushDrain(ctx)
+	drainCtx, cancel := closeDrainContext(ctx)
+	defer cancel()
+	drained, failed := r.flushDrain(drainCtx)
 	if failed > 0 {
 		slog.Warn("health.shutdown.drained", "events", drained, "failed", failed)
 		return
 	}
 	slog.Info("health.shutdown.drained", "events", drained)
+}
+
+func closeDrainContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), 2*time.Second)
+	}
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.Background(), 2*time.Second)
 }
 
 func (r *CoalescingRecorder) run() {
@@ -140,7 +161,7 @@ func (r *CoalescingRecorder) run() {
 	for {
 		select {
 		case <-ticker.C:
-			r.Flush(context.Background())
+			r.Flush(r.ctx)
 		case <-r.done:
 			return
 		}
@@ -224,8 +245,22 @@ func (r *CoalescingRecorder) recordOutcome(ctx context.Context, proxyID string, 
 			return nil
 		}
 	}
-	slog.Warn("health.recorder.write_failed", "proxy_id", proxyID, "err", err)
+	slog.Warn("health.recorder.write_failed", "error_kind", recorderErrorKind(err))
 	return err
+}
+
+func recorderErrorKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return "network"
+	}
+	return "backend"
 }
 
 func retryableRecorderError(err error) bool {
