@@ -125,12 +125,11 @@ func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Option
 			Timeout:   connectTimeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   connectTimeout,
-		ResponseHeaderTimeout: connectTimeout,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: connectTimeout,
 	}
 	if opts.ShutdownContext != nil {
 		go func() {

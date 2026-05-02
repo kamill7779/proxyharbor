@@ -576,7 +576,9 @@ func composeEnvFile(cfg config) (string, func(), error) {
 	}
 	path := file.Name()
 	cleanup := func() { _ = os.Remove(path) }
-	_, writeErr := fmt.Fprintf(file, "PROXYHARBOR_ADMIN_KEY=%s\nPROXYHARBOR_KEY_PEPPER=%s\n", envFileValue(cfg.AdminKey), envFileValue(cfg.KeyPepper))
+	content := fmt.Sprintf("PROXYHARBOR_ADMIN_KEY=%s\nPROXYHARBOR_KEY_PEPPER=%s\n", envFileValue(cfg.AdminKey), envFileValue(cfg.KeyPepper))
+	content += optionalComposeSecretEnv()
+	_, writeErr := file.WriteString(content)
 	closeErr := file.Close()
 	if writeErr != nil {
 		cleanup()
@@ -592,6 +594,19 @@ func composeEnvFile(cfg config) (string, func(), error) {
 func envFileValue(value string) string {
 	value = strings.ReplaceAll(value, "\r", "")
 	return strings.ReplaceAll(value, "\n", "")
+}
+
+func optionalComposeSecretEnv() string {
+	var out strings.Builder
+	for _, key := range []string{"PROXYHARBOR_MYSQL_DSN", "PROXYHARBOR_REDIS_PASSWORD"} {
+		if value := os.Getenv(key); value != "" {
+			out.WriteString(key)
+			out.WriteByte('=')
+			out.WriteString(envFileValue(value))
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
 }
 
 func scrubSecretEnv(env []string) []string {

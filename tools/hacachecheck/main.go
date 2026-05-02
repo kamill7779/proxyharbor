@@ -1016,6 +1016,7 @@ func newComposeCommand(ctx context.Context, cfg config, args ...string) (*exec.C
 	path := file.Name()
 	content := "PROXYHARBOR_ADMIN_KEY=" + envFileValue(cfg.AdminKey) + "\n" +
 		"PROXYHARBOR_KEY_PEPPER=" + envFileValue(cfg.KeyPepper) + "\n"
+	content += optionalComposeSecretEnv()
 	if _, err := file.WriteString(content); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
@@ -1034,6 +1035,19 @@ func newComposeCommand(ctx context.Context, cfg config, args ...string) (*exec.C
 func envFileValue(value string) string {
 	value = strings.ReplaceAll(value, "\r", "")
 	return strings.ReplaceAll(value, "\n", "")
+}
+
+func optionalComposeSecretEnv() string {
+	var out strings.Builder
+	for _, key := range []string{"PROXYHARBOR_MYSQL_DSN", "PROXYHARBOR_REDIS_PASSWORD"} {
+		if value := os.Getenv(key); value != "" {
+			out.WriteString(key)
+			out.WriteByte('=')
+			out.WriteString(envFileValue(value))
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
 }
 
 func scrubSecretEnv(env []string) []string {

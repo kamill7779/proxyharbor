@@ -123,8 +123,8 @@ func (r *CoalescingRecorder) Close(ctx context.Context) {
 		return
 	}
 	r.closed = true
-	r.cancel()
 	close(r.done)
+	r.cancel()
 	r.mu.Unlock()
 
 	select {
@@ -160,7 +160,17 @@ func (r *CoalescingRecorder) run() {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-r.done:
+			return
+		default:
+		}
+		select {
 		case <-ticker.C:
+			select {
+			case <-r.done:
+				return
+			default:
+			}
 			r.Flush(r.ctx)
 		case <-r.done:
 			return

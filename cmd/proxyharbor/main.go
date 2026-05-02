@@ -277,6 +277,7 @@ func main() {
 
 	shutdownResult := "graceful"
 	shutdownKind := "none"
+	var serverErr error
 	httpShutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), phaseBudgets[0])
 	if err := srv.Shutdown(httpShutdownCtx); err != nil {
 		shutdownResult = "error"
@@ -285,9 +286,12 @@ func main() {
 	}
 	select {
 	case err := <-serverDone:
-		if err != nil && shutdownKind == "none" {
-			shutdownResult = "error"
-			shutdownKind = "server_wait"
+		if err != nil {
+			serverErr = err
+			if shutdownKind == "none" {
+				shutdownResult = "error"
+				shutdownKind = "server_wait"
+			}
 		}
 	case <-httpShutdownCtx.Done():
 		shutdownResult = "error"
@@ -320,6 +324,9 @@ func main() {
 	metrics.RecordRuntimeShutdownResult(shutdownResult, shutdownKind)
 	cleanups.run()
 	logger.Info("shutdown complete", "result", shutdownResult, "error_kind", shutdownKind)
+	if serverErr != nil {
+		os.Exit(1)
+	}
 }
 
 func shutdownDrainDelay(total time.Duration) time.Duration {
