@@ -38,6 +38,10 @@ type validateTruthEntry struct {
 	verifiedAt  time.Time
 }
 
+type ipResolver interface {
+	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
 type Service struct {
 	store                      storage.Store
 	cache                      cache.Cache
@@ -45,7 +49,7 @@ type Service struct {
 	now                        func() time.Time
 	gatewayURL                 string
 	allowInternalProxyEndpoint bool
-	resolver                   *net.Resolver
+	resolver                   ipResolver
 	selector                   selector.ProxySelector
 	selectorMode               string
 	logger                     *slog.Logger
@@ -241,11 +245,10 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 		}
 		_ = s.cache.PutLease(ctx, lease, ttl)
 	}
+	s.stampValidateTruth(lease)
 	if err := s.validateLeaseFields(lease, password, target); err != nil {
-		s.invalidateValidateTruth(tenantID, leaseID)
 		return domain.Lease{}, err
 	}
-	s.stampValidateTruth(lease)
 	return lease, nil
 }
 
@@ -618,9 +621,10 @@ func extractHost(target string) string {
 
 // isSafeHost answers whether host can be used as a lease target. It preserves
 // the original fail-closed semantics for empty hosts, well-known loopback
-// names, internal IP literals, and DNS lookup failures, but caches the final
-// decision in-process for a short TTL to avoid repeated DNS resolution on hot
-// paths. Public IP literals skip the resolver entirely.
+// names, internal IP literals, and DNS lookup failures. Only resolved unsafe
+// hostname decisions are cached for a short TTL; safe hostname resolutions are
+// rechecked on every call so DNS rebinding cannot ride a cached positive
+// decision. Public IP literals skip the resolver entirely.
 func (s *Service) isSafeHost(host string) bool {
 	if host == "" {
 		return false
@@ -643,7 +647,6 @@ func (s *Service) isSafeHost(host string) bool {
 	defer cancel()
 	ips, err := resolver.LookupIP(ctx, "ip", host)
 	if err != nil || len(ips) == 0 {
-		s.storeHostSafety(host, false)
 		return false
 	}
 	for _, ip := range ips {
@@ -652,7 +655,6 @@ func (s *Service) isSafeHost(host string) bool {
 			return false
 		}
 	}
-	s.storeHostSafety(host, true)
 	return true
 }
 
@@ -664,6 +666,9 @@ func (s *Service) lookupHostSafety(host string) (bool, bool) {
 		return false, false
 	}
 	if !entry.expiresAt.After(s.now()) {
+		return false, false
+	}
+	if entry.safe {
 		return false, false
 	}
 	return entry.safe, true

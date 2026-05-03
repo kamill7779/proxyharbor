@@ -13,25 +13,37 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-// stubResolver counts LookupIP calls and returns either a public or private
-// IP based on the host name. It implements the same interface that
-// net.Resolver exposes through Service.resolver.
 type stubResolver struct {
 	calls atomic.Int64
+	mu    sync.Mutex
+	ips   map[string][]net.IP
+	errs  map[string]error
 }
 
-// resolverWrapper wraps net.Resolver but with a configurable Dial that lets
-// us feed deterministic responses without going to real DNS.
-//
-// The control service uses *net.Resolver. To intercept lookups we install a
-// resolver whose Dial routes to an in-memory DNS responder. That is more work
-// than necessary for these tests; instead, drive Service through its public
-// safe-host helper and assert that subsequent calls within the TTL do not
-// invoke the resolver. To do that we replace s.resolver with a custom
-// implementation that satisfies the relevant call site by setting Dial to a
-// function returning an error so an unexpected lookup is observable. We then
-// rely on a host literal that bypasses DNS for the public-IP fast path test
-// and on the host safety cache for the cached-decision test.
+func newStubResolver() *stubResolver {
+	return &stubResolver{
+		ips: map[string][]net.IP{},
+		errs: map[string]error{},
+	}
+}
+
+func (r *stubResolver) LookupIP(_ context.Context, _, host string) ([]net.IP, error) {
+	r.calls.Add(1)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err, ok := r.errs[host]; ok {
+		return nil, err
+	}
+	ips, ok := r.ips[host]
+	if !ok {
+		return nil, errors.New("unexpected host lookup")
+	}
+	out := make([]net.IP, len(ips))
+	for i, ip := range ips {
+		out[i] = append(net.IP(nil), ip...)
+	}
+	return out, nil
+}
 
 // countingStore wraps a Store and counts GetLease invocations so tests can
 // assert that ValidateLease short-circuits on the local truth cache.
@@ -88,68 +100,63 @@ func (c *captureCache) PutCatalog(context.Context, domain.Catalog, time.Duration
 func (c *captureCache) InvalidateCatalog(context.Context) error                         { return nil }
 func (c *captureCache) Close() error                                                    { return nil }
 
-// withTracingResolver swaps the Service resolver with one whose Dial increments
-// a counter every time the resolver tries to issue a network query. This lets
-// tests detect whether a hostname was looked up (cache miss) versus served
-// from the in-process safety cache.
-func withTracingResolver(t *testing.T, svc *Service) *atomic.Int64 {
-	t.Helper()
-	var calls atomic.Int64
-	svc.resolver = &net.Resolver{
-		PreferGo: true,
-		Dial: func(_ context.Context, _, _ string) (net.Conn, error) {
-			calls.Add(1)
-			return nil, errors.New("dns disabled in test")
-		},
-	}
-	return &calls
-}
-
-func TestSafeTargetCachesHostDecisionWithinTTL(t *testing.T) {
+func TestSafeTargetDoesNotTrustCachedSafeDecision(t *testing.T) {
 	store := storage.NewMemoryStore()
 	svc := NewService(store, "http://gateway.local")
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	calls := withTracingResolver(t, svc)
+	resolver := newStubResolver()
+	resolver.errs["example.com"] = errors.New("dns disabled in test")
+	svc.resolver = resolver
 
-	// Pre-warm the cache with a positive decision the way the production
-	// path would after a successful resolution.
 	svc.storeHostSafety("example.com", true)
-
-	for i := 0; i < 5; i++ {
-		if !svc.safeTarget("https://example.com/resource") {
-			t.Fatalf("safeTarget(%d) = false, want true", i)
-		}
-	}
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("resolver dials = %d, want 0 within TTL", got)
-	}
-}
-
-func TestSafeTargetCacheExpiryForcesReResolve(t *testing.T) {
-	store := storage.NewMemoryStore()
-	svc := NewService(store, "http://gateway.local")
-	now := time.Now().UTC()
-	svc.now = func() time.Time { return now }
-	calls := withTracingResolver(t, svc)
-	svc.storeHostSafety("example.com", true)
-
-	if !svc.safeTarget("https://example.com/resource") {
-		t.Fatal("first safeTarget = false, want true (cached)")
-	}
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("dials before expiry = %d, want 0", got)
-	}
-
-	// Advance well past the cache TTL.
-	svc.now = func() time.Time { return now.Add(2 * svc.hostSafetyTTL) }
-	// The expired cache entry should now force a resolver call. The stub
-	// resolver always errors, so safeTarget must fail closed.
 	if svc.safeTarget("https://example.com/resource") {
-		t.Fatal("safeTarget after expiry = true, want false on resolver error")
+		t.Fatal("safeTarget = true, want false after re-resolving cached safe host")
 	}
-	if got := calls.Load(); got == 0 {
-		t.Fatal("dials after expiry = 0, want >=1")
+	if got := resolver.calls.Load(); got != 1 {
+		t.Fatalf("resolver lookups = %d, want 1 for cached safe recheck", got)
+	}
+}
+
+func TestSafeTargetCachesUnsafeDecisionWithinTTL(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := NewService(store, "http://gateway.local")
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
+	svc.storeHostSafety("example.com", false)
+
+	if svc.safeTarget("https://example.com/resource") {
+		t.Fatal("safeTarget = true, want cached unsafe decision to reject")
+	}
+	if got := resolver.calls.Load(); got != 0 {
+		t.Fatalf("resolver lookups = %d, want 0 for cached unsafe decision", got)
+	}
+}
+
+func TestSafeTargetResolverErrorsAreNotCached(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := NewService(store, "http://gateway.local")
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	resolver := newStubResolver()
+	resolver.errs["example.com"] = errors.New("temporary dns failure")
+	svc.resolver = resolver
+
+	if svc.safeTarget("https://example.com/resource") {
+		t.Fatal("first safeTarget = true, want false on resolver error")
+	}
+	resolver.mu.Lock()
+	delete(resolver.errs, "example.com")
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	resolver.mu.Unlock()
+	if !svc.safeTarget("https://example.com/resource") {
+		t.Fatal("second safeTarget = false, want true after resolver recovery")
+	}
+	if got := resolver.calls.Load(); got != 2 {
+		t.Fatalf("resolver lookups = %d, want 2 because resolver failures are not cached", got)
 	}
 }
 
@@ -158,12 +165,13 @@ func TestSafeTargetPublicIPSkipsResolver(t *testing.T) {
 	svc := NewService(store, "http://gateway.local")
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	calls := withTracingResolver(t, svc)
+	resolver := newStubResolver()
+	svc.resolver = resolver
 
 	if !svc.safeTarget("https://1.1.1.1/resource") {
 		t.Fatal("safeTarget for public IP = false, want true")
 	}
-	if got := calls.Load(); got != 0 {
+	if got := resolver.calls.Load(); got != 0 {
 		t.Fatalf("public IP dialed resolver %d times, want 0", got)
 	}
 }
@@ -198,7 +206,9 @@ func TestCreateLeaseDoesNotPersistResolvedIP(t *testing.T) {
 	svc := NewService(store, "http://gateway.local")
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	svc.storeHostSafety("example.com", true)
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
 
 	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-domain", CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "user-a"},
@@ -224,7 +234,9 @@ func TestValidateLeaseSkipsStoreOnFreshTruth(t *testing.T) {
 	svc.SetCache(cc, time.Minute)
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	svc.storeHostSafety("example.com", true)
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
 
 	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-truth", CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "user-a"},
@@ -274,7 +286,9 @@ func TestValidateLeaseFirstCacheHitWithoutTruthStillFetchesStore(t *testing.T) {
 	svc.SetCache(cc, time.Minute)
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	svc.storeHostSafety("example.com", true)
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
 
 	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-firsthit", CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "user-a"},
@@ -313,7 +327,9 @@ func TestRenewLeaseInvalidatesValidateTruth(t *testing.T) {
 	svc.SetCache(cc, time.Minute)
 	now := time.Now().UTC()
 	svc.now = func() time.Time { return now }
-	svc.storeHostSafety("example.com", true)
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
 
 	principal := domain.Principal{TenantID: "tenant-a"}
 	created, err := svc.CreateLease(ctx, principal, "idem-renew-truth", CreateLeaseRequest{
@@ -341,5 +357,53 @@ func TestRenewLeaseInvalidatesValidateTruth(t *testing.T) {
 	}
 	if counter.getLeaseCalls.Load() <= beforeRenew {
 		t.Fatalf("getLease did not advance after renew (was %d)", counter.getLeaseCalls.Load())
+	}
+}
+
+func TestValidateLeaseAuthFailureAfterStoreReadKeepsTruthStamp(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemoryStore()
+	if _, err := mem.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	counter := &countingStore{Store: mem}
+	cc := &captureCache{}
+	svc := NewService(counter, "http://gateway.local")
+	svc.SetCache(cc, time.Minute)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
+
+	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-auth-failure", CreateLeaseRequest{
+		Subject:     domain.Subject{Type: "user", ID: "user-a"},
+		ResourceRef: domain.ResourceRef{Kind: "url", ID: "https://example.com/resource"},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	if _, err := svc.ValidateLease(ctx, created.TenantID, created.ID, created.Password, "https://example.com/resource"); err != nil {
+		t.Fatalf("priming ValidateLease error = %v", err)
+	}
+	if got := counter.getLeaseCalls.Load(); got != 1 {
+		t.Fatalf("after priming getLease=%d, want 1", got)
+	}
+
+	svc.now = func() time.Time { return now.Add(2 * svc.validateTruthTTL) }
+	if _, err := svc.ValidateLease(ctx, created.TenantID, created.ID, "wrong-password", "https://example.com/resource"); !errors.Is(err, domain.ErrAuthFailed) {
+		t.Fatalf("ValidateLease wrong password error = %v, want ErrAuthFailed", err)
+	}
+	if got := counter.getLeaseCalls.Load(); got != 2 {
+		t.Fatalf("after wrong-password getLease=%d, want 2", got)
+	}
+
+	svc.now = func() time.Time { return now.Add(2*svc.validateTruthTTL + 50*time.Millisecond) }
+	if _, err := svc.ValidateLease(ctx, created.TenantID, created.ID, created.Password, "https://example.com/resource"); err != nil {
+		t.Fatalf("post-auth-failure ValidateLease error = %v", err)
+	}
+	if got := counter.getLeaseCalls.Load(); got != 2 {
+		t.Fatalf("after good password getLease=%d, want still 2 because auth failure kept truth stamp", got)
 	}
 }
