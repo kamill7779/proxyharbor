@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/cache"
@@ -19,6 +20,23 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
+
+const (
+	hostSafetyCacheTTL    = 15 * time.Second
+	hostSafetyCacheMax    = 4096
+	validateTruthCacheTTL = 250 * time.Millisecond
+	validateTruthCacheMax = 8192
+)
+
+type hostSafetyEntry struct {
+	safe      bool
+	expiresAt time.Time
+}
+
+type validateTruthEntry struct {
+	fingerprint string
+	verifiedAt  time.Time
+}
 
 type Service struct {
 	store                      storage.Store
@@ -31,10 +49,29 @@ type Service struct {
 	selector                   selector.ProxySelector
 	selectorMode               string
 	logger                     *slog.Logger
+	hostSafetyMu               sync.RWMutex
+	hostSafety                 map[string]hostSafetyEntry
+	hostSafetyTTL              time.Duration
+	validateTruthMu            sync.RWMutex
+	validateTruth              map[string]validateTruthEntry
+	validateTruthTTL           time.Duration
 }
 
 func NewService(store storage.Store, gatewayURL string) *Service {
-	return &Service{store: store, cache: cache.Noop{}, cacheTTL: time.Minute, now: time.Now, gatewayURL: gatewayURL, resolver: net.DefaultResolver, selector: selector.NewLocal(), selectorMode: selector.NameLocal}
+	return &Service{
+		store:            store,
+		cache:            cache.Noop{},
+		cacheTTL:         time.Minute,
+		now:              time.Now,
+		gatewayURL:       gatewayURL,
+		resolver:         net.DefaultResolver,
+		selector:         selector.NewLocal(),
+		selectorMode:     selector.NameLocal,
+		hostSafety:       make(map[string]hostSafetyEntry),
+		hostSafetyTTL:    hostSafetyCacheTTL,
+		validateTruth:    make(map[string]validateTruthEntry),
+		validateTruthTTL: validateTruthCacheTTL,
+	}
 }
 
 func (s *Service) SetLogger(logger *slog.Logger) {
@@ -85,7 +122,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if req.ResourceRef.ID == "" || req.ResourceRef.Kind == "" {
 		return domain.Lease{}, domain.ErrPolicyDenied
 	}
-	if !safeResource(req.ResourceRef) {
+	if !s.safeResource(req.ResourceRef) {
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
 	idem := storage.IdempotencyScope{TenantID: principal.TenantID, StableSubjectID: req.Subject.StableID(), ResourceRef: req.ResourceRef.StableID(), RequestKind: "create_lease", Key: key}
@@ -178,7 +215,7 @@ func (s *Service) RevokeLease(ctx context.Context, principal domain.Principal, l
 }
 
 func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password, target string) (domain.Lease, error) {
-	if !safeTarget(target) {
+	if !s.safeTarget(target) {
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
 	if cached, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID); hit {
@@ -464,15 +501,17 @@ func (s *Service) incrementSelectorSelected() {
 	}
 }
 
-func safeResource(resource domain.ResourceRef) bool { return safeTarget(resource.ID) }
+func (s *Service) safeResource(resource domain.ResourceRef) bool {
+	return s.safeTarget(resource.ID)
+}
 
 func resourceMatchesTarget(resource domain.ResourceRef, target string) bool {
 	return extractHost(resource.ID) == extractHost(target)
 }
 
-func safeTarget(target string) bool {
+func (s *Service) safeTarget(target string) bool {
 	host := extractHost(target)
-	return isSafeHost(host)
+	return s.isSafeHost(host)
 }
 
 func extractHost(target string) string {
@@ -489,7 +528,12 @@ func extractHost(target string) string {
 	return host
 }
 
-func isSafeHost(host string) bool {
+// isSafeHost answers whether host can be used as a lease target. It preserves
+// the original fail-closed semantics for empty hosts, well-known loopback
+// names, internal IP literals, and DNS lookup failures, but caches the final
+// decision in-process for a short TTL to avoid repeated DNS resolution on hot
+// paths. Public IP literals skip the resolver entirely.
+func (s *Service) isSafeHost(host string) bool {
 	if host == "" {
 		return false
 	}
@@ -500,18 +544,65 @@ func isSafeHost(host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return !isInternalIP(ip)
 	}
+	if decision, ok := s.lookupHostSafety(host); ok {
+		return decision
+	}
+	resolver := s.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	ips, err := resolver.LookupIP(ctx, "ip", host)
 	if err != nil || len(ips) == 0 {
+		s.storeHostSafety(host, false)
 		return false
 	}
 	for _, ip := range ips {
 		if isInternalIP(ip) {
+			s.storeHostSafety(host, false)
 			return false
 		}
 	}
+	s.storeHostSafety(host, true)
 	return true
+}
+
+func (s *Service) lookupHostSafety(host string) (bool, bool) {
+	s.hostSafetyMu.RLock()
+	entry, ok := s.hostSafety[host]
+	s.hostSafetyMu.RUnlock()
+	if !ok {
+		return false, false
+	}
+	if !entry.expiresAt.After(s.now()) {
+		return false, false
+	}
+	return entry.safe, true
+}
+
+func (s *Service) storeHostSafety(host string, safe bool) {
+	ttl := s.hostSafetyTTL
+	if ttl <= 0 {
+		return
+	}
+	s.hostSafetyMu.Lock()
+	defer s.hostSafetyMu.Unlock()
+	if len(s.hostSafety) >= hostSafetyCacheMax {
+		now := s.now()
+		for k, v := range s.hostSafety {
+			if !v.expiresAt.After(now) {
+				delete(s.hostSafety, k)
+			}
+		}
+		if len(s.hostSafety) >= hostSafetyCacheMax {
+			for k := range s.hostSafety {
+				delete(s.hostSafety, k)
+				break
+			}
+		}
+	}
+	s.hostSafety[host] = hostSafetyEntry{safe: safe, expiresAt: s.now().Add(ttl)}
 }
 
 func isInternalIP(ip net.IP) bool {
@@ -545,7 +636,7 @@ func (s *Service) safeProxyEndpoint(endpoint string) bool {
 	if s.allowInternalProxyEndpoint {
 		return true
 	}
-	return isSafeHost(strings.ToLower(u.Hostname()))
+	return s.isSafeHost(strings.ToLower(u.Hostname()))
 }
 
 func hashLeasePassword(leaseID, plaintext string) string {
