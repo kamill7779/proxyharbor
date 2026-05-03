@@ -1004,7 +1004,7 @@ func projectRoot() string {
 }
 
 func composeProjectName(root string) string {
-	base := strings.ToLower(filepath.Base(root))
+	base := strings.ToLower(filepath.Base(strings.ReplaceAll(root, "\\", "/")))
 	var out strings.Builder
 	for _, r := range base {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
