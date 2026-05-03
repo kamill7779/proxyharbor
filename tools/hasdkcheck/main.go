@@ -184,21 +184,46 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 }
 
 func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, stdout io.Writer) (err error) {
+	seedsIsolated := false
+	var addedID string
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		var cleanupErrs []string
+		if addedID != "" {
+			if cleanupErr := admin.Proxies.Delete(cleanupCtx, addedID); cleanupErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Sprintf("cleanup proxy %s: %v", addedID, cleanupErr))
+			}
+		}
+		if seedsIsolated {
+			if restoreErr := setSeededProxyHealth(cleanupCtx, admin, true); restoreErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Sprintf("restore seeded proxies: %v", restoreErr))
+			}
+		}
+		if err == nil && len(cleanupErrs) > 0 {
+			err = fmt.Errorf("sdk ha happy path cleanup: %s", strings.Join(cleanupErrs, "; "))
+		}
+	}()
+	seedsIsolated = true
+	if err := setSeededProxyHealth(ctx, admin, false); err != nil {
+		return fmt.Errorf("sdk ha happy path prepare pool: %w", err)
+	}
+
 	endpoint := "http://198.51.100.10:28080"
-	added, err := admin.AddProxy(ctx, endpoint)
+	proxyID := "sdk-ha-flow-proxy-" + time.Now().UTC().Format("20060102150405.000000000")
+	added, err := admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{
+		ID:       proxyID,
+		Endpoint: endpoint,
+		Healthy:  true,
+		Weight:   1,
+	})
 	if err != nil {
 		return fmt.Errorf("sdk ha happy path add proxy: %w", err)
 	}
 	if added.ID == "" {
 		return fmt.Errorf("sdk ha happy path add proxy: missing proxy id for endpoint %s", endpoint)
 	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if cleanupErr := admin.Proxies.Delete(cleanupCtx, added.ID); err == nil && cleanupErr != nil {
-			err = fmt.Errorf("sdk ha happy path cleanup proxy %s: %w", added.ID, cleanupErr)
-		}
-	}()
+	addedID = added.ID
 
 	key := "sdk-ha-flow-" + time.Now().UTC().Format("20060102150405.000000000")
 	proxy, err := tenant.GetProxy(
@@ -220,6 +245,9 @@ func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, s
 	if proxy.URL == "" {
 		return fmt.Errorf("sdk ha happy path get proxy: empty proxy url for lease %s", proxy.LeaseID)
 	}
+	if proxy.ProxyID != added.ID {
+		return fmt.Errorf("sdk ha happy path get proxy: leased proxy id %s, want added proxy %s", proxy.ProxyID, added.ID)
+	}
 
 	renewed, err := tenant.Leases.Renew(ctx, proxy.LeaseID)
 	if err != nil {
@@ -231,8 +259,8 @@ func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, s
 	if renewed.ProxyID == "" {
 		return fmt.Errorf("sdk ha happy path renew lease: missing proxy id for lease %s", proxy.LeaseID)
 	}
-	if renewed.ProxyID != proxy.ProxyID {
-		return fmt.Errorf("sdk ha happy path renew lease: proxy id changed got=%s want=%s", renewed.ProxyID, proxy.ProxyID)
+	if renewed.ProxyID != added.ID {
+		return fmt.Errorf("sdk ha happy path renew lease: proxy id changed got=%s want=%s", renewed.ProxyID, added.ID)
 	}
 	if !renewed.ExpiresAt.After(proxy.ExpiresAt) {
 		return fmt.Errorf("sdk ha happy path renew lease: expiry did not move forward before=%s after=%s", proxy.ExpiresAt.UTC().Format(time.RFC3339), renewed.ExpiresAt.UTC().Format(time.RFC3339))
@@ -240,6 +268,20 @@ func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, s
 
 	fmt.Fprintf(stdout, "ok sdk ha happy path              added_proxy=%s lease_id=%s proxy_id=%s renewed_until=%s\n",
 		added.ID, proxy.LeaseID, proxy.ProxyID, renewed.ExpiresAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+func setSeededProxyHealth(ctx context.Context, admin *proxyharbor.Client, healthy bool) error {
+	for i := 0; i < 10; i++ {
+		if _, err := admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{
+			ID:       fmt.Sprintf("sdk-ha-proxy-%02d", i),
+			Endpoint: proxyEndpoint(i),
+			Healthy:  healthy,
+			Weight:   i + 1,
+		}); err != nil {
+			return fmt.Errorf("seeded proxy %02d healthy=%t: %w", i, healthy, err)
+		}
+	}
 	return nil
 }
 
