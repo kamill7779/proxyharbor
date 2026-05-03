@@ -72,6 +72,38 @@ func TestReportFailsWhenOperationHasLowLatencyFailures(t *testing.T) {
 	}
 }
 
+func TestSoakReportAllowsSubThresholdErrorRate(t *testing.T) {
+	acc := newAccumulator()
+	for i := 0; i < 1000; i++ {
+		acc.Add(operationResult{Operation: opValidate, Status: 200, Latency: 10 * time.Millisecond, Success: true})
+		acc.Add(operationResult{Operation: opLeaseCreate, Status: 201, Latency: 20 * time.Millisecond, Success: true})
+		acc.Add(operationResult{Operation: opLeaseRenew, Status: 200, Latency: 15 * time.Millisecond, Success: true})
+	}
+	acc.Add(operationResult{Operation: opValidate, Status: 503, Latency: 12 * time.Millisecond, Success: false})
+
+	report := acc.Report(reportMeta{
+		Mode:        "soak",
+		Concurrency: 500,
+		Elapsed:     10 * time.Minute,
+	})
+
+	if report.OverallErrorRate >= 0.005 {
+		t.Fatalf("overall error rate = %v, want < 0.005", report.OverallErrorRate)
+	}
+	if !report.SoakThreshold.Pass {
+		t.Fatalf("soak threshold pass = false, want true; threshold=%#v", report.SoakThreshold)
+	}
+	if report.Operations[opValidate].Threshold.MaxErrorRate != 0.005 {
+		t.Fatalf("validate max error rate = %v, want 0.005", report.Operations[opValidate].Threshold.MaxErrorRate)
+	}
+	if !report.Operations[opValidate].Threshold.Pass {
+		t.Fatalf("validate threshold pass = false, want true; threshold=%#v", report.Operations[opValidate].Threshold)
+	}
+	if !report.Passed {
+		t.Fatalf("report passed = false, want true")
+	}
+}
+
 func TestReportEvaluatesV054Thresholds(t *testing.T) {
 	acc := newAccumulator()
 	for _, result := range []operationResult{

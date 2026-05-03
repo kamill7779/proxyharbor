@@ -651,14 +651,14 @@ func (a *accumulator) Report(meta reportMeta) pressureReport {
 		Operations:         map[string]operationReport{},
 	}
 	for _, name := range orderedOperations {
-		report.Operations[name] = buildOperationReport(name, a.operations[name])
+		report.Operations[name] = buildOperationReport(meta.Mode, name, a.operations[name])
 	}
 	report.SoakThreshold = evaluateSoakThreshold(meta, report)
-	report.Passed = report.Failure == 0 && allOperationsPass(report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
+	report.Passed = allOperationsPass(report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
 	return report
 }
 
-func buildOperationReport(name string, op *operationAccumulator) operationReport {
+func buildOperationReport(mode, name string, op *operationAccumulator) operationReport {
 	if op == nil {
 		op = &operationAccumulator{Statuses: map[int]int{}}
 	}
@@ -675,11 +675,11 @@ func buildOperationReport(name string, op *operationAccumulator) operationReport
 		MaxMS:              percentile(latency, 1),
 		StatusDistribution: cloneIntMap(op.Statuses),
 	}
-	report.Threshold = evaluateOperationThreshold(name, report)
+	report.Threshold = evaluateOperationThreshold(mode, name, report)
 	return report
 }
 
-func evaluateOperationThreshold(name string, report operationReport) operationThresholdCheck {
+func evaluateOperationThreshold(mode, name string, report operationReport) operationThresholdCheck {
 	targets := map[string]struct {
 		p95 float64
 		p99 float64
@@ -689,10 +689,14 @@ func evaluateOperationThreshold(name string, report operationReport) operationTh
 		opLeaseRenew:  {p95: 120, p99: 300},
 	}
 	target := targets[name]
+	maxErrorRate := 0.0
+	if strings.EqualFold(mode, "soak") {
+		maxErrorRate = 0.005
+	}
 	check := operationThresholdCheck{
 		TargetP95MS:  target.p95,
 		TargetP99MS:  target.p99,
-		MaxErrorRate: 0,
+		MaxErrorRate: maxErrorRate,
 		Pass:         report.Total > 0,
 	}
 	if report.Total == 0 {
@@ -708,11 +712,25 @@ func evaluateOperationThreshold(name string, report operationReport) operationTh
 		check.Pass = false
 		check.Violations = append(check.Violations, fmt.Sprintf("p99 %.0fms >= %.0fms", report.P99MS, target.p99))
 	}
-	if report.ErrorRate > check.MaxErrorRate {
+	if exceedsMaxErrorRate(report.ErrorRate, check.MaxErrorRate) {
 		check.Pass = false
-		check.Violations = append(check.Violations, fmt.Sprintf("error rate %.4f > %.4f", report.ErrorRate, check.MaxErrorRate))
+		check.Violations = append(check.Violations, errorRateViolation(report.ErrorRate, check.MaxErrorRate))
 	}
 	return check
+}
+
+func exceedsMaxErrorRate(rate, max float64) bool {
+	if max == 0 {
+		return rate > 0
+	}
+	return rate >= max
+}
+
+func errorRateViolation(rate, max float64) string {
+	if max == 0 {
+		return fmt.Sprintf("error rate %.4f > %.4f", rate, max)
+	}
+	return fmt.Sprintf("error rate %.4f >= %.4f", rate, max)
 }
 
 func evaluateSoakThreshold(meta reportMeta, report pressureReport) soakThresholdResult {
