@@ -33,12 +33,14 @@ type config struct {
 	Docker          bool
 	ComposeFile     string
 	Timeout         time.Duration
+	InstanceURLs    []string
 }
 
 type runner struct {
-	cfg    config
-	client *http.Client
-	base   string
+	cfg       config
+	client    *http.Client
+	base      string
+	instances []string
 }
 
 type tenantKeyResponse struct {
@@ -80,6 +82,13 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.Docker, "docker", false, "start docker-compose HA test topology")
 	flag.StringVar(&cfg.ComposeFile, "compose-file", "docker-compose.ha-test.yaml", "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 4*time.Minute, "overall timeout")
+	instances := envDefault("PROXYHARBOR_INSTANCE_URLS", "http://127.0.0.1:18083,http://127.0.0.1:18084,http://127.0.0.1:18085")
+	for _, value := range strings.Split(instances, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cfg.InstanceURLs = append(cfg.InstanceURLs, strings.TrimRight(value, "/"))
+		}
+	}
 	flag.Parse()
 	if cfg.AdminKey == "" {
 		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
@@ -121,8 +130,16 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 		}
 		defer cleanupDocker(cfg, 90*time.Second)
 	}
-	r := runner{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, base: strings.TrimRight(cfg.BaseURL, "/")}
+	r := runner{
+		cfg:       cfg,
+		client:    &http.Client{Timeout: 15 * time.Second},
+		base:      strings.TrimRight(cfg.BaseURL, "/"),
+		instances: cfg.InstanceURLs,
+	}
 	if err := r.waitReady(ctx); err != nil {
+		return err
+	}
+	if err := r.waitAllReadySubscribed(ctx, 45*time.Second); err != nil {
 		return err
 	}
 	checks := []struct {
@@ -432,12 +449,25 @@ func (r runner) issueTenantKey(ctx context.Context, label string) (string, error
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return "", err
 	}
+	if resp.Key == "" {
+		return "", fmt.Errorf("tenant key missing from response: %s", bodySummary(body))
+	}
+	if err := r.waitTenantKeyVisible(ctx, label, resp.Key); err != nil {
+		return "", err
+	}
 	return resp.Key, nil
 }
 
 func (r runner) createLease(ctx context.Context, tenantKey, idempotency string, requirePassword bool) (leaseResponse, error) {
-	payload := map[string]any{"subject": map[string]any{"subject_type": "workload", "subject_id": idempotency}, "resource_ref": map[string]any{"kind": "url", "id": "https://example.com"}, "ttl_seconds": 120}
-	status, body, err := r.request(ctx, http.MethodPost, "/v1/leases", tenantKey, idempotency, payload)
+	return r.createLeaseAt(ctx, r.base, tenantKey, idempotency, requirePassword)
+}
+
+func (r runner) createLeaseAt(ctx context.Context, base, tenantKey, idempotency string, requirePassword bool) (leaseResponse, error) {
+	status, body, err := r.requestAt(ctx, base, http.MethodPost, "/v1/leases", tenantKey, idempotency, map[string]any{
+		"subject":      map[string]any{"subject_type": "workload", "subject_id": idempotency},
+		"resource_ref": map[string]any{"kind": "url", "id": "https://example.com"},
+		"ttl_seconds":  120,
+	})
 	if err != nil {
 		return leaseResponse{}, err
 	}
@@ -455,6 +485,10 @@ func (r runner) createLease(ctx context.Context, tenantKey, idempotency string, 
 }
 
 func (r runner) request(ctx context.Context, method, path, key, idempotency string, payload any) (int, []byte, error) {
+	return r.requestAt(ctx, r.base, method, path, key, idempotency, payload)
+}
+
+func (r runner) requestAt(ctx context.Context, base, method, path, key, idempotency string, payload any) (int, []byte, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -463,7 +497,7 @@ func (r runner) request(ctx context.Context, method, path, key, idempotency stri
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, r.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(base, "/")+path, body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -505,6 +539,38 @@ func (r runner) waitReady(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("ready timeout: %s", last)
+}
+
+func (r runner) waitAllReadySubscribed(ctx context.Context, timeout time.Duration) error {
+	return r.forEachInstance(ctx, timeout, func(base string) error {
+		status, body, err := r.requestAt(ctx, base, http.MethodGet, "/readyz", "", "", nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("readyz status %d: %s", status, bodySummary(body))
+		}
+		var doc struct {
+			CacheInvalidation struct {
+				State string `json:"state"`
+			} `json:"cache_invalidation"`
+		}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return fmt.Errorf("decode readyz: %w", err)
+		}
+		if doc.CacheInvalidation.State != "subscribed" {
+			return fmt.Errorf("readyz invalidation state %q, want subscribed: %s", doc.CacheInvalidation.State, bodySummary(body))
+		}
+		return nil
+	})
+}
+
+func (r runner) waitTenantKeyVisible(ctx context.Context, label, tenantKey string) error {
+	return r.forEachInstance(ctx, 8*time.Second, func(base string) error {
+		idempotency := fmt.Sprintf("key-visible-%s-%d", label, time.Now().UnixNano())
+		_, err := r.createLeaseAt(ctx, base, tenantKey, idempotency, false)
+		return err
+	})
 }
 
 func startDocker(ctx context.Context, cfg config) error {
@@ -558,6 +624,41 @@ func bodySummary(body []byte) string {
 		}
 	}
 	return fmt.Sprintf("<redacted len=%d>", len(body))
+}
+
+func (r runner) forEachInstance(ctx context.Context, timeout time.Duration, fn func(base string) error) error {
+	instances := r.instances
+	if len(instances) == 0 {
+		instances = []string{r.base}
+	}
+	for _, base := range instances {
+		base := base
+		if err := retryUntil(ctx, timeout, func() error { return fn(base) }); err != nil {
+			return fmt.Errorf("instance %s: %w", base, err)
+		}
+	}
+	return nil
+}
+
+func retryUntil(ctx context.Context, timeout time.Duration, fn func() error) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if err := fn(); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if last == nil {
+		last = errors.New("condition not met")
+	}
+	return last
 }
 
 func addComposeEnvFile(args []string, envFile string) []string {
