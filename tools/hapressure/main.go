@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +42,7 @@ type config struct {
 	KeyPepper       string
 	TenantID        string
 	TenantKey       string
+	Operations      []string
 	Mode            string
 	Concurrency     int
 	SamplesPerOp    int
@@ -49,6 +51,8 @@ type config struct {
 	CreateTTL       time.Duration
 	Docker          bool
 	DockerSkipBuild bool
+	DockerInternal  bool
+	DockerNetwork   string
 	ComposeFile     string
 	Timeout         time.Duration
 }
@@ -57,6 +61,7 @@ type runner struct {
 	cfg            config
 	client         *http.Client
 	base           string
+	runID          string
 	tenantKey      string
 	validateLeases []leaseInfo
 	renewLeases    []leaseInfo
@@ -78,11 +83,14 @@ type operationResult struct {
 	Status    int
 	Latency   time.Duration
 	Success   bool
+	ErrorKind string
+	ErrorText string
 }
 
 type reportMeta struct {
 	Mode         string
 	BaseURL      string
+	Operations   []string
 	Concurrency  int
 	SamplesPerOp int
 	Elapsed      time.Duration
@@ -93,6 +101,7 @@ type reportMeta struct {
 type pressureReport struct {
 	Mode               string                     `json:"mode"`
 	BaseURL            string                     `json:"base_url"`
+	OperationsRun      []string                   `json:"operations_run"`
 	Concurrency        int                        `json:"concurrency"`
 	SamplesPerOp       int                        `json:"samples_per_op,omitempty"`
 	Total              int                        `json:"total"`
@@ -103,6 +112,8 @@ type pressureReport struct {
 	StartedAt          time.Time                  `json:"started_at"`
 	FinishedAt         time.Time                  `json:"finished_at"`
 	StatusDistribution map[int]int                `json:"status_distribution"`
+	ErrorKinds         map[string]int             `json:"error_kinds,omitempty"`
+	ErrorSamples       []string                   `json:"error_samples,omitempty"`
 	Operations         map[string]operationReport `json:"operations"`
 	SoakThreshold      soakThresholdResult        `json:"soak_threshold"`
 	Passed             bool                       `json:"passed"`
@@ -118,6 +129,8 @@ type operationReport struct {
 	P99MS              float64                 `json:"p99_ms"`
 	MaxMS              float64                 `json:"max_ms"`
 	StatusDistribution map[int]int             `json:"status_distribution"`
+	ErrorKinds         map[string]int          `json:"error_kinds,omitempty"`
+	ErrorSamples       []string                `json:"error_samples,omitempty"`
 	Threshold          operationThresholdCheck `json:"threshold"`
 }
 
@@ -144,6 +157,8 @@ type operationAccumulator struct {
 	Failure  int
 	Statuses map[int]int
 	Latency  []float64
+	ErrorKinds   map[string]int
+	ErrorSamples []string
 }
 
 type accumulator struct {
@@ -152,6 +167,8 @@ type accumulator struct {
 	success    int
 	failure    int
 	statuses   map[int]int
+	errorKinds map[string]int
+	errorSamples []string
 	operations map[string]*operationAccumulator
 }
 
@@ -167,11 +184,13 @@ func main() {
 
 func parseFlags() config {
 	cfg := config{}
+	operationsCSV := strings.Join(orderedOperations, ",")
 	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://127.0.0.1:18081"), "ProxyHarbor HA load-balancer URL")
 	flag.StringVar(&cfg.AdminKey, "admin-key", "", "admin key; defaults to PROXYHARBOR_ADMIN_KEY")
 	flag.StringVar(&cfg.KeyPepper, "key-pepper", "", "key pepper used when -docker starts compose; defaults to PROXYHARBOR_KEY_PEPPER")
 	flag.StringVar(&cfg.TenantID, "tenant", "ha-pressure", "tenant id used for pressure traffic")
 	flag.StringVar(&cfg.TenantKey, "tenant-key", "", "existing tenant key; defaults to PROXYHARBOR_TENANT_KEY; when empty a key is issued with the admin key")
+	flag.StringVar(&operationsCSV, "operations", operationsCSV, "comma-separated operations: gateway_validate, lease_create, lease_renew")
 	flag.StringVar(&cfg.Mode, "mode", "pressure", "workload mode: pressure or soak")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 64, "concurrent workers")
 	flag.IntVar(&cfg.SamplesPerOp, "samples-per-op", 200, "samples per operation in pressure mode")
@@ -180,9 +199,17 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.CreateTTL, "create-ttl", 2*time.Minute, "ttl for measured lease create requests")
 	flag.BoolVar(&cfg.Docker, "docker", false, "start docker-compose HA test topology")
 	flag.BoolVar(&cfg.DockerSkipBuild, "docker-skip-build", false, "reuse existing proxyharbor:ha-test image when starting docker HA topology")
+	flag.BoolVar(&cfg.DockerInternal, "docker-internal", false, "run the pressure worker inside the compose network to avoid host port publishing limits")
+	flag.StringVar(&cfg.DockerNetwork, "docker-network", defaultDockerNetwork(), "docker network used with -docker-internal")
 	flag.StringVar(&cfg.ComposeFile, "compose-file", defaultComposeFile(), "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 20*time.Minute, "overall timeout")
 	flag.Parse()
+	operations, err := parseOperations(operationsCSV)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hapressure:", err)
+		os.Exit(2)
+	}
+	cfg.Operations = operations
 	if cfg.AdminKey == "" {
 		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
 	}
@@ -209,6 +236,8 @@ func parseFlags() config {
 
 func defaultComposeFile() string { return "docker-compose.ha-test.yaml" }
 
+func defaultDockerNetwork() string { return composeProjectName(projectRoot()) + "_default" }
+
 func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	var err error
 	if cfg.AdminKey == "" {
@@ -234,10 +263,14 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 		}
 		defer cleanupCompose(cfg, 90*time.Second, "down", "-v", "--remove-orphans")
 	}
+	if cfg.DockerInternal {
+		return runDockerInternal(ctx, cfg, stdout)
+	}
 	r := &runner{
 		cfg:    cfg,
 		client: localHTTPClient(15 * time.Second),
 		base:   strings.TrimRight(cfg.BaseURL, "/"),
+		runID:  mustRunID(),
 	}
 	if err := r.prepare(ctx); err != nil {
 		return err
@@ -260,6 +293,7 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	meta := reportMeta{
 		Mode:         strings.ToLower(cfg.Mode),
 		BaseURL:      r.base,
+		Operations:   append([]string(nil), cfg.Operations...),
 		Concurrency:  cfg.Concurrency,
 		SamplesPerOp: cfg.SamplesPerOp,
 		Elapsed:      finished.Sub(started),
@@ -284,6 +318,11 @@ func (r *runner) prepare(ctx context.Context) error {
 		return err
 	}
 	r.tenantKey = key
+	needValidate := hasOperation(r.cfg.Operations, opValidate)
+	needRenew := hasOperation(r.cfg.Operations, opLeaseRenew)
+	if !needValidate && !needRenew {
+		return nil
+	}
 	validateTTL := 15 * time.Minute
 	if strings.EqualFold(r.cfg.Mode, "soak") && r.cfg.Duration+5*time.Minute > validateTTL {
 		validateTTL = r.cfg.Duration + 5*time.Minute
@@ -292,13 +331,17 @@ func (r *runner) prepare(ctx context.Context) error {
 	if poolSize < r.cfg.Concurrency {
 		poolSize = r.cfg.Concurrency
 	}
-	r.validateLeases, err = r.seedLeasePool(ctx, "validate", poolSize, validateTTL)
-	if err != nil {
-		return err
+	if needValidate {
+		r.validateLeases, err = r.seedLeasePool(ctx, "validate", poolSize, validateTTL)
+		if err != nil {
+			return err
+		}
 	}
-	r.renewLeases, err = r.seedLeasePool(ctx, "renew", poolSize, validateTTL)
-	if err != nil {
-		return err
+	if needRenew {
+		r.renewLeases, err = r.seedLeasePool(ctx, "renew", poolSize, validateTTL)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -308,9 +351,9 @@ func (r *runner) runPressure(ctx context.Context, acc *accumulator) error {
 		Operation string
 		Sequence  int
 	}
-	jobs := make(chan job, r.cfg.SamplesPerOp*len(orderedOperations))
+	jobs := make(chan job, r.cfg.SamplesPerOp*len(r.cfg.Operations))
 	for sample := 0; sample < r.cfg.SamplesPerOp; sample++ {
-		for _, operation := range orderedOperations {
+		for _, operation := range r.cfg.Operations {
 			jobs <- job{Operation: operation, Sequence: sample}
 		}
 	}
@@ -345,7 +388,7 @@ func (r *runner) runSoak(ctx context.Context, acc *accumulator) error {
 					return
 				}
 				sequence := int(counter.Add(1)) - 1
-				operation := orderedOperations[sequence%len(orderedOperations)]
+				operation := r.cfg.Operations[sequence%len(r.cfg.Operations)]
 				acc.Add(r.executeOperation(ctx, operation, worker, sequence))
 			}
 		}(worker)
@@ -366,6 +409,8 @@ func (r *runner) executeOperation(ctx context.Context, operation string, worker,
 		Status:    status,
 		Latency:   latency,
 		Success:   err == nil && status >= 200 && status < 300,
+		ErrorKind: classifyRequestError(err),
+		ErrorText: summarizeRequestError(err),
 	}
 }
 
@@ -585,16 +630,17 @@ func createLeasePayload(subjectID string, ttl time.Duration) map[string]any {
 }
 
 func (r *runner) uniqueKey(prefix string, worker, sequence int) string {
-	return fmt.Sprintf("%s-%d-%d-%d", prefix, worker, sequence, r.ids.Add(1))
+	return fmt.Sprintf("%s-%s-%d-%d-%d", prefix, r.runID, worker, sequence, r.ids.Add(1))
 }
 
 func newAccumulator() *accumulator {
 	return &accumulator{
 		statuses: map[int]int{},
+		errorKinds: map[string]int{},
 		operations: map[string]*operationAccumulator{
-			opValidate:    {Statuses: map[int]int{}},
-			opLeaseCreate: {Statuses: map[int]int{}},
-			opLeaseRenew:  {Statuses: map[int]int{}},
+			opValidate:    {Statuses: map[int]int{}, ErrorKinds: map[string]int{}},
+			opLeaseCreate: {Statuses: map[int]int{}, ErrorKinds: map[string]int{}},
+			opLeaseRenew:  {Statuses: map[int]int{}, ErrorKinds: map[string]int{}},
 		},
 	}
 }
@@ -611,7 +657,7 @@ func (a *accumulator) Add(result operationResult) {
 	a.statuses[result.Status]++
 	op, ok := a.operations[result.Operation]
 	if !ok {
-		op = &operationAccumulator{Statuses: map[int]int{}}
+		op = &operationAccumulator{Statuses: map[int]int{}, ErrorKinds: map[string]int{}}
 		a.operations[result.Operation] = op
 	}
 	op.Total++
@@ -622,6 +668,12 @@ func (a *accumulator) Add(result operationResult) {
 	}
 	op.Statuses[result.Status]++
 	op.Latency = append(op.Latency, float64(result.Latency.Milliseconds()))
+	if result.ErrorKind != "" {
+		a.errorKinds[result.ErrorKind]++
+		a.errorSamples = appendSample(a.errorSamples, result.ErrorText)
+		op.ErrorKinds[result.ErrorKind]++
+		op.ErrorSamples = appendSample(op.ErrorSamples, result.ErrorText)
+	}
 }
 
 func (a *accumulator) Report(meta reportMeta) pressureReport {
@@ -638,6 +690,7 @@ func (a *accumulator) Report(meta reportMeta) pressureReport {
 	report := pressureReport{
 		Mode:               meta.Mode,
 		BaseURL:            meta.BaseURL,
+		OperationsRun:      selectedOperations(meta.Operations),
 		Concurrency:        meta.Concurrency,
 		SamplesPerOp:       meta.SamplesPerOp,
 		Total:              a.total,
@@ -648,13 +701,15 @@ func (a *accumulator) Report(meta reportMeta) pressureReport {
 		StartedAt:          meta.StartedAt,
 		FinishedAt:         meta.FinishedAt,
 		StatusDistribution: cloneIntMap(a.statuses),
+		ErrorKinds:         cloneStringIntMap(a.errorKinds),
+		ErrorSamples:       append([]string(nil), a.errorSamples...),
 		Operations:         map[string]operationReport{},
 	}
-	for _, name := range orderedOperations {
+	for _, name := range selectedOperations(meta.Operations) {
 		report.Operations[name] = buildOperationReport(meta.Mode, name, a.operations[name])
 	}
 	report.SoakThreshold = evaluateSoakThreshold(meta, report)
-	report.Passed = allOperationsPass(report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
+	report.Passed = allOperationsPass(selectedOperations(meta.Operations), report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
 	return report
 }
 
@@ -674,6 +729,8 @@ func buildOperationReport(mode, name string, op *operationAccumulator) operation
 		P99MS:              percentile(latency, 0.99),
 		MaxMS:              percentile(latency, 1),
 		StatusDistribution: cloneIntMap(op.Statuses),
+		ErrorKinds:         cloneStringIntMap(op.ErrorKinds),
+		ErrorSamples:       append([]string(nil), op.ErrorSamples...),
 	}
 	report.Threshold = evaluateOperationThreshold(mode, name, report)
 	return report
@@ -763,8 +820,8 @@ func evaluateSoakThreshold(meta reportMeta, report pressureReport) soakThreshold
 	return check
 }
 
-func allOperationsPass(operations map[string]operationReport) bool {
-	for _, name := range orderedOperations {
+func allOperationsPass(selected []string, operations map[string]operationReport) bool {
+	for _, name := range selected {
 		if !operations[name].Threshold.Pass {
 			return false
 		}
@@ -807,6 +864,29 @@ func cloneIntMap(src map[int]int) map[int]int {
 	return out
 }
 
+func cloneStringIntMap(src map[string]int) map[string]int {
+	out := make(map[string]int, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func appendSample(samples []string, sample string) []string {
+	if sample == "" {
+		return samples
+	}
+	for _, existing := range samples {
+		if existing == sample {
+			return samples
+		}
+	}
+	if len(samples) >= 5 {
+		return samples
+	}
+	return append(samples, sample)
+}
+
 func startDocker(ctx context.Context, cfg config) error {
 	if !cfg.DockerSkipBuild {
 		root := projectRoot()
@@ -820,6 +900,61 @@ func startDocker(ctx context.Context, cfg config) error {
 		}
 	}
 	return compose(ctx, cfg, "up", "-d", "--wait", "--force-recreate", "--no-build")
+}
+
+func runDockerInternal(ctx context.Context, cfg config, stdout io.Writer) error {
+	dir, err := os.MkdirTemp("", "hapressure-linux-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	binaryPath := filepath.Join(dir, "hapressure")
+	arch, platform, err := dockerRunnerPlatform(ctx)
+	if err != nil {
+		return err
+	}
+
+	build := exec.CommandContext(ctx, "go", "build", "-o", binaryPath, "./tools/hapressure")
+	build.Dir = projectRoot()
+	build.Env = append(scrubSecretEnv(os.Environ()), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("build internal docker runner: %w", err)
+	}
+
+	baseURL := dockerInternalBaseURL(cfg.BaseURL)
+	args := []string{
+		"run", "--rm",
+		"--platform", platform,
+		"--network", cfg.DockerNetwork,
+		"-v", dir + ":/work",
+		"-e", "PROXYHARBOR_ADMIN_KEY=" + cfg.AdminKey,
+		"alpine:3.20",
+		"/work/hapressure",
+		"-base-url", baseURL,
+		"-tenant", cfg.TenantID,
+		"-operations", strings.Join(cfg.Operations, ","),
+		"-mode", cfg.Mode,
+		"-concurrency", fmt.Sprintf("%d", cfg.Concurrency),
+		"-samples-per-op", fmt.Sprintf("%d", cfg.SamplesPerOp),
+		"-warmup-leases", fmt.Sprintf("%d", cfg.WarmupLeases),
+		"-duration", cfg.Duration.String(),
+		"-create-ttl", cfg.CreateTTL.String(),
+		"-timeout", cfg.Timeout.String(),
+	}
+	if cfg.TenantKey != "" {
+		args = append(args, "-e", "PROXYHARBOR_TENANT_KEY="+cfg.TenantKey)
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = projectRoot()
+	cmd.Stdout = stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = scrubSecretEnv(os.Environ())
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker internal pressure run: %w", err)
+	}
+	return nil
 }
 
 func compose(ctx context.Context, cfg config, args ...string) error {
@@ -868,6 +1003,67 @@ func projectRoot() string {
 	return cwd
 }
 
+func composeProjectName(root string) string {
+	base := strings.ToLower(filepath.Base(root))
+	var out strings.Builder
+	for _, r := range base {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			out.WriteRune(r)
+		}
+	}
+	if out.Len() == 0 {
+		return "proxyharbor"
+	}
+	return out.String()
+}
+
+func dockerRunnerPlatform(ctx context.Context) (string, string, error) {
+	serverArch := runtime.GOARCH
+	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Arch}}")
+	cmd.Dir = projectRoot()
+	cmd.Env = scrubSecretEnv(os.Environ())
+	if output, err := cmd.Output(); err == nil {
+		value := strings.TrimSpace(string(output))
+		if value != "" {
+			serverArch = value
+		}
+	}
+	arch, err := normalizeDockerArch(serverArch)
+	if err != nil {
+		return "", "", err
+	}
+	return arch, "linux/" + arch, nil
+}
+
+func normalizeDockerArch(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "amd64", "x86_64":
+		return "amd64", nil
+	case "arm64", "aarch64":
+		return "arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported docker architecture %q for -docker-internal", raw)
+	}
+}
+
+func dockerInternalBaseURL(baseURL string) string {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return "http://nginx:8080"
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1":
+		return "http://nginx:8080"
+	default:
+		return trimmed
+	}
+}
+
 func localHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
@@ -878,6 +1074,43 @@ func localHTTPClient(timeout time.Duration) *http.Client {
 			IdleConnTimeout:     90 * time.Second,
 		},
 	}
+}
+
+func classifyRequestError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "connection reset"), strings.Contains(text, "forcibly closed"):
+		return "conn_reset"
+	case strings.Contains(text, "broken pipe"):
+		return "broken_pipe"
+	case strings.Contains(text, "server closed idle connection"):
+		return "idle_close"
+	case strings.Contains(text, "use of closed network connection"):
+		return "closed_conn"
+	case strings.Contains(text, "timeout"):
+		return "timeout"
+	case strings.Contains(text, "refused"):
+		return "conn_refused"
+	case strings.Contains(text, "eof"):
+		return "eof"
+	case strings.Contains(text, "dial tcp"):
+		return "dial"
+	default:
+		return "request_error"
+	}
+}
+
+func summarizeRequestError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
 }
 
 func addComposeEnvFile(args []string, envFile string) []string {
@@ -977,6 +1210,60 @@ func randomHex(bytesLen int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+func parseOperations(raw string) ([]string, error) {
+	requested := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		requested[name] = true
+	}
+	if len(requested) == 0 {
+		return nil, errors.New("operations must include at least one supported operation")
+	}
+	selected := make([]string, 0, len(requested))
+	for _, name := range orderedOperations {
+		if requested[name] {
+			selected = append(selected, name)
+			delete(requested, name)
+		}
+	}
+	if len(requested) > 0 {
+		unknown := make([]string, 0, len(requested))
+		for name := range requested {
+			unknown = append(unknown, name)
+		}
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("unsupported operations: %s", strings.Join(unknown, ", "))
+	}
+	return selected, nil
+}
+
+func selectedOperations(operations []string) []string {
+	if len(operations) == 0 {
+		return orderedOperations
+	}
+	return operations
+}
+
+func hasOperation(operations []string, target string) bool {
+	for _, operation := range selectedOperations(operations) {
+		if operation == target {
+			return true
+		}
+	}
+	return false
+}
+
+func mustRunID() string {
+	id, err := randomHex(6)
+	if err != nil {
+		return fmt.Sprintf("fallback-%d", time.Now().UTC().UnixNano())
+	}
+	return id
 }
 
 func envDefault(key, fallback string) string {

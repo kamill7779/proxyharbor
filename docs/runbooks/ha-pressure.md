@@ -47,17 +47,20 @@ Coverage summary:
 | `hacachecheck` | cross-instance cache / auth invalidation correctness |
 | `hasdkcheck` | Go SDK HA baseline through admin proxy upsert, tenant key issuance, and SDK `GetProxy` acquisition paths |
 
-## Pressure runner slot
+## Pressure runner
 
-`tools/hapressure` is the formal command slot for v0.5.4 pressure / soak evidence. Only record results produced by the checked-in runner under `tools/`.
+`tools/hapressure` is the formal v0.5.4 pressure / soak runner. Only record results produced by the checked-in runner under `tools/`.
 
-Until `tools/hapressure` exists in the branch:
+Use `-docker-internal` when validating the local HA compose topology. This runs the worker inside the compose network and avoids host port-publishing connection refusals on Docker Desktop / Windows / macOS.
 
-- do not commit throwaway pressure scripts;
-- do not paste shell history as release evidence;
-- do not claim p95 / p99 / soak thresholds as achieved.
+Record the three interface latency runs separately, then run the mixed soak:
 
-When `tools/hapressure` lands, add the exact command used to this runbook and to the release PR.
+```bash
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
+```
 
 ## PR evidence template
 
@@ -75,7 +78,10 @@ Every v0.5.4 HA release PR should contain:
   - `go run ./tools/hacorrect -docker -timeout 6m`
   - `go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m`
   - `go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
-  - `go run ./tools/hapressure ...`  <!-- fill only after the formal runner is merged -->
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m`
 - gateway validate: p95= / p99=
 - lease create: p95= / p99=
 - lease renew: p95= / p99=

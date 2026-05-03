@@ -165,3 +165,109 @@ func TestWriteJSONReportProducesMachineReadableOutput(t *testing.T) {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 }
+
+func TestUniqueKeyIncludesRunID(t *testing.T) {
+	first := (&runner{runID: "run-a"}).uniqueKey("create", 1, 2)
+	second := (&runner{runID: "run-b"}).uniqueKey("create", 1, 2)
+
+	if first == second {
+		t.Fatalf("uniqueKey() reused key across runs: %q", first)
+	}
+	if !strings.Contains(first, "run-a") || !strings.Contains(second, "run-b") {
+		t.Fatalf("uniqueKey() missing run id: first=%q second=%q", first, second)
+	}
+}
+
+func TestReportIncludesBoundedRequestErrors(t *testing.T) {
+	acc := newAccumulator()
+	acc.Add(operationResult{
+		Operation: opLeaseCreate,
+		Status:    0,
+		Latency:   12 * time.Millisecond,
+		Success:   false,
+		ErrorKind: "eof",
+		ErrorText: "Post \"http://127.0.0.1:18081/v1/leases\": EOF",
+	})
+	acc.Add(operationResult{
+		Operation: opLeaseCreate,
+		Status:    0,
+		Latency:   13 * time.Millisecond,
+		Success:   false,
+		ErrorKind: "eof",
+		ErrorText: "Post \"http://127.0.0.1:18081/v1/leases\": EOF",
+	})
+	acc.Add(operationResult{
+		Operation: opValidate,
+		Status:    200,
+		Latency:   5 * time.Millisecond,
+		Success:   true,
+	})
+
+	report := acc.Report(reportMeta{
+		Mode:        "pressure",
+		Concurrency: 8,
+		Elapsed:     50 * time.Millisecond,
+	})
+
+	if report.ErrorKinds["eof"] != 2 {
+		t.Fatalf("overall error kinds = %#v", report.ErrorKinds)
+	}
+	if len(report.ErrorSamples) != 1 {
+		t.Fatalf("overall error samples = %#v", report.ErrorSamples)
+	}
+	create := report.Operations[opLeaseCreate]
+	if create.ErrorKinds["eof"] != 2 {
+		t.Fatalf("create error kinds = %#v", create.ErrorKinds)
+	}
+	if len(create.ErrorSamples) != 1 {
+		t.Fatalf("create error samples = %#v", create.ErrorSamples)
+	}
+}
+
+func TestParseOperationsNormalizesOrder(t *testing.T) {
+	ops, err := parseOperations("lease_renew,gateway_validate")
+	if err != nil {
+		t.Fatalf("parseOperations() error = %v", err)
+	}
+	if strings.Join(ops, ",") != "gateway_validate,lease_renew" {
+		t.Fatalf("parseOperations() = %v", ops)
+	}
+}
+
+func TestParseOperationsRejectsUnknownValues(t *testing.T) {
+	if _, err := parseOperations("gateway_validate,unknown"); err == nil {
+		t.Fatal("parseOperations() error = nil, want unsupported operation")
+	}
+}
+
+func TestDockerInternalBaseURLRewritesLoopback(t *testing.T) {
+	if got := dockerInternalBaseURL("http://127.0.0.1:18081"); got != "http://nginx:8080" {
+		t.Fatalf("dockerInternalBaseURL(loopback) = %q", got)
+	}
+	if got := dockerInternalBaseURL("http://lb.internal:8080"); got != "http://lb.internal:8080" {
+		t.Fatalf("dockerInternalBaseURL(remote) = %q", got)
+	}
+}
+
+func TestComposeProjectNameDropsUnsupportedCharacters(t *testing.T) {
+	if got := composeProjectName(`E:\Project\proxyharbor\.worktree\v0.5.4-ha-pressure`); got != "v054-ha-pressure" {
+		t.Fatalf("composeProjectName() = %q", got)
+	}
+}
+
+func TestNormalizeDockerArch(t *testing.T) {
+	for input, want := range map[string]string{
+		"amd64":  "amd64",
+		"x86_64": "amd64",
+		"arm64":  "arm64",
+		"aarch64": "arm64",
+	} {
+		got, err := normalizeDockerArch(input)
+		if err != nil {
+			t.Fatalf("normalizeDockerArch(%q) error = %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeDockerArch(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

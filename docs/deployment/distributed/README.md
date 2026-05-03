@@ -50,13 +50,16 @@ go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurre
 
 ## Pressure / soak 记录口径
 
-v0.5.4 的性能记录必须使用正式 runner。`tools/hapressure` 是预留命令位；当它合入当前分支后，把真实命令和结果填到发布 PR 中。不要提交一次性的压测脚本，也不要在 PR 描述里写“手工压了一下”。
+v0.5.4 的性能记录必须使用正式 runner。不要提交一次性的压测脚本，也不要在 PR 描述里写“手工压了一下”。
 
-如果当前分支还没有 `tools/hapressure`，PR 里至少要明确：
+本机 compose HA 压测使用 `tools/hapressure` 的 `-docker-internal` 模式。它会把 worker 放进 compose 网络内执行，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。
 
-- correctness / runtime / cache / SDK runner 已通过；
-- pressure runner 计划使用的正式命令；
-- 未引用任何 ad-hoc 脚本或未版本化命令。
+```bash
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
+```
 
 ## Helm HA 起步配置
 
@@ -98,7 +101,10 @@ helm install proxyharbor charts/proxyharbor \
   - `go run ./tools/hacorrect -docker -timeout 6m`
   - `go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m`
   - `go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
-  - `go run ./tools/hapressure ...`  <!-- 仅在正式 runner 合入后填写真实命令 -->
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m`
+  - `go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m`
 - gateway validate: p95= / p99=
 - lease create: p95= / p99=
 - lease renew: p95= / p99=

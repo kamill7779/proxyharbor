@@ -177,9 +177,13 @@ go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
 go run ./tools/hacorrect -docker -timeout 6m
 go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
 go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
 ```
 
-这条路径只覆盖当前已经有正式 runner 支持的 HA correctness / runtime / cache / SDK 验证。压测、soak 记录格式和 `tools/hapressure` 命令位见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)；在正式 runner 合入前，不要把 ad-hoc 压测脚本写进发布说明或 README。
+`-docker-internal` 会把压测 worker 放进 compose 网络，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。压测、soak 记录格式见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)。
 
 ### 直接运行二进制
 
