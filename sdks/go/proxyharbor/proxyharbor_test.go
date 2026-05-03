@@ -252,6 +252,34 @@ func TestDoesNotRetryOn400(t *testing.T) {
 	}
 }
 
+func TestAddProxyMarksProxyHealthy(t *testing.T) {
+	var got ProxyDTO
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/proxies" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		got.ID = "proxy-added"
+		_ = json.NewEncoder(w).Encode(got)
+	})
+
+	proxy, err := c.AddProxy(context.Background(), "http://proxy.local:8080")
+	if err != nil {
+		t.Fatalf("AddProxy: %v", err)
+	}
+	if !got.Healthy {
+		t.Fatalf("AddProxy sent healthy=%t, want true", got.Healthy)
+	}
+	if got.Endpoint != "http://proxy.local:8080" {
+		t.Fatalf("AddProxy sent endpoint %q", got.Endpoint)
+	}
+	if proxy.ID != "proxy-added" {
+		t.Fatalf("AddProxy returned ID %q", proxy.ID)
+	}
+}
+
 func TestReleaseRevokesCachedLease(t *testing.T) {
 	var deleteCalled int32
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

@@ -177,8 +177,106 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 		return fmt.Errorf("disabled proxy sdk-ha-proxy-09 received %d leases; counts=%s", counts["sdk-ha-proxy-09"], formatCounts(counts))
 	}
 	fmt.Fprintf(stdout, "ok sdk disabled proxy excluded    samples=%d concurrency=%d duration=%s counts=%s\n", cfg.DisableSamples, cfg.Concurrency, time.Since(started).Round(time.Millisecond), formatCounts(counts))
-	_, err = admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{ID: "sdk-ha-proxy-09", Endpoint: proxyEndpoint(9), Healthy: true, Weight: 10})
-	return err
+	if _, err := admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{ID: "sdk-ha-proxy-09", Endpoint: proxyEndpoint(9), Healthy: true, Weight: 10}); err != nil {
+		return err
+	}
+	return runSDKHAHappyPath(ctx, admin, tenant, stdout)
+}
+
+func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, stdout io.Writer) (err error) {
+	seedsIsolated := false
+	var addedID string
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		var cleanupErrs []string
+		if addedID != "" {
+			if cleanupErr := admin.Proxies.Delete(cleanupCtx, addedID); cleanupErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Sprintf("cleanup proxy %s: %v", addedID, cleanupErr))
+			}
+		}
+		if seedsIsolated {
+			if restoreErr := setSeededProxyHealth(cleanupCtx, admin, true); restoreErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Sprintf("restore seeded proxies: %v", restoreErr))
+			}
+		}
+		if err == nil && len(cleanupErrs) > 0 {
+			err = fmt.Errorf("sdk ha happy path cleanup: %s", strings.Join(cleanupErrs, "; "))
+		}
+	}()
+	seedsIsolated = true
+	if err := setSeededProxyHealth(ctx, admin, false); err != nil {
+		return fmt.Errorf("sdk ha happy path prepare pool: %w", err)
+	}
+
+	endpoint := "http://198.51.100.10:28080"
+	added, err := admin.AddProxy(ctx, endpoint)
+	if err != nil {
+		return fmt.Errorf("sdk ha happy path add proxy: %w", err)
+	}
+	if added.ID == "" {
+		return fmt.Errorf("sdk ha happy path add proxy: missing proxy id for endpoint %s", endpoint)
+	}
+	addedID = added.ID
+
+	key := "sdk-ha-flow-" + time.Now().UTC().Format("20060102150405.000000000")
+	proxy, err := tenant.GetProxy(
+		ctx,
+		proxyharbor.WithKey(key),
+		proxyharbor.WithSubjectID(key),
+		proxyharbor.WithForceNew(),
+		proxyharbor.WithTTL(2*time.Minute),
+	)
+	if err != nil {
+		return fmt.Errorf("sdk ha happy path get proxy: %w", err)
+	}
+	if proxy.LeaseID == "" {
+		return fmt.Errorf("sdk ha happy path get proxy: missing lease id for key %s", key)
+	}
+	if proxy.ProxyID == "" {
+		return fmt.Errorf("sdk ha happy path get proxy: missing proxy id for lease %s", proxy.LeaseID)
+	}
+	if proxy.URL == "" {
+		return fmt.Errorf("sdk ha happy path get proxy: empty proxy url for lease %s", proxy.LeaseID)
+	}
+	if proxy.ProxyID != added.ID {
+		return fmt.Errorf("sdk ha happy path get proxy: leased proxy id %s, want added proxy %s", proxy.ProxyID, added.ID)
+	}
+
+	renewed, err := tenant.Leases.Renew(ctx, proxy.LeaseID)
+	if err != nil {
+		return fmt.Errorf("sdk ha happy path renew lease: %w", err)
+	}
+	if renewed.LeaseID != proxy.LeaseID {
+		return fmt.Errorf("sdk ha happy path renew lease: lease id changed got=%s want=%s", renewed.LeaseID, proxy.LeaseID)
+	}
+	if renewed.ProxyID == "" {
+		return fmt.Errorf("sdk ha happy path renew lease: missing proxy id for lease %s", proxy.LeaseID)
+	}
+	if renewed.ProxyID != added.ID {
+		return fmt.Errorf("sdk ha happy path renew lease: proxy id changed got=%s want=%s", renewed.ProxyID, added.ID)
+	}
+	if !renewed.ExpiresAt.After(proxy.ExpiresAt) {
+		return fmt.Errorf("sdk ha happy path renew lease: expiry did not move forward before=%s after=%s", proxy.ExpiresAt.UTC().Format(time.RFC3339), renewed.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+
+	fmt.Fprintf(stdout, "ok sdk ha happy path              added_proxy=%s lease_id=%s proxy_id=%s renewed_until=%s\n",
+		added.ID, proxy.LeaseID, proxy.ProxyID, renewed.ExpiresAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+func setSeededProxyHealth(ctx context.Context, admin *proxyharbor.Client, healthy bool) error {
+	for i := 0; i < 10; i++ {
+		if _, err := admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{
+			ID:       fmt.Sprintf("sdk-ha-proxy-%02d", i),
+			Endpoint: proxyEndpoint(i),
+			Healthy:  healthy,
+			Weight:   i + 1,
+		}); err != nil {
+			return fmt.Errorf("seeded proxy %02d healthy=%t: %w", i, healthy, err)
+		}
+	}
+	return nil
 }
 
 func seedProxies(ctx context.Context, client *proxyharbor.Client) error {

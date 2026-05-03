@@ -9,14 +9,14 @@ type proxiesAPI struct{ c *Client }
 //
 //	c.AddProxy(ctx, "1.2.3.4:3128")
 func (c *Client) AddProxy(ctx context.Context, endpoint string) (ProxyDTO, error) {
-	return c.Proxies.Upsert(ctx, ProxyDTO{Endpoint: endpoint})
+	return c.Proxies.Upsert(ctx, ProxyDTO{Endpoint: endpoint, Healthy: true})
 }
 
 // AddProxyWithProvider adds a proxy bound to a specific provider.
 //
 //	c.AddProxyWithProvider(ctx, "1.2.3.4:3128", "my-dc")
 func (c *Client) AddProxyWithProvider(ctx context.Context, endpoint, providerID string) (ProxyDTO, error) {
-	return c.Proxies.Upsert(ctx, ProxyDTO{Endpoint: endpoint, ProviderID: providerID})
+	return c.Proxies.Upsert(ctx, ProxyDTO{Endpoint: endpoint, ProviderID: providerID, Healthy: true})
 }
 
 // Upsert creates or updates a proxy. When p.ID is set the SDK PUTs to
