@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
@@ -15,6 +16,7 @@ import (
 type Redis struct {
 	client      *redis.Client
 	invalidator auth.Invalidator
+	leaseVer    atomic.Uint64
 }
 
 type cachedLease struct {
@@ -49,6 +51,13 @@ func (r *Redis) Check(ctx context.Context) error {
 	pingCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	return r.client.Ping(pingCtx).Err()
+}
+
+func (r *Redis) LeaseInvalidationVersion() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.leaseVer.Load()
 }
 
 func leaseKey(tenantID, leaseID string) string {
@@ -127,7 +136,11 @@ func (r *Redis) InvalidateCatalogLocal(ctx context.Context) error {
 }
 
 func (r *Redis) InvalidateLeaseLocal(ctx context.Context, tenantID, leaseID string) error {
-	return r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err()
+	if err := r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err(); err != nil {
+		return err
+	}
+	r.leaseVer.Add(1)
+	return nil
 }
 
 func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
@@ -144,6 +157,7 @@ func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
 		}
 		cursor = next
 		if cursor == 0 {
+			r.leaseVer.Add(1)
 			return nil
 		}
 	}

@@ -33,13 +33,23 @@ type hostSafetyEntry struct {
 	expiresAt time.Time
 }
 
+type hostSafetyCall struct {
+	safe bool
+	done chan struct{}
+}
+
 type validateTruthEntry struct {
-	fingerprint string
-	verifiedAt  time.Time
+	fingerprint               string
+	verifiedAt                time.Time
+	leaseInvalidationVersion  uint64
 }
 
 type ipResolver interface {
 	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
+type leaseInvalidationVersioner interface {
+	LeaseInvalidationVersion() uint64
 }
 
 type Service struct {
@@ -55,6 +65,7 @@ type Service struct {
 	logger                     *slog.Logger
 	hostSafetyMu               sync.RWMutex
 	hostSafety                 map[string]hostSafetyEntry
+	hostSafetyCalls            map[string]*hostSafetyCall
 	hostSafetyTTL              time.Duration
 	validateTruthMu            sync.RWMutex
 	validateTruth              map[string]validateTruthEntry
@@ -72,6 +83,7 @@ func NewService(store storage.Store, gatewayURL string) *Service {
 		selector:         selector.NewLocal(),
 		selectorMode:     selector.NameLocal,
 		hostSafety:       make(map[string]hostSafetyEntry),
+		hostSafetyCalls:  make(map[string]*hostSafetyCall),
 		hostSafetyTTL:    hostSafetyCacheTTL,
 		validateTruth:    make(map[string]validateTruthEntry),
 		validateTruthTTL: validateTruthCacheTTL,
@@ -126,7 +138,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if req.ResourceRef.ID == "" || req.ResourceRef.Kind == "" {
 		return domain.Lease{}, domain.ErrPolicyDenied
 	}
-	if !s.safeResource(req.ResourceRef) {
+	if !s.safeResource(ctx, req.ResourceRef) {
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
 	idem := storage.IdempotencyScope{TenantID: principal.TenantID, StableSubjectID: req.Subject.StableID(), ResourceRef: req.ResourceRef.StableID(), RequestKind: "create_lease", Key: key}
@@ -221,7 +233,7 @@ func (s *Service) RevokeLease(ctx context.Context, principal domain.Principal, l
 }
 
 func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password, target string) (domain.Lease, error) {
-	if !s.safeTarget(target) {
+	if !s.safeTarget(ctx, target) {
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
 	if cached, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID); hit {
@@ -302,6 +314,9 @@ func (s *Service) hasFreshValidateTruth(lease domain.Lease) bool {
 	if !entry.verifiedAt.Add(ttl).After(s.now()) {
 		return false
 	}
+	if entry.leaseInvalidationVersion != s.currentLeaseInvalidationVersion() {
+		return false
+	}
 	return entry.fingerprint == leaseFingerprint(lease)
 }
 
@@ -312,7 +327,11 @@ func (s *Service) stampValidateTruth(lease domain.Lease) {
 	}
 	key := validateTruthKey(lease.TenantID, lease.ID)
 	now := s.now()
-	entry := validateTruthEntry{fingerprint: leaseFingerprint(lease), verifiedAt: now}
+	entry := validateTruthEntry{
+		fingerprint:              leaseFingerprint(lease),
+		verifiedAt:               now,
+		leaseInvalidationVersion: s.currentLeaseInvalidationVersion(),
+	}
 	s.validateTruthMu.Lock()
 	defer s.validateTruthMu.Unlock()
 	if len(s.validateTruth) >= validateTruthCacheMax {
@@ -330,6 +349,13 @@ func (s *Service) stampValidateTruth(lease domain.Lease) {
 		}
 	}
 	s.validateTruth[key] = entry
+}
+
+func (s *Service) currentLeaseInvalidationVersion() uint64 {
+	if versioned, ok := s.cache.(leaseInvalidationVersioner); ok {
+		return versioned.LeaseInvalidationVersion()
+	}
+	return 0
 }
 
 func (s *Service) invalidateValidateTruth(tenantID, leaseID string) {
@@ -412,7 +438,7 @@ func (s *Service) CreateProxy(ctx context.Context, principal domain.Principal, p
 	if principal.Type != "admin" {
 		return domain.Proxy{}, domain.ErrForbidden
 	}
-	if proxy.Endpoint == "" || !s.safeProxyEndpoint(proxy.Endpoint) {
+	if proxy.Endpoint == "" || !s.safeProxyEndpoint(ctx, proxy.Endpoint) {
 		return domain.Proxy{}, domain.ErrUnsafeDestination
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
@@ -429,7 +455,7 @@ func (s *Service) UpdateProxy(ctx context.Context, principal domain.Principal, i
 		return domain.Proxy{}, domain.ErrForbidden
 	}
 	proxy.ID = id
-	if proxy.Endpoint == "" || !s.safeProxyEndpoint(proxy.Endpoint) {
+	if proxy.Endpoint == "" || !s.safeProxyEndpoint(ctx, proxy.Endpoint) {
 		return domain.Proxy{}, domain.ErrUnsafeDestination
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
@@ -592,17 +618,17 @@ func (s *Service) incrementSelectorSelected() {
 	}
 }
 
-func (s *Service) safeResource(resource domain.ResourceRef) bool {
-	return s.safeTarget(resource.ID)
+func (s *Service) safeResource(ctx context.Context, resource domain.ResourceRef) bool {
+	return s.safeTarget(ctx, resource.ID)
 }
 
 func resourceMatchesTarget(resource domain.ResourceRef, target string) bool {
 	return extractHost(resource.ID) == extractHost(target)
 }
 
-func (s *Service) safeTarget(target string) bool {
+func (s *Service) safeTarget(ctx context.Context, target string) bool {
 	host := extractHost(target)
-	return s.isSafeHost(host)
+	return s.isSafeHost(ctx, host)
 }
 
 func extractHost(target string) string {
@@ -623,9 +649,11 @@ func extractHost(target string) string {
 // the original fail-closed semantics for empty hosts, well-known loopback
 // names, internal IP literals, and DNS lookup failures. Only resolved unsafe
 // hostname decisions are cached for a short TTL; safe hostname resolutions are
-// rechecked on every call so DNS rebinding cannot ride a cached positive
-// decision. Public IP literals skip the resolver entirely.
-func (s *Service) isSafeHost(host string) bool {
+// rechecked on every new request batch so DNS rebinding cannot ride a cached
+// positive decision. Concurrent lookups of the same hostname are coalesced so
+// hot-path traffic does not fan out into one DNS request per goroutine. Public
+// IP literals skip the resolver entirely.
+func (s *Service) isSafeHost(ctx context.Context, host string) bool {
 	if host == "" {
 		return false
 	}
@@ -639,13 +667,27 @@ func (s *Service) isSafeHost(host string) bool {
 	if decision, ok := s.lookupHostSafety(host); ok {
 		return decision
 	}
+	call, owner := s.beginHostSafetyLookup(host)
+	if !owner {
+		select {
+		case <-call.done:
+			return call.safe
+		case <-ctx.Done():
+			return false
+		}
+	}
+	safe := false
+	defer s.finishHostSafetyLookup(host, call, &safe)
 	resolver := s.resolver
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	ips, err := resolver.LookupIP(ctx, "ip", host)
+	ips, err := resolver.LookupIP(lookupCtx, "ip", host)
 	if err != nil || len(ips) == 0 {
 		return false
 	}
@@ -655,6 +697,7 @@ func (s *Service) isSafeHost(host string) bool {
 			return false
 		}
 	}
+	safe = true
 	return true
 }
 
@@ -672,6 +715,25 @@ func (s *Service) lookupHostSafety(host string) (bool, bool) {
 		return false, false
 	}
 	return entry.safe, true
+}
+
+func (s *Service) beginHostSafetyLookup(host string) (*hostSafetyCall, bool) {
+	s.hostSafetyMu.Lock()
+	defer s.hostSafetyMu.Unlock()
+	if call, ok := s.hostSafetyCalls[host]; ok {
+		return call, false
+	}
+	call := &hostSafetyCall{done: make(chan struct{})}
+	s.hostSafetyCalls[host] = call
+	return call, true
+}
+
+func (s *Service) finishHostSafetyLookup(host string, call *hostSafetyCall, safe *bool) {
+	s.hostSafetyMu.Lock()
+	call.safe = *safe
+	delete(s.hostSafetyCalls, host)
+	close(call.done)
+	s.hostSafetyMu.Unlock()
 }
 
 func (s *Service) storeHostSafety(host string, safe bool) {
@@ -718,7 +780,7 @@ func isInternalIP(ip net.IP) bool {
 	return false
 }
 
-func (s *Service) safeProxyEndpoint(endpoint string) bool {
+func (s *Service) safeProxyEndpoint(ctx context.Context, endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
 		return false
@@ -729,7 +791,7 @@ func (s *Service) safeProxyEndpoint(endpoint string) bool {
 	if s.allowInternalProxyEndpoint {
 		return true
 	}
-	return s.isSafeHost(strings.ToLower(u.Hostname()))
+	return s.isSafeHost(ctx, strings.ToLower(u.Hostname()))
 }
 
 func hashLeasePassword(leaseID, plaintext string) string {
