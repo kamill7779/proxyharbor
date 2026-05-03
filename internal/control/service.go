@@ -202,6 +202,7 @@ func (s *Service) RenewLease(ctx context.Context, principal domain.Principal, le
 	updated, err := s.store.UpdateLease(ctx, lease)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, updated.TenantID, updated.ID)
+		s.invalidateValidateTruth(updated.TenantID, updated.ID)
 	}
 	return updated, err
 }
@@ -210,6 +211,7 @@ func (s *Service) RevokeLease(ctx context.Context, principal domain.Principal, l
 	err := s.store.RevokeLease(ctx, principal.TenantID, leaseID)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, principal.TenantID, leaseID)
+		s.invalidateValidateTruth(principal.TenantID, leaseID)
 	}
 	return err
 }
@@ -219,10 +221,16 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 		return domain.Lease{}, domain.ErrUnsafeDestination
 	}
 	if cached, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID); hit {
-		_ = cached
+		if s.hasFreshValidateTruth(cached) {
+			if err := s.validateLeaseFields(cached, password, target); err != nil {
+				return domain.Lease{}, err
+			}
+			return cached, nil
+		}
 	}
 	lease, err := s.store.GetLease(ctx, tenantID, leaseID)
 	if err != nil {
+		s.invalidateValidateTruth(tenantID, leaseID)
 		return domain.Lease{}, err
 	}
 	remain := time.Until(lease.ExpiresAt)
@@ -233,19 +241,99 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 		}
 		_ = s.cache.PutLease(ctx, lease, ttl)
 	}
+	if err := s.validateLeaseFields(lease, password, target); err != nil {
+		s.invalidateValidateTruth(tenantID, leaseID)
+		return domain.Lease{}, err
+	}
+	s.stampValidateTruth(lease)
+	return lease, nil
+}
+
+func (s *Service) validateLeaseFields(lease domain.Lease, password, target string) error {
 	if !verifyLeasePassword(lease.ID, lease.PasswordHash, password) {
-		return domain.Lease{}, domain.ErrAuthFailed
+		return domain.ErrAuthFailed
 	}
 	if lease.Revoked {
-		return domain.Lease{}, domain.ErrLeaseRevoked
+		return domain.ErrLeaseRevoked
 	}
 	if !s.now().Before(lease.ExpiresAt) {
-		return domain.Lease{}, domain.ErrLeaseExpired
+		return domain.ErrLeaseExpired
 	}
 	if !resourceMatchesTarget(lease.ResourceRef, target) {
-		return domain.Lease{}, domain.ErrPolicyDenied
+		return domain.ErrPolicyDenied
 	}
-	return lease, nil
+	return nil
+}
+
+func validateTruthKey(tenantID, leaseID string) string {
+	return tenantID + "|" + leaseID
+}
+
+func leaseFingerprint(lease domain.Lease) string {
+	revoked := 0
+	if lease.Revoked {
+		revoked = 1
+	}
+	return fmt.Sprintf("%d|%d|%d|%s|%s:%s|%s",
+		lease.Generation,
+		revoked,
+		lease.ExpiresAt.UnixNano(),
+		lease.PasswordHash,
+		lease.ResourceRef.Kind, lease.ResourceRef.ID,
+		lease.ProxyID,
+	)
+}
+
+func (s *Service) hasFreshValidateTruth(lease domain.Lease) bool {
+	ttl := s.validateTruthTTL
+	if ttl <= 0 {
+		return false
+	}
+	key := validateTruthKey(lease.TenantID, lease.ID)
+	s.validateTruthMu.RLock()
+	entry, ok := s.validateTruth[key]
+	s.validateTruthMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if !entry.verifiedAt.Add(ttl).After(s.now()) {
+		return false
+	}
+	return entry.fingerprint == leaseFingerprint(lease)
+}
+
+func (s *Service) stampValidateTruth(lease domain.Lease) {
+	ttl := s.validateTruthTTL
+	if ttl <= 0 {
+		return
+	}
+	key := validateTruthKey(lease.TenantID, lease.ID)
+	now := s.now()
+	entry := validateTruthEntry{fingerprint: leaseFingerprint(lease), verifiedAt: now}
+	s.validateTruthMu.Lock()
+	defer s.validateTruthMu.Unlock()
+	if len(s.validateTruth) >= validateTruthCacheMax {
+		cutoff := now.Add(-ttl)
+		for k, v := range s.validateTruth {
+			if !v.verifiedAt.After(cutoff) {
+				delete(s.validateTruth, k)
+			}
+		}
+		if len(s.validateTruth) >= validateTruthCacheMax {
+			for k := range s.validateTruth {
+				delete(s.validateTruth, k)
+				break
+			}
+		}
+	}
+	s.validateTruth[key] = entry
+}
+
+func (s *Service) invalidateValidateTruth(tenantID, leaseID string) {
+	key := validateTruthKey(tenantID, leaseID)
+	s.validateTruthMu.Lock()
+	delete(s.validateTruth, key)
+	s.validateTruthMu.Unlock()
 }
 
 func (s *Service) ValidateGatewayRequest(ctx context.Context, tenantID, leaseID, password, target string) (domain.Lease, domain.Proxy, error) {
