@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -152,45 +151,6 @@ func TestSubscribeCacheInvalidationsAppliesAuthCatalogLease(t *testing.T) {
 	if err := waitUntil(5*time.Second, func() bool { return hot.catalogInvalidations.Load() > 0 && hot.leaseInvalidations.Load() > 0 }); err != nil {
 		t.Fatalf("hot cache invalidation did not apply: %v", err)
 	}
-}
-
-type memoryKeyStore struct {
-	mu      sync.RWMutex
-	version int64
-	rows    []TenantKeyRow
-}
-
-func (s *memoryKeyStore) GetTenantKeys(context.Context) ([]TenantKeyRow, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]TenantKeyRow(nil), s.rows...), nil
-}
-func (s *memoryKeyStore) GetTenantKeysSince(context.Context, time.Time) ([]TenantKeyRow, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]TenantKeyRow(nil), s.rows...), nil
-}
-func (s *memoryKeyStore) GetTenantKeysVersion(context.Context) (int64, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.version, nil
-}
-func (s *memoryKeyStore) IncrementTenantKeysVersion(context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.version++
-	return nil
-}
-func (s *memoryKeyStore) CreateTenantKey(context.Context, TenantKeyRow) error { return nil }
-func (s *memoryKeyStore) RevokeTenantKey(context.Context, string) error       { return nil }
-func (s *memoryKeyStore) GetTenant(context.Context, string) (TenantRow, error) {
-	return TenantRow{}, nil
-}
-func (s *memoryKeyStore) setRows(version int64, rows []TenantKeyRow) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.version = version
-	s.rows = append([]TenantKeyRow(nil), rows...)
 }
 
 type recordingHotCache struct {
