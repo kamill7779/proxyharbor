@@ -21,7 +21,7 @@ func (s *Server) adminCluster(w http.ResponseWriter, r *http.Request) {
 	if s.clusterStore != nil {
 		lock, ok, err := s.clusterStore.GetClusterLock(r.Context(), cluster.GlobalMaintenanceLock)
 		if err != nil {
-			body["leader_error"] = err.Error()
+			body["leader_error_kind"] = classifyDependencyError("cluster", err)
 		} else if ok {
 			body["leader"] = map[string]any{
 				"lock":              lock.Name,

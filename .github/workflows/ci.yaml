@@ -47,3 +47,35 @@ jobs:
           context: .
           push: false
           tags: proxyharbor:ci
+
+  docker-ha-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build HA runtime image
+        run: docker build --pull=false -t proxyharbor:ha-test .
+      - name: Runtime HA correctness
+        env:
+          PROXYHARBOR_ADMIN_KEY: admin-key-with-at-least-thirty-two-bytes-runtime53
+          PROXYHARBOR_KEY_PEPPER: pepper-with-at-least-thirty-two-bytes-runtime53
+        run: go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
+      - name: HA cache invalidation correctness
+        env:
+          PROXYHARBOR_ADMIN_KEY: admin-key-with-at-least-thirty-two-bytes-runtime53
+          PROXYHARBOR_KEY_PEPPER: pepper-with-at-least-thirty-two-bytes-runtime53
+        run: go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
+      - name: HA write correctness
+        env:
+          PROXYHARBOR_ADMIN_KEY: admin-key-with-at-least-thirty-two-bytes-runtime53
+          PROXYHARBOR_KEY_PEPPER: pepper-with-at-least-thirty-two-bytes-runtime53
+        run: go run ./tools/hacorrect -docker -timeout 6m
+      - name: HA Go SDK correctness
+        working-directory: tools/hasdkcheck
+        env:
+          PROXYHARBOR_ADMIN_KEY: admin-key-with-at-least-thirty-two-bytes-runtime53
+          PROXYHARBOR_KEY_PEPPER: pepper-with-at-least-thirty-two-bytes-runtime53
+        run: go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m

@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/control"
 	"github.com/kamill7779/proxyharbor/internal/control/health"
 	"github.com/kamill7779/proxyharbor/internal/control/selector"
+	"github.com/kamill7779/proxyharbor/internal/metrics"
 	"github.com/kamill7779/proxyharbor/internal/server"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/kamill7779/proxyharbor/internal/storage"
@@ -48,39 +51,55 @@ func main() {
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
 	if err != nil {
-		logger.Error("load config", "err", err)
+		kind := configErrorKind(err)
+		metrics.RecordRuntimeConfigValidationResult("error", kind)
+		metrics.RecordRuntimeStartupResult("error", "config")
+		logger.Error("load config", "error_kind", kind, "err", err)
 		os.Exit(2)
 	}
+	metrics.RecordRuntimeConfigValidationResult("ok", "none")
 	if cfg.SecretsFile != "" {
 		logger.Info("local secrets ready", "path", cfg.SecretsFile, "admin_key_fp", auth.Fingerprint(cfg.AdminKey))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	cleanups := &cleanupStack{}
 
 	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
-		logger.Error("open store", "err", err)
-		os.Exit(1)
+		metrics.RecordRuntimeStartupResult("error", "store")
+		logger.Error("open store", "error_kind", runtimeErrorKind(string(cfg.StorageDriver), err), "err", safeRuntimeError(err, cfg))
+		fatalWithCleanup(1, cleanups)
 	}
-	defer closeStore()
+	cleanups.add(closeStore)
 
-	cacheImpl, closeCache := openCache(ctx, cfg, logger)
-	defer closeCache()
+	cacheImpl, closeCache, err := openCache(ctx, cfg, logger)
+	if err != nil {
+		metrics.RecordRuntimeStartupResult("error", "cache")
+		logger.Error("open cache", "error_kind", runtimeErrorKind("cache", err), "err", safeRuntimeError(err, cfg))
+		fatalWithCleanup(1, cleanups)
+	}
+	cleanups.add(closeCache)
 
 	selectorImpl, closeSelector, err := openSelector(ctx, cfg, logger)
 	if err != nil {
-		logger.Error("open selector", "err", err)
-		os.Exit(1)
+		metrics.RecordRuntimeStartupResult("error", "selector")
+		logger.Error("open selector", "error_kind", runtimeErrorKind("selector", err), "err", safeRuntimeError(err, cfg))
+		fatalWithCleanup(1, cleanups)
 	}
-	defer closeSelector()
+	cleanups.add(closeSelector)
 
 	healthRecorder := health.NewCoalescingRecorder(store, health.RecorderOptions{
 		BufferSize:    cfg.HealthBufferMax,
 		FlushInterval: cfg.HealthFlushInterval,
 		Policy:        health.ScoringPolicyForProfile(cfg.ScoringProfile),
 	})
-	defer healthRecorder.Close(context.Background())
+	cleanups.add(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		healthRecorder.Close(ctx)
+	})
 
 	svc := control.NewService(store, cfg.GatewayURL)
 	svc.SetLogger(logger)
@@ -102,7 +121,7 @@ func main() {
 	}
 	if authInvalidationMode == "redis" && strings.TrimSpace(cfg.RedisAddr) == "" {
 		logger.Error("auth invalidation redis mode requires redis address")
-		os.Exit(1)
+		fatalWithCleanup(1, cleanups)
 	}
 	if cfg.RedisAddr != "" {
 		invalidationClient = redis.NewClient(&redis.Options{
@@ -114,28 +133,32 @@ func main() {
 			WriteTimeout: 2 * time.Second,
 		})
 	}
-	defer func() {
+	cleanups.add(func() {
 		if invalidationClient != nil {
 			_ = invalidationClient.Close()
 		}
-	}()
+	})
+	backgroundCtx, cancelBackground := context.WithCancel(ctx)
+	cleanups.add(cancelBackground)
+	background := &backgroundGroup{logger: logger}
 
 	// Verify MySQL schema before starting any traffic-serving goroutine.
 	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
 		if err := storage.EnsureDynamicAuthSchema(ctx, mysqlStore.DB()); err != nil {
-			logger.Error("schema check failed", "err", err)
-			os.Exit(1)
+			metrics.RecordRuntimeStartupResult("error", "schema")
+			logger.Error("schema check failed", "error_kind", runtimeErrorKind("mysql", err), "err", safeRuntimeError(err, cfg))
+			fatalWithCleanup(1, cleanups)
 		}
 	}
+	var clusterRunner *cluster.Runner
 	if cfg.ClusterEnabled {
 		clusterStore, ok := store.(storage.ClusterStore)
 		if !ok {
-			logger.Error("cluster mode requires cluster-capable storage")
-			os.Exit(1)
+			metrics.RecordRuntimeStartupResult("error", "cluster")
+			logger.Error("cluster mode requires cluster-capable storage", "error_kind", "cluster")
+			fatalWithCleanup(1, cleanups)
 		}
-		clusterCtx, clusterCancel := context.WithCancel(ctx)
-		defer clusterCancel()
-		go cluster.Runner{
+		clusterRunner = &cluster.Runner{
 			Store:             clusterStore,
 			InstanceID:        instanceID,
 			Role:              cfg.Role,
@@ -147,15 +170,18 @@ func main() {
 			MaintenanceEvery:  cfg.MaintenanceInterval,
 			MaintenanceLimit:  cfg.MaintenanceBatchSize,
 			Logger:            logger,
-		}.Run(clusterCtx)
+		}
 	}
 
-	authn, dynamicStore, authClose, err := buildAuthenticator(ctx, cfg, store)
+	authn, dynamicStore, err := buildAuthenticator(ctx, cfg, store)
 	if err != nil {
-		logger.Error("open authenticator", "err", err)
-		os.Exit(1)
+		metrics.RecordRuntimeStartupResult("error", "auth")
+		logger.Error("open authenticator", "error_kind", runtimeErrorKind("auth", err), "err", safeRuntimeError(err, cfg))
+		fatalWithCleanup(1, cleanups)
 	}
-	defer authClose()
+	if dynamicStore != nil {
+		background.Go("auth_refresh", func() { dynamicStore.Run(backgroundCtx) })
+	}
 
 	var invalidator auth.Invalidator = auth.NoopInvalidator{}
 	var invalidationStatus auth.StatusReporter = auth.NewStatusReporter("polling", "fallback")
@@ -169,19 +195,22 @@ func main() {
 			if authInvalidationMode == "polling" {
 				subDynamicStore = nil
 			}
-			subCtx, subCancel := context.WithCancel(ctx)
-			go auth.SubscribeCacheInvalidationsWithStatus(subCtx, invalidationClient, auth.DefaultInvalidationChannel, subDynamicStore, hotCache, statusTracker, logger)
-			defer subCancel()
+			background.Go("cache_invalidation", func() {
+				auth.SubscribeCacheInvalidationsWithStatus(backgroundCtx, invalidationClient, auth.DefaultInvalidationChannel, subDynamicStore, hotCache, statusTracker, logger)
+			})
 		}
 	}
 
 	adminStore := buildAdminStore(store)
 	if cfg.AutoSecrets && cfg.StorageDriver == config.DriverSQLite && !cfg.ClusterEnabled {
 		if err := ensureDefaultTenant(ctx, adminStore); err != nil {
-			logger.Error("ensure default tenant", "err", err)
-			os.Exit(1)
+			metrics.RecordRuntimeStartupResult("error", "tenant")
+			logger.Error("ensure default tenant", "error_kind", runtimeErrorKind("tenant", err), "err", safeRuntimeError(err, cfg))
+			fatalWithCleanup(1, cleanups)
 		}
 	}
+	gatewayShutdownCtx, cancelGatewayShutdown := context.WithCancel(context.Background())
+	cleanups.add(cancelGatewayShutdown)
 	opts := server.Options{
 		Role:               role,
 		HealthRecorder:     healthRecorder,
@@ -193,6 +222,7 @@ func main() {
 		InstanceID:         instanceID,
 		ClusterStore:       clusterStoreForOptions(store),
 		ClusterSummary:     clusterSummary(cfg),
+		ShutdownContext:    gatewayShutdownCtx,
 	}
 	if dynamicStore != nil {
 		readyChecker := dynamicAuthReady{store: dynamicStore}
@@ -207,6 +237,16 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	listener, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		metrics.RecordRuntimeStartupResult("error", "listen")
+		logger.Error("listen", "error_kind", runtimeErrorKind("listen", err), "err", safeRuntimeError(err, cfg))
+		fatalWithCleanup(1, cleanups)
+	}
+	if clusterRunner != nil {
+		background.Go("cluster", func() { clusterRunner.Run(backgroundCtx) })
+	}
+	serverDone := make(chan error, 1)
 	go func() {
 		logger.Info("proxyharbor listening",
 			"role", cfg.Role, "addr", cfg.Addr, "storage", cfg.StorageDriver,
@@ -214,23 +254,145 @@ func main() {
 			"auth_cache_entries", authn.CacheEntries(),
 			"auth_invalidation", authInvalidationLabel(cfg, invalidationClient != nil),
 			"instance_id", instanceID)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("listen", "err", err)
+		metrics.RecordRuntimeStartupResult("started", "none")
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			metrics.RecordRuntimeStartupResult("error", "listen")
+			logger.Error("listen", "error_kind", runtimeErrorKind("listen", err), "err", safeRuntimeError(err, cfg))
+			serverDone <- err
 			stop()
+			return
 		}
+		serverDone <- nil
 	}()
 
 	<-ctx.Done()
+	stop()
 	logger.Info("shutdown signal received")
+	handler.StartDraining()
+	metrics.RecordRuntimeShutdownResult("started", "none")
+	drainDelay := shutdownDrainDelay(cfg.ShutdownTimeout)
+	waitShutdownDrain(drainDelay)
+	phaseBudgets := splitShutdownBudget(cfg.ShutdownTimeout-drainDelay, 4)
+	cancelGatewayShutdown()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown", "err", err)
+	shutdownResult := "graceful"
+	shutdownKind := "none"
+	var serverErr error
+	httpShutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), phaseBudgets[0])
+	if err := srv.Shutdown(httpShutdownCtx); err != nil {
+		shutdownResult = "error"
+		shutdownKind = "http"
+		logger.Error("graceful shutdown", "error_kind", runtimeErrorKind("http", err), "err", safeRuntimeError(err, cfg))
 	}
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer drainCancel()
-	healthRecorder.Close(drainCtx)
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			serverErr = err
+			if shutdownKind == "none" {
+				shutdownResult = "error"
+				shutdownKind = "server_wait"
+			}
+		}
+	case <-httpShutdownCtx.Done():
+		shutdownResult = "error"
+		shutdownKind = "server_wait"
+		logger.Error("http server shutdown wait timed out", "error_kind", shutdownKind)
+	}
+	cancelHTTP()
+	tunnelShutdownCtx, cancelTunnels := context.WithTimeout(context.Background(), phaseBudgets[1])
+	if err := handler.WaitForGatewayTunnels(tunnelShutdownCtx); err != nil {
+		shutdownResult = "error"
+		shutdownKind = "gateway_tunnel"
+		logger.Error("gateway tunnel shutdown wait timed out", "error_kind", shutdownKind)
+	}
+	cancelTunnels()
+	cancelBackground()
+	backgroundShutdownCtx, cancelBackgroundWait := context.WithTimeout(context.Background(), phaseBudgets[2])
+	if err := background.Wait(backgroundShutdownCtx); err != nil {
+		shutdownResult = "error"
+		shutdownKind = "background"
+		logger.Error("background shutdown wait timed out", "error_kind", shutdownKind)
+	}
+	cancelBackgroundWait()
+	healthShutdownCtx, cancelHealth := context.WithTimeout(context.Background(), phaseBudgets[3])
+	healthRecorder.Close(healthShutdownCtx)
+	if healthShutdownCtx.Err() != nil && shutdownKind == "none" {
+		shutdownResult = "error"
+		shutdownKind = "health_drain"
+	}
+	cancelHealth()
+	metrics.RecordRuntimeShutdownResult(shutdownResult, shutdownKind)
+	cleanups.run()
+	logger.Info("shutdown complete", "result", shutdownResult, "error_kind", shutdownKind)
+	if serverErr != nil {
+		os.Exit(1)
+	}
+}
+
+func shutdownDrainDelay(total time.Duration) time.Duration {
+	delay := time.Second
+	if total < 2*time.Second {
+		delay = total / 2
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return delay
+}
+
+func waitShutdownDrain(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	<-timer.C
+}
+
+func splitShutdownBudget(total time.Duration, phases int) []time.Duration {
+	if phases <= 0 {
+		return nil
+	}
+	budgets := make([]time.Duration, phases)
+	if total <= 0 {
+		return budgets
+	}
+	base := total / time.Duration(phases)
+	remainder := total % time.Duration(phases)
+	for i := 0; i < phases; i++ {
+		budgets[i] = base
+		if remainder > 0 {
+			budgets[i]++
+			remainder--
+		}
+	}
+	return budgets
+}
+
+type cleanupStack struct {
+	fns []func()
+}
+
+func (c *cleanupStack) add(fn func()) {
+	if c == nil || fn == nil {
+		return
+	}
+	c.fns = append(c.fns, fn)
+}
+
+func (c *cleanupStack) run() {
+	if c == nil {
+		return
+	}
+	for i := len(c.fns) - 1; i >= 0; i-- {
+		c.fns[i]()
+	}
+	c.fns = nil
+}
+
+func fatalWithCleanup(code int, cleanups *cleanupStack) {
+	cleanups.run()
+	os.Exit(code)
 }
 
 func cacheHotInvalidator(cacheImpl cache.Cache) auth.HotCacheInvalidator {
@@ -261,22 +423,20 @@ func ensureDefaultTenant(ctx context.Context, adminStore server.AdminStore) erro
 	return adminStore.CreateTenant(ctx, domain.Tenant{ID: "default", Name: "Default Tenant", Enabled: true, CreatedAt: time.Now().UTC()})
 }
 
-func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, func(), error) {
+func buildAuthenticator(ctx context.Context, cfg config.Config, store storage.Store) (*auth.Authenticator, *auth.DynamicStore, error) {
 	var keyStore auth.KeyStore
 	if mysqlStore, ok := store.(*storage.MySQLStore); ok {
 		keyStore = auth.NewMySQLKeyStore(mysqlStore.DB())
 	} else if sqliteStore, ok := store.(*storage.SQLiteStore); ok {
 		keyStore = sqliteStore
 	} else {
-		return nil, nil, func() {}, errors.New("dynamic auth requires mysql or sqlite storage")
+		return nil, nil, errors.New("dynamic auth requires mysql or sqlite storage")
 	}
-	dynamicStore, err := auth.NewDynamicStore(keyStore, []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
+	dynamicStore, err := auth.NewDynamicStoreWithContext(ctx, keyStore, []byte(cfg.KeyPepper), cfg.AuthRefreshInterval)
 	if err != nil {
-		return nil, nil, func() {}, err
+		return nil, nil, err
 	}
-	refreshCtx, cancel := context.WithCancel(ctx)
-	go dynamicStore.Run(refreshCtx)
-	return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), dynamicStore, cancel, nil
+	return auth.NewDynamicKeys(dynamicStore).WithAdminKey(cfg.AdminKey), dynamicStore, nil
 }
 
 // dynamicAuthReady satisfies server.AuthReadyChecker / AuthSnapshotProvider
@@ -362,6 +522,73 @@ func authInvalidationLabel(cfg config.Config, redisActive bool) string {
 		}
 		return "polling"
 	}
+}
+
+func configErrorKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "admin_key is required") || strings.Contains(text, "key_pepper is required"):
+		return "missing_secret"
+	case strings.Contains(text, "admin_key must") || strings.Contains(text, "key_pepper must") || strings.Contains(text, "auto_secrets"):
+		return "security"
+	case strings.Contains(text, "ha mode") || strings.Contains(text, "cluster mode"):
+		return "ha"
+	default:
+		return "invalid"
+	}
+}
+
+func runtimeErrorKind(component string, err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	text := strings.ToLower(err.Error())
+	component = strings.ToLower(component)
+	switch {
+	case strings.Contains(component, "redis") || strings.Contains(component, "cache") || strings.Contains(component, "selector") || strings.Contains(text, "redis"):
+		return "redis"
+	case strings.Contains(component, "mysql") || strings.Contains(text, "mysql"):
+		return "mysql"
+	default:
+		return "backend"
+	}
+}
+
+func safeRuntimeError(err error, cfg config.Config) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	for _, secret := range []string{
+		cfg.AdminKey,
+		cfg.KeyPepper,
+		cfg.MySQLDSN,
+		mysqlPasswordFromDSN(cfg.MySQLDSN),
+		cfg.RedisPassword,
+	} {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+	}
+	return text
+}
+
+func mysqlPasswordFromDSN(dsn string) string {
+	at := strings.Index(dsn, "@")
+	if at < 0 {
+		return ""
+	}
+	colon := strings.LastIndex(dsn[:at], ":")
+	if colon < 0 || colon+1 >= at {
+		return ""
+	}
+	return dsn[colon+1 : at]
 }
 
 func runDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -520,6 +747,37 @@ type checker interface {
 	Check(context.Context) error
 }
 
+type backgroundGroup struct {
+	wg     sync.WaitGroup
+	logger *slog.Logger
+}
+
+func (g *backgroundGroup) Go(component string, fn func()) {
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		if g.logger != nil {
+			g.logger.Info("background started", "component", component)
+			defer g.logger.Info("background stopped", "component", component)
+		}
+		fn()
+	}()
+}
+
+func (g *backgroundGroup) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type dependencyChecks struct {
 	store    storage.Store
 	cache    cache.Cache
@@ -597,19 +855,29 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (sto
 	}
 }
 
-func openCache(ctx context.Context, cfg config.Config, logger *slog.Logger) (cache.Cache, func()) {
+func openCache(ctx context.Context, cfg config.Config, logger *slog.Logger) (cache.Cache, func(), error) {
 	if cfg.RedisAddr == "" {
+		if redisCacheRequired(cfg) {
+			return nil, func() {}, errors.New("redis cache requires redis addr")
+		}
 		logger.Warn("redis is not configured; cache falls back to noop")
-		return cache.Noop{}, func() {}
+		return cache.Noop{}, func() {}, nil
 	}
 	r, err := retry(ctx, 30*time.Second, logger, "redis cache", func(attemptCtx context.Context) (*cache.Redis, error) {
 		return cache.NewRedis(attemptCtx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	})
 	if err != nil {
-		logger.Error("redis cache init failed; cache falls back to noop", "err", err)
-		return cache.Noop{}, func() {}
+		if redisCacheRequired(cfg) {
+			return nil, func() {}, err
+		}
+		logger.Error("redis cache init failed; cache falls back to noop", "error_kind", runtimeErrorKind("redis cache", err), "err", safeRuntimeError(err, cfg))
+		return cache.Noop{}, func() {}, nil
 	}
-	return r, func() { _ = r.Close() }
+	return r, func() { _ = r.Close() }, nil
+}
+
+func redisCacheRequired(cfg config.Config) bool {
+	return cfg.ClusterEnabled || cfg.SelectorRedisRequired || strings.EqualFold(strings.TrimSpace(cfg.AuthInvalidation), "redis")
 }
 
 func retry[T any](ctx context.Context, maxElapsed time.Duration, logger *slog.Logger, name string, fn func(context.Context) (T, error)) (T, error) {
@@ -631,10 +899,10 @@ func retry[T any](ctx context.Context, maxElapsed time.Duration, logger *slog.Lo
 		}
 		lastErr = err
 		if time.Now().Add(delay).After(deadline) || ctx.Err() != nil {
-			logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "err", lastErr)
+			logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "error_kind", runtimeErrorKind(name, lastErr))
 			return zero, lastErr
 		}
-		logger.Warn("startup dependency retry", "dependency", name, "attempt", attempt, "err", err)
+		logger.Warn("startup dependency retry", "dependency", name, "attempt", attempt, "error_kind", runtimeErrorKind(name, err))
 		select {
 		case <-time.After(delay + time.Duration(attempt%3)*100*time.Millisecond):
 		case <-ctx.Done():
@@ -645,6 +913,6 @@ func retry[T any](ctx context.Context, maxElapsed time.Duration, logger *slog.Lo
 			delay = 5 * time.Second
 		}
 	}
-	logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "err", lastErr)
+	logger.Error("startup dependency failed", "dependency", name, "attempts", attempt, "elapsed", time.Since(deadline.Add(-maxElapsed)), "error_kind", runtimeErrorKind(name, lastErr))
 	return zero, lastErr
 }

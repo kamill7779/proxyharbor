@@ -17,6 +17,8 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 )
 
+type gatewayProxyURLContextKey struct{}
+
 func (s *Server) gateway(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/version" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
@@ -56,7 +58,10 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
-	out := r.Clone(r.Context())
+	reqCtx, cancel := s.gatewayRequestContext(r.Context())
+	defer cancel()
+	reqCtx = context.WithValue(reqCtx, gatewayProxyURLContextKey{}, proxyURL)
+	out := r.Clone(reqCtx)
 	out.RequestURI = ""
 	out.URL = cloneURL(r.URL)
 	out.Header = r.Header.Clone()
@@ -65,9 +70,8 @@ func (s *Server) gatewayHTTP(w http.ResponseWriter, r *http.Request) {
 	out.Header.Del("ProxyHarbor-Tenant")
 	out.Header.Del("ProxyHarbor-Lease")
 	out.Header.Del("ProxyHarbor-Password")
-	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 	started := time.Now()
-	resp, err := transport.RoundTrip(out)
+	resp, err := s.gatewayTransport.RoundTrip(out)
 	if err != nil {
 		kind := classifyHTTPProxyError(err)
 		reason := safeErrorReason(err)
@@ -118,8 +122,12 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
+	s.gatewayTunnels.Add(1)
+	defer s.gatewayTunnels.Done()
 	started := time.Now()
-	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 10*time.Second)
+	reqCtx, cancel := s.gatewayRequestContext(r.Context())
+	defer cancel()
+	proxyConn, err := (&net.Dialer{Timeout: s.connectTimeout}).DialContext(reqCtx, "tcp", proxyURL.Host)
 	if err != nil {
 		kind := classifyNetError(err)
 		reason := safeErrorReason(err)
@@ -130,11 +138,26 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer proxyConn.Close()
+	stopHandshake := context.AfterFunc(reqCtx, func() {
+		_ = proxyConn.SetDeadline(time.Now())
+		_ = proxyConn.Close()
+	})
+	defer stopHandshake()
+	handshakeDeadline := time.Now().Add(s.connectTimeout)
+	_ = proxyConn.SetDeadline(handshakeDeadline)
 	connectRequest := "CONNECT " + r.Host + " HTTP/1.1\r\nHost: " + r.Host + "\r\n"
 	if proxyURL.User != nil {
 		connectRequest += "Proxy-Authorization: Basic " + proxyBasicAuth(proxyURL) + "\r\n"
 	}
-	_, _ = io.WriteString(proxyConn, connectRequest+"\r\n")
+	if _, err := io.WriteString(proxyConn, connectRequest+"\r\n"); err != nil {
+		kind := classifyNetError(err)
+		reason := safeErrorReason(err)
+		s.logGatewayFailure("connect", lease, r.Host, kind, reason)
+		s.recordGatewayAudit(r.Context(), lease, "gateway_connect_error", r.Host, reason)
+		s.recordProxyFailure(r.Context(), lease, kind, reason)
+		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
+		return
+	}
 	proxyReader := bufio.NewReader(proxyConn)
 	proxyResp, err := http.ReadResponse(proxyReader, r)
 	if err != nil || proxyResp.StatusCode/100 != 2 {
@@ -146,24 +169,47 @@ func (s *Server) gatewayConnect(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, domain.ErrNoHealthyProxy, http.StatusOK)
 		return
 	}
+	_ = proxyConn.SetDeadline(time.Time{})
+	stopHandshake()
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		respond(w, nil, domain.ErrUnsupported, http.StatusOK)
 		return
 	}
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, clientRW, err := hijacker.Hijack()
 	if err != nil {
 		return
 	}
 	defer clientConn.Close()
 	_, _ = io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	tunnelClosed := make(chan struct{})
+	defer close(tunnelClosed)
+	go func() {
+		select {
+		case <-s.shutdownCtx.Done():
+			_ = clientConn.Close()
+			_ = proxyConn.Close()
+		case <-tunnelClosed:
+		}
+	}()
 	done := make(chan struct{}, 2)
-	go proxyCopy(done, proxyConn, clientConn)
+	go proxyCopy(done, proxyConn, clientRW.Reader)
 	go proxyCopy(done, clientConn, proxyReader)
-	<-done
+	waitForTunnelCopies(done, func() {
+		_ = clientConn.Close()
+		_ = proxyConn.Close()
+	})
 	s.recordGatewayUsage(r.Context(), lease, 0, 0)
 	s.recordGatewayAudit(r.Context(), lease, "gateway_connect_forward", r.Host, "ok")
 	s.recordProxySuccess(r.Context(), lease, time.Since(started), "connect_forward")
+}
+
+func waitForTunnelCopies(done <-chan struct{}, closeConns func()) {
+	<-done
+	if closeConns != nil {
+		closeConns()
+	}
+	<-done
 }
 
 func gatewayCredentials(r *http.Request) (string, string, string, bool) {
@@ -231,6 +277,18 @@ func proxyCopy(done chan<- struct{}, dst io.Writer, src io.Reader) {
 	done <- struct{}{}
 }
 
+func (s *Server) gatewayRequestContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	if s == nil || s.shutdownCtx == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(s.shutdownCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (s *Server) recordProxySuccess(ctx context.Context, lease domain.Lease, latency time.Duration, hint string) {
 	if s.healthRecorder == nil {
 		return
@@ -250,10 +308,10 @@ func (s *Server) recordProxyFailure(ctx context.Context, lease domain.Lease, kin
 func (s *Server) logGatewayFailure(mode string, lease domain.Lease, target string, kind health.FailureKind, reason string) {
 	slog.Warn("gateway.proxy_failure",
 		"mode", mode,
-		"tenant_id", lease.TenantID,
-		"lease_id", lease.ID,
-		"proxy_id", lease.ProxyID,
-		"target", target,
+		"tenant_present", lease.TenantID != "",
+		"lease_present", lease.ID != "",
+		"proxy_present", lease.ProxyID != "",
+		"target_present", target != "",
 		"kind", kind.String(),
 		"reason", reason,
 	)

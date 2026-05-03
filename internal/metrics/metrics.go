@@ -83,6 +83,12 @@ func NewGauge(name, help string) *Gauge {
 	return &Gauge{m: m}
 }
 
+func NewGaugeWithLabels(name, help, labels string) *Gauge {
+	m := &labeledMetric{typ: metricGauge, name: name, help: help, labels: labels, gval: new(atomic.Int64)}
+	register(m)
+	return &Gauge{m: m}
+}
+
 func (g *Gauge) Set(v float64) { g.m.gval.Store(int64(v * 1000)) }
 
 func (g *Gauge) Value() float64 { return float64(g.m.gval.Load()) / 1000 }
@@ -205,6 +211,141 @@ var (
 	GatewayValidateTotal = NewCounter("proxyharbor_gateway_validate_total", "Total gateway validation requests")
 	GatewayValidateFail  = NewCounter("proxyharbor_gateway_validate_fail_total", "Failed gateway validation requests")
 )
+
+var runtimeStartupResults = map[string]*Counter{
+	"started|none":   NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"started\",error_kind=\"none\""),
+	"ok|none":        NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"ok\",error_kind=\"none\""),
+	"error|config":   NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"config\""),
+	"error|store":    NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"store\""),
+	"error|cache":    NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"cache\""),
+	"error|selector": NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"selector\""),
+	"error|schema":   NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"schema\""),
+	"error|cluster":  NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"cluster\""),
+	"error|auth":     NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"auth\""),
+	"error|tenant":   NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"tenant\""),
+	"error|listen":   NewCounterWithLabels("proxyharbor_runtime_startup_total", "Runtime startup results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"listen\""),
+}
+
+var runtimeShutdownResults = map[string]*Counter{
+	"started|none":         NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"started\",error_kind=\"none\""),
+	"graceful|none":        NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"graceful\",error_kind=\"none\""),
+	"error|http":           NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"http\""),
+	"error|gateway_tunnel": NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"gateway_tunnel\""),
+	"error|background":     NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"background\""),
+	"error|health_drain":   NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"health_drain\""),
+	"error|server_wait":    NewCounterWithLabels("proxyharbor_runtime_shutdown_total", "Runtime shutdown results by low-cardinality component, result, and error kind", "component=\"server\",result=\"error\",error_kind=\"server_wait\""),
+}
+
+var runtimeConfigValidationResults = map[string]*Counter{
+	"ok|none":              NewCounterWithLabels("proxyharbor_runtime_config_validation_total", "Config validation results by low-cardinality component, result, and error kind", "component=\"config\",result=\"ok\",error_kind=\"none\""),
+	"error|invalid":        NewCounterWithLabels("proxyharbor_runtime_config_validation_total", "Config validation results by low-cardinality component, result, and error kind", "component=\"config\",result=\"error\",error_kind=\"invalid\""),
+	"error|missing_secret": NewCounterWithLabels("proxyharbor_runtime_config_validation_total", "Config validation results by low-cardinality component, result, and error kind", "component=\"config\",result=\"error\",error_kind=\"missing_secret\""),
+	"error|security":       NewCounterWithLabels("proxyharbor_runtime_config_validation_total", "Config validation results by low-cardinality component, result, and error kind", "component=\"config\",result=\"error\",error_kind=\"security\""),
+	"error|ha":             NewCounterWithLabels("proxyharbor_runtime_config_validation_total", "Config validation results by low-cardinality component, result, and error kind", "component=\"config\",result=\"error\",error_kind=\"ha\""),
+}
+
+var runtimeDependencyStatus = map[string]map[string]*Gauge{
+	"mysql": {
+		"ready|none":       runtimeDependencyGauge("mysql", "ready", "none"),
+		"degraded|mysql":   runtimeDependencyGauge("mysql", "degraded", "mysql"),
+		"degraded|timeout": runtimeDependencyGauge("mysql", "degraded", "timeout"),
+		"degraded|backend": runtimeDependencyGauge("mysql", "degraded", "backend"),
+	},
+	"sqlite": {
+		"ready|none":       runtimeDependencyGauge("sqlite", "ready", "none"),
+		"degraded|timeout": runtimeDependencyGauge("sqlite", "degraded", "timeout"),
+		"degraded|backend": runtimeDependencyGauge("sqlite", "degraded", "backend"),
+	},
+	"memory": {
+		"ready|none":       runtimeDependencyGauge("memory", "ready", "none"),
+		"degraded|timeout": runtimeDependencyGauge("memory", "degraded", "timeout"),
+		"degraded|backend": runtimeDependencyGauge("memory", "degraded", "backend"),
+	},
+	"redis_cache": {
+		"ready|none":       runtimeDependencyGauge("redis_cache", "ready", "none"),
+		"degraded|redis":   runtimeDependencyGauge("redis_cache", "degraded", "redis"),
+		"degraded|timeout": runtimeDependencyGauge("redis_cache", "degraded", "timeout"),
+		"degraded|backend": runtimeDependencyGauge("redis_cache", "degraded", "backend"),
+	},
+	"redis_selector": {
+		"ready|none":       runtimeDependencyGauge("redis_selector", "ready", "none"),
+		"degraded|redis":   runtimeDependencyGauge("redis_selector", "degraded", "redis"),
+		"degraded|timeout": runtimeDependencyGauge("redis_selector", "degraded", "timeout"),
+		"degraded|backend": runtimeDependencyGauge("redis_selector", "degraded", "backend"),
+	},
+	"cache_invalidation": {
+		"ready|none":              runtimeDependencyGauge("cache_invalidation", "ready", "none"),
+		"degraded|redis":          runtimeDependencyGauge("cache_invalidation", "degraded", "redis"),
+		"degraded|timeout":        runtimeDependencyGauge("cache_invalidation", "degraded", "timeout"),
+		"degraded|not_subscribed": runtimeDependencyGauge("cache_invalidation", "degraded", "not_subscribed"),
+		"degraded|backend":        runtimeDependencyGauge("cache_invalidation", "degraded", "backend"),
+	},
+	"auth_cache": {
+		"ready|none":               runtimeDependencyGauge("auth_cache", "ready", "none"),
+		"degraded|not_initialized": runtimeDependencyGauge("auth_cache", "degraded", "not_initialized"),
+		"degraded|backend":         runtimeDependencyGauge("auth_cache", "degraded", "backend"),
+	},
+}
+
+var runtimeDependencyMu sync.Mutex
+
+func runtimeDependencyGauge(dependency, result, errorKind string) *Gauge {
+	return NewGaugeWithLabels("proxyharbor_runtime_dependency_status", "Runtime dependency status as 1 for the current low-cardinality dependency/result/error_kind series", "dependency=\""+dependency+"\",result=\""+result+"\",error_kind=\""+errorKind+"\"")
+}
+
+func RecordRuntimeStartupResult(result, errorKind string) {
+	incRuntimeCounter(runtimeStartupResults, result, errorKind, "error|config")
+}
+
+func RecordRuntimeShutdownResult(result, errorKind string) {
+	incRuntimeCounter(runtimeShutdownResults, result, errorKind, "error|background")
+}
+
+func RecordRuntimeConfigValidationResult(result, errorKind string) {
+	incRuntimeCounter(runtimeConfigValidationResults, result, errorKind, "error|invalid")
+}
+
+func RecordRuntimeDependencyStatus(dependency, result, errorKind string) {
+	runtimeDependencyMu.Lock()
+	defer runtimeDependencyMu.Unlock()
+	series, ok := runtimeDependencyStatus[dependency]
+	if !ok {
+		return
+	}
+	if result == "" {
+		result = "degraded"
+	}
+	if errorKind == "" {
+		errorKind = "none"
+	}
+	key := result + "|" + errorKind
+	if _, ok := series[key]; !ok {
+		if result == "ready" {
+			key = "ready|none"
+		} else {
+			key = "degraded|backend"
+		}
+	}
+	for _, gauge := range series {
+		gauge.Set(0)
+	}
+	series[key].Set(1)
+}
+
+func incRuntimeCounter(counters map[string]*Counter, result, errorKind, fallback string) {
+	if result == "" {
+		result = "error"
+	}
+	if errorKind == "" {
+		errorKind = "none"
+	}
+	key := result + "|" + errorKind
+	counter, ok := counters[key]
+	if !ok {
+		counter = counters[fallback]
+	}
+	counter.Inc()
+}
 
 // Handler returns an http.Handler that serves Prometheus text-format metrics.
 func Handler() http.Handler {

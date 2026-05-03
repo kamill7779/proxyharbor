@@ -88,6 +88,7 @@ func LoadUnchecked(args []string) (Config, error) {
 
 func load(args []string, validate bool) (Config, error) {
 	secretsFileFromEnv := os.Getenv("PROXYHARBOR_SECRETS_FILE")
+	autoSecretsFromEnv := os.Getenv("PROXYHARBOR_AUTO_SECRETS") != ""
 	secretsFile := envStr("PROXYHARBOR_SECRETS_FILE", defaultSecretsFile(envStr("PROXYHARBOR_STORAGE", "sqlite"), envStr("PROXYHARBOR_SQLITE_PATH", "data/proxyharbor.db")))
 	cfg := Config{
 		Role:                       envStr("PROXYHARBOR_ROLE", "all"),
@@ -131,20 +132,23 @@ func load(args []string, validate bool) (Config, error) {
 		UsageRetentionDays:         envInt("PROXYHARBOR_USAGE_RETENTION_DAYS", 0),
 		RetentionInterval:          envDur("PROXYHARBOR_RETENTION_INTERVAL", time.Hour),
 	}
+	adminKeyEnv := cfg.AdminKey
+	keyPepperEnv := cfg.KeyPepper
+	mySQLDSNEnv := cfg.MySQLDSN
 
 	fs := flag.NewFlagSet("proxyharbor", flag.ContinueOnError)
 	fs.StringVar(&cfg.Role, "role", cfg.Role, "process role: all | controller | gateway")
 	fs.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address")
 	fs.StringVar(&cfg.GatewayURL, "gateway-url", cfg.GatewayURL, "gateway URL returned in leases")
-	fs.StringVar(&cfg.AdminKey, "admin-key", cfg.AdminKey, "bootstrap admin key")
-	fs.StringVar(&cfg.KeyPepper, "key-pepper", cfg.KeyPepper, "key hashing pepper for dynamic mode")
+	fs.StringVar(&cfg.AdminKey, "admin-key", "", "bootstrap admin key")
+	fs.StringVar(&cfg.KeyPepper, "key-pepper", "", "key hashing pepper for dynamic mode")
 	fs.StringVar(&cfg.SecretsFile, "secrets-file", cfg.SecretsFile, "local secrets env file for generated admin key and pepper")
 	fs.BoolVar(&cfg.AutoSecrets, "auto-secrets", cfg.AutoSecrets, "generate local secrets when admin key or pepper is missing")
 	fs.DurationVar(&cfg.AuthRefreshInterval, "auth-refresh-interval", cfg.AuthRefreshInterval, "dynamic auth cache refresh interval")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: json | text")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info | debug")
 	storageStr := fs.String("storage", string(cfg.StorageDriver), "storage driver: sqlite | mysql | memory")
-	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", cfg.MySQLDSN, "MySQL DSN")
+	fs.StringVar(&cfg.MySQLDSN, "mysql-dsn", "", "MySQL DSN")
 	fs.StringVar(&cfg.SQLitePath, "sqlite-path", cfg.SQLitePath, "SQLite database path")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
 	fs.StringVar(&cfg.Selector, "selector", cfg.Selector, "proxy selector")
@@ -152,6 +156,7 @@ func load(args []string, validate bool) (Config, error) {
 	fs.StringVar(&cfg.ScoringProfile, "scoring-profile", cfg.ScoringProfile, "health scoring profile")
 	fs.DurationVar(&cfg.HealthFlushInterval, "health-flush-interval", cfg.HealthFlushInterval, "health flush interval")
 	fs.IntVar(&cfg.HealthBufferMax, "health-buffer-max", cfg.HealthBufferMax, "health event buffer size")
+	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful shutdown timeout")
 	fs.IntVar(&cfg.ZFairQuantum, "zfair-quantum", cfg.ZFairQuantum, "zfair scheduler quantum")
 	fs.IntVar(&cfg.ZFairDefaultLatencyMS, "zfair-default-latency-ms", cfg.ZFairDefaultLatencyMS, "zfair default latency ms")
 	fs.IntVar(&cfg.ZFairMaxPromote, "zfair-max-promote", cfg.ZFairMaxPromote, "zfair max delayed promotions")
@@ -168,8 +173,24 @@ func load(args []string, validate bool) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	adminKeyFromFlag := flagWasProvided(fs, "admin-key")
+	keyPepperFromFlag := flagWasProvided(fs, "key-pepper")
+	mySQLDSNFromFlag := flagWasProvided(fs, "mysql-dsn")
 	secretsFileFromFlag := flagWasProvided(fs, "secrets-file")
+	autoSecretsFromFlag := flagWasProvided(fs, "auto-secrets")
+	if !adminKeyFromFlag {
+		cfg.AdminKey = adminKeyEnv
+	}
+	if !keyPepperFromFlag {
+		cfg.KeyPepper = keyPepperEnv
+	}
+	if !mySQLDSNFromFlag {
+		cfg.MySQLDSN = mySQLDSNEnv
+	}
 	cfg.StorageDriver = StorageDriver(*storageStr)
+	if !autoSecretsFromEnv && !autoSecretsFromFlag {
+		cfg.AutoSecrets = cfg.StorageDriver == DriverSQLite && !cfg.ClusterEnabled
+	}
 	if secretsFileFromEnv == "" && !secretsFileFromFlag {
 		cfg.SecretsFile = defaultSecretsFile(string(cfg.StorageDriver), cfg.SQLitePath)
 	}
@@ -320,6 +341,9 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("unsupported storage driver: %q", c.StorageDriver)
 	}
+	if c.AutoSecrets && (c.StorageDriver != DriverSQLite || c.ClusterEnabled) {
+		return errors.New("PROXYHARBOR_AUTO_SECRETS is only supported with storage=sqlite without cluster mode")
+	}
 	if c.Selector != "local" && c.Selector != "zfair" {
 		return fmt.Errorf("unsupported selector: %q", c.Selector)
 	}
@@ -360,6 +384,9 @@ func (c Config) validate() error {
 	}
 	if c.AuthRefreshInterval <= 0 || c.AuthRefreshInterval > 5*time.Second {
 		return errors.New("PROXYHARBOR_AUTH_REFRESH_INTERVAL must be > 0 and <= 5s")
+	}
+	if c.ShutdownTimeout <= 0 {
+		return errors.New("PROXYHARBOR_SHUTDOWN_TIMEOUT must be positive")
 	}
 	if c.ClusterEnabled && c.StorageDriver != DriverMySQL {
 		return errors.New("cluster mode requires storage=mysql")

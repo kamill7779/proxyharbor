@@ -5,8 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/auth"
@@ -17,7 +22,7 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.4.6"
+const Version = "0.5.3"
 
 type gatewayValidationResponse struct {
 	ID             string             `json:"lease_id"`
@@ -44,21 +49,26 @@ const (
 )
 
 type Server struct {
-	mux            *http.ServeMux
-	svc            *control.Service
-	authn          *auth.Authenticator
-	adminStore     AdminStore
-	pepper         string
-	role           Role
-	healthRecorder health.HealthRecorder
-	dependency     storage.DependencyChecker
-	authReady      AuthReadyChecker
-	invalidator    auth.Invalidator
-	instanceID     string
-	authSnapshot   AuthSnapshotProvider
-	clusterStore   storage.ClusterStore
-	clusterSummary map[string]any
-	invalidStatus  auth.StatusReporter
+	mux              *http.ServeMux
+	svc              *control.Service
+	authn            *auth.Authenticator
+	adminStore       AdminStore
+	pepper           string
+	role             Role
+	healthRecorder   health.HealthRecorder
+	dependency       storage.DependencyChecker
+	authReady        AuthReadyChecker
+	invalidator      auth.Invalidator
+	instanceID       string
+	authSnapshot     AuthSnapshotProvider
+	clusterStore     storage.ClusterStore
+	clusterSummary   map[string]any
+	invalidStatus    auth.StatusReporter
+	shutdownCtx      context.Context
+	connectTimeout   time.Duration
+	gatewayTransport *http.Transport
+	gatewayTunnels   sync.WaitGroup
+	draining         atomic.Bool
 }
 
 // AuthReadyChecker reports whether the auth subsystem is ready to handle
@@ -75,46 +85,80 @@ type AuthSnapshotProvider interface {
 
 // Options bundles optional dependencies for the HTTP server.
 type Options struct {
-	Role               Role
-	HealthRecorder     health.HealthRecorder
-	Dependency         storage.DependencyChecker
-	AdminStore         AdminStore
-	Pepper             string
-	AuthReady          AuthReadyChecker
-	AuthSnapshot       AuthSnapshotProvider
-	Invalidator        auth.Invalidator
-	InstanceID         string
-	ClusterStore       storage.ClusterStore
-	ClusterSummary     map[string]any
-	InvalidationStatus auth.StatusReporter
+	Role                  Role
+	HealthRecorder        health.HealthRecorder
+	Dependency            storage.DependencyChecker
+	AdminStore            AdminStore
+	Pepper                string
+	AuthReady             AuthReadyChecker
+	AuthSnapshot          AuthSnapshotProvider
+	Invalidator           auth.Invalidator
+	InstanceID            string
+	ClusterStore          storage.ClusterStore
+	ClusterSummary        map[string]any
+	InvalidationStatus    auth.StatusReporter
+	ShutdownContext       context.Context
+	GatewayConnectTimeout time.Duration
 }
 
 // NewWithOptions builds the HTTP handler with the supplied optional
 // dependencies. Fields left zero are treated as not configured.
-func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Options) http.Handler {
+func NewWithOptions(svc *control.Service, authn *auth.Authenticator, opts Options) *Server {
 	role := opts.Role
 	if role == "" {
 		role = RoleAll
 	}
+	shutdownCtx := opts.ShutdownContext
+	if shutdownCtx == nil {
+		shutdownCtx = context.Background()
+	}
+	connectTimeout := opts.GatewayConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = 10 * time.Second
+	}
+	gatewayTransport := &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			proxyURL, _ := req.Context().Value(gatewayProxyURLContextKey{}).(*url.URL)
+			return proxyURL, nil
+		},
+		DialContext: (&net.Dialer{
+			Timeout:   connectTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: connectTimeout,
+	}
+	if opts.ShutdownContext != nil {
+		go func() {
+			<-shutdownCtx.Done()
+			gatewayTransport.CloseIdleConnections()
+		}()
+	}
 	s := &Server{
-		mux:            http.NewServeMux(),
-		svc:            svc,
-		authn:          authn,
-		role:           role,
-		healthRecorder: opts.HealthRecorder,
-		dependency:     opts.Dependency,
-		adminStore:     opts.AdminStore,
-		pepper:         opts.Pepper,
-		authReady:      opts.AuthReady,
-		authSnapshot:   opts.AuthSnapshot,
-		invalidator:    opts.Invalidator,
-		instanceID:     opts.InstanceID,
-		clusterStore:   opts.ClusterStore,
-		clusterSummary: opts.ClusterSummary,
-		invalidStatus:  opts.InvalidationStatus,
+		mux:              http.NewServeMux(),
+		svc:              svc,
+		authn:            authn,
+		role:             role,
+		healthRecorder:   opts.HealthRecorder,
+		dependency:       opts.Dependency,
+		adminStore:       opts.AdminStore,
+		pepper:           opts.Pepper,
+		authReady:        opts.AuthReady,
+		authSnapshot:     opts.AuthSnapshot,
+		invalidator:      opts.Invalidator,
+		instanceID:       opts.InstanceID,
+		clusterStore:     opts.ClusterStore,
+		clusterSummary:   opts.ClusterSummary,
+		invalidStatus:    opts.InvalidationStatus,
+		shutdownCtx:      shutdownCtx,
+		connectTimeout:   connectTimeout,
+		gatewayTransport: gatewayTransport,
 	}
 	s.routes()
-	return Recover(s)
+	return s
 }
 
 func (s *Server) debugAuthCache(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +200,12 @@ func (s *Server) debugAuthCacheMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("panic recovered", "path", r.URL.Path, "method", r.Method, "panic", recovered, "stack", string(debug.Stack()))
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": domain.ErrorCode(domain.ErrInternal)})
+		}
+	}()
 	if r.Method == http.MethodConnect && (s.role == RoleAll || s.role == RoleGateway) {
 		s.gateway(w, r)
 		return
@@ -163,11 +213,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+func (s *Server) WaitForGatewayTunnels(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		s.gatewayTunnels.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) StartDraining() {
+	if s != nil {
+		s.draining.Store(true)
+	}
+}
+
+func (s *Server) isDraining() bool {
+	if s == nil {
+		return false
+	}
+	if s.draining.Load() {
+		return true
+	}
+	select {
+	case <-s.shutdownCtx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.health)
 	s.mux.HandleFunc("/readyz", s.ready)
 	s.mux.HandleFunc("/version", s.version)
-	s.mux.HandleFunc("/metrics", s.requireAdminAuth(metrics.Handler().ServeHTTP))
+	s.mux.HandleFunc("/metrics", s.requireAdminAuth(s.metrics))
 	if s.role == RoleAll || s.role == RoleController {
 		s.mux.HandleFunc("/v1/leases", s.leases)
 		s.mux.HandleFunc("/v1/leases/", s.leaseByID)
@@ -209,36 +297,13 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	reasons := map[string]string{}
-	ready := true
 	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 	defer cancel()
-	if s.dependency != nil {
-		for name, err := range s.dependency.CheckDependencies(ctx) {
-			if err != nil {
-				reasons[name] = "unavailable"
-				ready = false
-				continue
-			}
-			reasons[name] = "ok"
-		}
-	}
-	if s.invalidStatus != nil {
-		status := s.invalidStatus.InvalidationStatus()
-		reasons["cache_invalidation"] = status.State
-		if status.Transport == "redis" && status.Required && status.State != "subscribed" {
-			ready = false
-		}
-	}
-	if s.authReady != nil {
-		if err := s.authReady.CheckAuthReady(ctx); err != nil {
-			reasons["auth_cache"] = "not_initialized"
-			ready = false
-		} else {
-			reasons["auth_cache"] = "ok"
-		}
-	}
+	ready, reasons, errorKinds := s.evaluateReadiness(ctx)
 	body := map[string]any{"role": string(s.role), "reasons": reasons}
+	if len(errorKinds) > 0 {
+		body["error_kinds"] = errorKinds
+	}
 	if s.invalidStatus != nil {
 		body["cache_invalidation"] = s.invalidStatus.InvalidationStatus()
 	}
@@ -249,10 +314,96 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	body["status"] = "ready"
 	if !ready {
 		status = http.StatusServiceUnavailable
-		body["status"] = "degraded"
+		if reasons["shutdown"] == "draining" {
+			body["status"] = "draining"
+		} else {
+			body["status"] = "degraded"
+		}
 	}
 	writeJSON(w, status, body)
 }
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+	s.evaluateReadiness(ctx)
+	if s.authSnapshot != nil {
+		_ = s.authSnapshot.AuthSnapshot()
+	}
+	metrics.Handler().ServeHTTP(w, r)
+}
+
+func (s *Server) evaluateReadiness(ctx context.Context) (bool, map[string]string, map[string]string) {
+	reasons := map[string]string{}
+	errorKinds := map[string]string{}
+	ready := true
+	if s.isDraining() {
+		reasons["shutdown"] = "draining"
+		errorKinds["shutdown"] = "draining"
+		ready = false
+	}
+	if s.dependency != nil {
+		for name, err := range s.dependency.CheckDependencies(ctx) {
+			if err != nil {
+				reasons[name] = "unavailable"
+				kind := classifyDependencyError(name, err)
+				errorKinds[name] = kind
+				metrics.RecordRuntimeDependencyStatus(name, "degraded", kind)
+				ready = false
+				continue
+			}
+			reasons[name] = "ok"
+			metrics.RecordRuntimeDependencyStatus(name, "ready", "none")
+		}
+	}
+	if s.invalidStatus != nil {
+		status := s.invalidStatus.InvalidationStatus()
+		reasons["cache_invalidation"] = status.State
+		if status.Transport == "redis" && status.Required && status.State != "subscribed" {
+			kind := status.LastErrorKind
+			if kind == "" {
+				kind = "not_subscribed"
+			}
+			errorKinds["cache_invalidation"] = kind
+			metrics.RecordRuntimeDependencyStatus("cache_invalidation", "degraded", kind)
+			ready = false
+		} else {
+			metrics.RecordRuntimeDependencyStatus("cache_invalidation", "ready", "none")
+		}
+	}
+	if s.authReady != nil {
+		if err := s.authReady.CheckAuthReady(ctx); err != nil {
+			reasons["auth_cache"] = "not_initialized"
+			errorKinds["auth_cache"] = "not_initialized"
+			metrics.RecordRuntimeDependencyStatus("auth_cache", "degraded", "not_initialized")
+			ready = false
+		} else {
+			reasons["auth_cache"] = "ok"
+			metrics.RecordRuntimeDependencyStatus("auth_cache", "ready", "none")
+		}
+	}
+	return ready, reasons, errorKinds
+}
+
+func classifyDependencyError(name string, err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	name = strings.ToLower(name)
+	errText := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(name, "redis") || strings.Contains(errText, "redis"):
+		return "redis"
+	case strings.Contains(name, "mysql") || strings.Contains(errText, "mysql"):
+		return "mysql"
+	default:
+		return "backend"
+	}
+}
+
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
@@ -596,11 +747,15 @@ func (s *Server) validate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, principal) {
 		return
 	}
+	if r.URL.Query().Get("password") != "" {
+		respond(w, nil, domain.NewKindedError(domain.ErrBadRequest, domain.ErrorKindUnknown, "password_query_rejected", nil), http.StatusOK)
+		return
+	}
 	tenant := r.URL.Query().Get("tenant_id")
 	if tenant == "" {
 		tenant = "default"
 	}
-	lease, err := s.svc.ValidateLease(r.Context(), tenant, r.URL.Query().Get("lease_id"), r.URL.Query().Get("password"), r.URL.Query().Get("target"))
+	lease, err := s.svc.ValidateLease(r.Context(), tenant, r.URL.Query().Get("lease_id"), r.Header.Get("ProxyHarbor-Password"), r.URL.Query().Get("target"))
 	metrics.LeaseValidateTotal.Inc()
 	if err != nil {
 		metrics.LeaseValidateFail.Inc()

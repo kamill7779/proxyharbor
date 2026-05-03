@@ -32,18 +32,21 @@ services:
     environment:
       PROXYHARBOR_ROLE: all
       PROXYHARBOR_ADDR: ":8080"
-      PROXYHARBOR_GATEWAY_URL: http://localhost:${PROXYHARBOR_HA_TEST_PORT:-18081}
+      PROXYHARBOR_GATEWAY_URL: http://${PROXYHARBOR_HA_TEST_GATEWAY_HOST:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT:-18081}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
+      PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
+      PROXYHARBOR_AUTH_INVALIDATION: redis
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
       PROXYHARBOR_CACHE_TTL: 30s
       PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+      PROXYHARBOR_SHUTDOWN_TIMEOUT: 15s
     ports:
       - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_A:-18083}:8080"
     depends_on:
@@ -51,24 +54,33 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 25s
 
   proxyharbor-b:
     <<: *proxyharbor
     environment:
       PROXYHARBOR_ROLE: all
       PROXYHARBOR_ADDR: ":8080"
-      PROXYHARBOR_GATEWAY_URL: http://localhost:${PROXYHARBOR_HA_TEST_PORT:-18081}
+      PROXYHARBOR_GATEWAY_URL: http://${PROXYHARBOR_HA_TEST_GATEWAY_HOST:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT:-18081}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
+      PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
+      PROXYHARBOR_AUTH_INVALIDATION: redis
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
       PROXYHARBOR_CACHE_TTL: 30s
       PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+      PROXYHARBOR_SHUTDOWN_TIMEOUT: 15s
     ports:
       - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_B:-18084}:8080"
 
@@ -77,18 +89,21 @@ services:
     environment:
       PROXYHARBOR_ROLE: all
       PROXYHARBOR_ADDR: ":8080"
-      PROXYHARBOR_GATEWAY_URL: http://localhost:${PROXYHARBOR_HA_TEST_PORT:-18081}
+      PROXYHARBOR_GATEWAY_URL: http://${PROXYHARBOR_HA_TEST_GATEWAY_HOST:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT:-18081}
       PROXYHARBOR_ADMIN_KEY: ${PROXYHARBOR_ADMIN_KEY:?set PROXYHARBOR_ADMIN_KEY}
       PROXYHARBOR_KEY_PEPPER: ${PROXYHARBOR_KEY_PEPPER:?set PROXYHARBOR_KEY_PEPPER}
+      PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
+      PROXYHARBOR_AUTH_INVALIDATION: redis
       PROXYHARBOR_CLUSTER_ENABLED: "true"
       PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT: "true"
       PROXYHARBOR_CACHE_TTL: 30s
       PROXYHARBOR_AUTH_REFRESH_INTERVAL: 5s
+      PROXYHARBOR_SHUTDOWN_TIMEOUT: 15s
     ports:
       - "${PROXYHARBOR_HA_TEST_BIND_ADDR:-127.0.0.1}:${PROXYHARBOR_HA_TEST_PORT_C:-18085}:8080"
 
@@ -99,6 +114,9 @@ services:
     volumes:
       - ./testdata/ha/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - proxyharbor-a
-      - proxyharbor-b
-      - proxyharbor-c
+      proxyharbor-a:
+        condition: service_healthy
+      proxyharbor-b:
+        condition: service_healthy
+      proxyharbor-c:
+        condition: service_healthy

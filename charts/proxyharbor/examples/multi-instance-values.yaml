@@ -4,6 +4,9 @@
 storage: mysql
 replicaCount: 2
 
+cluster:
+  enabled: true
+
 strategy:
   type: RollingUpdate
   rollingUpdate:

@@ -91,7 +91,7 @@ func main() {
 func parseFlags() config {
 	cfg := config{}
 	flag.StringVar(&cfg.BaseURL, "base-url", envDefault("PROXYHARBOR_BASE_URL", "http://localhost:18080"), "ProxyHarbor base URL")
-	flag.StringVar(&cfg.AdminKey, "admin-key", envDefault("PROXYHARBOR_ADMIN_KEY", ""), "admin key for setup and admin endpoints")
+	flag.StringVar(&cfg.AdminKey, "admin-key", "", "admin key for setup and admin endpoints; defaults to PROXYHARBOR_ADMIN_KEY")
 	flag.StringVar(&cfg.TenantID, "tenant", "bench-tenant", "tenant id used by benchmark")
 	flag.IntVar(&cfg.ProxyCount, "proxies", 8, "number of proxies to seed")
 	flag.IntVar(&cfg.Requests, "requests", 200, "number of measured requests")
@@ -106,6 +106,9 @@ func parseFlags() config {
 	flag.IntVar(&cfg.WarmupLeases, "warmup-leases", 32, "leases to pre-create for renew/validate/mixed")
 	flag.DurationVar(&cfg.Timeout, "timeout", 2*time.Minute, "overall timeout")
 	flag.Parse()
+	if cfg.AdminKey == "" {
+		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
+	}
 	if cfg.Requests < 1 {
 		cfg.Requests = 1
 	}
@@ -172,11 +175,14 @@ func startDocker(ctx context.Context, cfg config) error {
 		}
 		pepper = secret
 	}
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", cfg.ComposeFile, "up", "-d", "--build", "--pull", "never")
-	env := append(os.Environ(),
+	envFile, cleanup, err := composeEnvFile(cfg.AdminKey, pepper)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	cmd := exec.CommandContext(ctx, "docker", "compose", "--env-file", envFile, "-f", cfg.ComposeFile, "up", "-d", "--build", "--pull", "never")
+	env := append(scrubSecretEnv(os.Environ()),
 		"PROXYHARBOR_HOST_PORT="+cfg.HostPort,
-		"PROXYHARBOR_ADMIN_KEY="+cfg.AdminKey,
-		"PROXYHARBOR_KEY_PEPPER="+pepper,
 		"PROXYHARBOR_AUTH_REFRESH_INTERVAL=1s",
 	)
 	if cfg.AllowInternalProxyEndpoint {
@@ -185,7 +191,7 @@ func startDocker(ctx context.Context, cfg config) error {
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("docker compose up: %w: %s", err, bodySummary(out))
 	}
 	return nil
 }
@@ -348,7 +354,7 @@ func createLease(ctx context.Context, client *http.Client, cfg config, tenantKey
 		return leaseInfo{}, err
 	}
 	if status < 200 || status >= 300 {
-		return leaseInfo{}, fmt.Errorf("lease create status %d: %s", status, body)
+		return leaseInfo{}, fmt.Errorf("lease create status %d: %s", status, bodySummary(body))
 	}
 	var lease leaseInfo
 	if err := json.Unmarshal(body, &lease); err != nil {
@@ -367,11 +373,21 @@ func validateLease(ctx context.Context, client *http.Client, cfg config, lease l
 	query := endpoint.Query()
 	query.Set("tenant_id", cfg.TenantID)
 	query.Set("lease_id", lease.LeaseID)
-	query.Set("password", lease.Password)
 	query.Set("target", "https://example.com")
 	endpoint.RawQuery = query.Encode()
-	_, status, err := requestJSONStatus(ctx, client, http.MethodGet, endpoint.String(), cfg.AdminKey, "", nil)
-	return status, lease.ProxyID, err
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return 0, lease.ProxyID, err
+	}
+	req.Header.Set("ProxyHarbor-Key", cfg.AdminKey)
+	req.Header.Set("ProxyHarbor-Password", lease.Password)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, lease.ProxyID, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, lease.ProxyID, nil
 }
 
 func catalog(ctx context.Context, client *http.Client, cfg config) (int, string, error) {
@@ -385,7 +401,7 @@ func requestJSON(ctx context.Context, client *http.Client, method, endpoint, key
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("%s %s status %d: %s", method, endpoint, status, string(body))
+		return nil, fmt.Errorf("%s %s status %d: %s", method, endpoint, status, bodySummary(body))
 	}
 	return body, nil
 }
@@ -420,9 +436,61 @@ func requestJSONStatus(ctx context.Context, client *http.Client, method, endpoin
 		return nil, resp.StatusCode, err
 	}
 	if resp.StatusCode >= 500 {
-		return body, resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return body, resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, bodySummary(body))
 	}
 	return body, resp.StatusCode, nil
+}
+
+func composeEnvFile(adminKey, pepper string) (string, func(), error) {
+	file, err := os.CreateTemp("", "proxyharbor-compose-*.env")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	_, writeErr := fmt.Fprintf(file, "PROXYHARBOR_ADMIN_KEY=%s\nPROXYHARBOR_KEY_PEPPER=%s\n", envFileValue(adminKey), envFileValue(pepper))
+	closeErr := file.Close()
+	if writeErr != nil {
+		cleanup()
+		return "", func() {}, writeErr
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", func() {}, closeErr
+	}
+	return path, cleanup, nil
+}
+
+func envFileValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", "")
+	return strings.ReplaceAll(value, "\n", "")
+}
+
+func scrubSecretEnv(env []string) []string {
+	out := env[:0]
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "PROXYHARBOR_ADMIN_KEY=") || strings.HasPrefix(entry, "PROXYHARBOR_KEY_PEPPER=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func bodySummary(body []byte) string {
+	var doc struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &doc); err == nil {
+		switch {
+		case doc.Error != "":
+			return fmt.Sprintf("<redacted len=%d error=%q>", len(body), doc.Error)
+		case doc.Status != "":
+			return fmt.Sprintf("<redacted len=%d status=%q>", len(body), doc.Status)
+		}
+	}
+	return fmt.Sprintf("<redacted len=%d>", len(body))
 }
 
 func randomHexSecret() (string, error) {

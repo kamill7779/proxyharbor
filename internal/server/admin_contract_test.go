@@ -80,8 +80,9 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
 	)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&password="+lease.Password+"&target=example.com", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&target=example.com", nil)
 	req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+	req.Header.Set("ProxyHarbor-Password", lease.Password)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -96,6 +97,14 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 	}
 	if body["lease_id"] != lease.ID || body["proxy_id"] == "" {
 		t.Fatalf("gateway validate body = %#v", body)
+	}
+
+	queryReq := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&password="+lease.Password+"&target=example.com", nil)
+	queryReq.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
+	queryRR := httptest.NewRecorder()
+	handler.ServeHTTP(queryRR, queryReq)
+	if queryRR.Code != http.StatusBadRequest {
+		t.Fatalf("query password status = %d, want 400; body=%s", queryRR.Code, queryRR.Body.String())
 	}
 }
 
