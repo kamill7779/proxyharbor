@@ -1,4 +1,10 @@
-# Dynamic-key HA example for ProxyHarbor v0.4.0.
+# Stable HA example aligned with the v0.5.4 release baseline.
+#
+# Scope:
+#   - 3 ProxyHarbor replicas behind one Service / Ingress / LB
+#   - MySQL shared storage + Redis selector/cache coordination
+#   - Explicit HA secrets only; no auto-generated credentials
+#   - Local pressure / release evidence should follow docs/runbooks/ha-pressure.md
 #
 # Required preconditions:
 #   1. Initialize MySQL with migrations/mysql/init.sql.

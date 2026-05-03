@@ -27,14 +27,12 @@ jobs:
           version: v3.15.0
       - name: Helm lint
         run: helm lint charts/proxyharbor
-      - name: Helm template (smoke render)
+      - name: Helm template (HA example smoke render)
         run: |
           helm template ph charts/proxyharbor \
-            --set auth.key=ci-test-key \
-            --set mysql.dsn='u:p@tcp(mysql:3306)/db?parseTime=true' \
-            --set redis.addr=redis:6379 \
-            > /tmp/render.yaml
-          test -s /tmp/render.yaml
+            -f charts/proxyharbor/examples/dynamic-ha-values.yaml \
+            > /tmp/render-ha.yaml
+          test -s /tmp/render-ha.yaml
 
   docker-build:
     runs-on: ubuntu-latest

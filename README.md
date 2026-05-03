@@ -167,6 +167,20 @@ docker compose -f docker-compose.ha.yaml up -d --build
 
 HA 模式需要显式 Secret，不自动生成默认密钥。
 
+### HA 本机验证路径（v0.5.4）
+
+需要重复验证 3 实例 + MySQL + Redis + LB 的本机 HA 拓扑时，使用 `docker-compose.ha-test.yaml` 和正式 runner，而不是临时脚本：
+
+```bash
+docker build --pull=false -t proxyharbor:ha-test .
+go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
+go run ./tools/hacorrect -docker -timeout 6m
+go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+```
+
+这条路径只覆盖当前已经有正式 runner 支持的 HA correctness / runtime / cache / SDK 验证。压测、soak 记录格式和 `tools/hapressure` 命令位见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)；在正式 runner 合入前，不要把 ad-hoc 压测脚本写进发布说明或 README。
+
 ### 直接运行二进制
 
 ```bash
