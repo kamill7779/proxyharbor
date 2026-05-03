@@ -36,7 +36,7 @@ docker build --pull=false -t proxyharbor:ha-test .
 go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
 go run ./tools/hacorrect -docker -timeout 6m
 go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
-cd tools/hasdkcheck && go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
 ```
 
 这些命令会复用 `docker-compose.ha-test.yaml` 的 3 实例 + MySQL + Redis + LB 拓扑，分别覆盖：
@@ -91,13 +91,13 @@ helm install proxyharbor charts/proxyharbor \
 
 - Machine / environment:
 - Image / commit:
-- Topology: 3 x proxyharbor + MySQL + Redis + LB (`docker-compose.ha-test.yaml` or Helm HA)
+- Topology: 3 x proxyharbor + MySQL + Redis + LB (`docker-compose.ha-test.yaml`, local Docker)
 - Commands:
   - `docker build --pull=false -t proxyharbor:ha-test .`
   - `go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m`
   - `go run ./tools/hacorrect -docker -timeout 6m`
   - `go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m`
-  - `cd tools/hasdkcheck && go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
+  - `go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
   - `go run ./tools/hapressure ...`  <!-- 仅在正式 runner 合入后填写真实命令 -->
 - gateway validate: p95= / p99=
 - lease create: p95= / p99=
@@ -112,7 +112,7 @@ helm install proxyharbor charts/proxyharbor \
 当前 CI 只需要：
 
 - `helm lint charts/proxyharbor`
-- Helm smoke render
+- HA example smoke render: `helm template ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml`
 - `haruntimecheck`
 - `hacachecheck`
 - `hacorrect`

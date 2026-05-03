@@ -35,7 +35,7 @@ Run the supported HA runners in this order:
 go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
 go run ./tools/hacorrect -docker -timeout 6m
 go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
-cd tools/hasdkcheck && go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
 ```
 
 Coverage summary:
@@ -74,7 +74,7 @@ Every v0.5.4 HA release PR should contain:
   - `go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m`
   - `go run ./tools/hacorrect -docker -timeout 6m`
   - `go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m`
-  - `cd tools/hasdkcheck && go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
+  - `go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m`
   - `go run ./tools/hapressure ...`  <!-- fill only after the formal runner is merged -->
 - gateway validate: p95= / p99=
 - lease create: p95= / p99=
@@ -89,7 +89,7 @@ Every v0.5.4 HA release PR should contain:
 The CI guard stays intentionally narrow:
 
 - `helm lint charts/proxyharbor`
-- Helm smoke render
+- HA example smoke render: `helm template ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml`
 - `haruntimecheck`
 - `hacachecheck`
 - `hacorrect`

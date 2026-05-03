@@ -22,6 +22,6 @@ The verified HA shape is:
 
 Use `examples/multi-instance-values.yaml` only if you are intentionally exploring a different profile and can validate it separately; it is not the documented v0.5.4 release baseline.
 
-Helm CI should stay lightweight: `helm lint` plus a smoke render are enough. Runtime correctness and soak evidence belong to the formal HA runners described in [`docs/runbooks/ha-pressure.md`](../../docs/runbooks/ha-pressure.md), not to chart CI.
+Helm CI should stay lightweight: `helm lint` plus an HA example smoke render with `charts/proxyharbor/examples/dynamic-ha-values.yaml` are enough. Runtime correctness and soak evidence belong to the formal HA runners described in [`docs/runbooks/ha-pressure.md`](../../docs/runbooks/ha-pressure.md), not to chart CI.
 
 `storage: memory` remains available for dev, demo, and CI only. It is not durable and should not be used as a formal deployment profile.

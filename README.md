@@ -176,7 +176,7 @@ docker build --pull=false -t proxyharbor:ha-test .
 go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
 go run ./tools/hacorrect -docker -timeout 6m
 go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
-cd tools/hasdkcheck && go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
 ```
 
 这条路径只覆盖当前已经有正式 runner 支持的 HA correctness / runtime / cache / SDK 验证。压测、soak 记录格式和 `tools/hapressure` 命令位见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)；在正式 runner 合入前，不要把 ad-hoc 压测脚本写进发布说明或 README。
