@@ -167,6 +167,24 @@ docker compose -f docker-compose.ha.yaml up -d --build
 
 HA 模式需要显式 Secret，不自动生成默认密钥。
 
+### HA 本机验证路径（v0.5.4）
+
+需要重复验证 3 实例 + MySQL + Redis + LB 的本机 HA 拓扑时，使用 `docker-compose.ha-test.yaml` 和正式 runner，而不是临时脚本：
+
+```bash
+docker build --pull=false -t proxyharbor:ha-test .
+go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
+go run ./tools/hacorrect -docker -timeout 6m
+go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
+```
+
+`-docker-internal` 会把压测 worker 放进 compose 网络，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。压测、soak 记录格式见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)。
+
 ### 直接运行二进制
 
 ```bash

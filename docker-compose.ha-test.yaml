@@ -38,6 +38,8 @@ services:
       PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
+      PROXYHARBOR_MYSQL_MAX_OPEN: "32"
+      PROXYHARBOR_MYSQL_MAX_IDLE: "16"
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
@@ -72,6 +74,8 @@ services:
       PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
+      PROXYHARBOR_MYSQL_MAX_OPEN: "32"
+      PROXYHARBOR_MYSQL_MAX_IDLE: "16"
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
@@ -95,6 +99,8 @@ services:
       PROXYHARBOR_AUTO_SECRETS: "false"
       PROXYHARBOR_STORAGE: mysql
       PROXYHARBOR_MYSQL_DSN: proxyharbor:proxyharbor@tcp(mysql:3306)/proxyharbor?parseTime=true&loc=UTC
+      PROXYHARBOR_MYSQL_MAX_OPEN: "32"
+      PROXYHARBOR_MYSQL_MAX_IDLE: "16"
       PROXYHARBOR_REDIS_ADDR: redis:6379
       PROXYHARBOR_SELECTOR: zfair
       PROXYHARBOR_SELECTOR_REDIS_REQUIRED: "true"
