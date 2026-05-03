@@ -122,10 +122,11 @@ type operationReport struct {
 }
 
 type operationThresholdCheck struct {
-	TargetP95MS float64  `json:"target_p95_ms"`
-	TargetP99MS float64  `json:"target_p99_ms"`
-	Pass        bool     `json:"pass"`
-	Violations  []string `json:"violations,omitempty"`
+	TargetP95MS  float64  `json:"target_p95_ms"`
+	TargetP99MS  float64  `json:"target_p99_ms"`
+	MaxErrorRate float64  `json:"max_error_rate"`
+	Pass         bool     `json:"pass"`
+	Violations   []string `json:"violations,omitempty"`
 }
 
 type soakThresholdResult struct {
@@ -653,7 +654,7 @@ func (a *accumulator) Report(meta reportMeta) pressureReport {
 		report.Operations[name] = buildOperationReport(name, a.operations[name])
 	}
 	report.SoakThreshold = evaluateSoakThreshold(meta, report)
-	report.Passed = allOperationsPass(report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
+	report.Passed = report.Failure == 0 && allOperationsPass(report.Operations) && (meta.Mode != "soak" || report.SoakThreshold.Pass)
 	return report
 }
 
@@ -689,9 +690,10 @@ func evaluateOperationThreshold(name string, report operationReport) operationTh
 	}
 	target := targets[name]
 	check := operationThresholdCheck{
-		TargetP95MS: target.p95,
-		TargetP99MS: target.p99,
-		Pass:        report.Total > 0,
+		TargetP95MS:  target.p95,
+		TargetP99MS:  target.p99,
+		MaxErrorRate: 0,
+		Pass:         report.Total > 0,
 	}
 	if report.Total == 0 {
 		check.Pass = false
@@ -705,6 +707,10 @@ func evaluateOperationThreshold(name string, report operationReport) operationTh
 	if report.P99MS >= target.p99 {
 		check.Pass = false
 		check.Violations = append(check.Violations, fmt.Sprintf("p99 %.0fms >= %.0fms", report.P99MS, target.p99))
+	}
+	if report.ErrorRate > check.MaxErrorRate {
+		check.Pass = false
+		check.Violations = append(check.Violations, fmt.Sprintf("error rate %.4f > %.4f", report.ErrorRate, check.MaxErrorRate))
 	}
 	return check
 }

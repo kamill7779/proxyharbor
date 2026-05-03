@@ -42,6 +42,36 @@ func TestSummarizeOperationsComputesPercentilesAndErrorRate(t *testing.T) {
 	}
 }
 
+func TestReportFailsWhenOperationHasLowLatencyFailures(t *testing.T) {
+	acc := newAccumulator()
+	for _, result := range []operationResult{
+		{Operation: opValidate, Status: 200, Latency: 5 * time.Millisecond, Success: true},
+		{Operation: opValidate, Status: 401, Latency: 6 * time.Millisecond, Success: false},
+		{Operation: opLeaseCreate, Status: 201, Latency: 20 * time.Millisecond, Success: true},
+		{Operation: opLeaseRenew, Status: 200, Latency: 25 * time.Millisecond, Success: true},
+	} {
+		acc.Add(result)
+	}
+
+	report := acc.Report(reportMeta{
+		Mode:         "pressure",
+		Concurrency:  8,
+		SamplesPerOp: 1,
+		Elapsed:      75 * time.Millisecond,
+	})
+
+	validate := report.Operations[opValidate]
+	if validate.ErrorRate != 0.5 {
+		t.Fatalf("validate error rate = %v, want 0.5", validate.ErrorRate)
+	}
+	if validate.Threshold.Pass {
+		t.Fatalf("validate threshold pass = true, want false; threshold=%#v", validate.Threshold)
+	}
+	if report.Passed {
+		t.Fatalf("report passed = true, want false")
+	}
+}
+
 func TestReportEvaluatesV054Thresholds(t *testing.T) {
 	acc := newAccumulator()
 	for _, result := range []operationResult{
