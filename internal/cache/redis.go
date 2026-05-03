@@ -136,14 +136,15 @@ func (r *Redis) InvalidateCatalogLocal(ctx context.Context) error {
 }
 
 func (r *Redis) InvalidateLeaseLocal(ctx context.Context, tenantID, leaseID string) error {
+	r.leaseVer.Add(1)
 	if err := r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err(); err != nil {
 		return err
 	}
-	r.leaseVer.Add(1)
 	return nil
 }
 
 func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
+	r.leaseVer.Add(1)
 	var cursor uint64
 	for {
 		keys, next, err := r.client.Scan(ctx, cursor, "ph:lease:*", 100).Result()
@@ -157,7 +158,6 @@ func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
 		}
 		cursor = next
 		if cursor == 0 {
-			r.leaseVer.Add(1)
 			return nil
 		}
 	}

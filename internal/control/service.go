@@ -244,6 +244,7 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 			return cached, nil
 		}
 	}
+	leaseVerBefore := s.currentLeaseInvalidationVersion()
 	lease, err := s.store.GetLease(ctx, tenantID, leaseID)
 	if err != nil {
 		s.invalidateValidateTruth(tenantID, leaseID)
@@ -257,7 +258,11 @@ func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password
 		}
 		_ = s.cache.PutLease(ctx, lease, ttl)
 	}
-	s.stampValidateTruth(lease)
+	if leaseVerAfter := s.currentLeaseInvalidationVersion(); leaseVerBefore == leaseVerAfter {
+		s.stampValidateTruth(lease, leaseVerAfter)
+	} else {
+		s.invalidateValidateTruth(tenantID, leaseID)
+	}
 	if err := s.validateLeaseFields(lease, password, target); err != nil {
 		return domain.Lease{}, err
 	}
@@ -320,7 +325,7 @@ func (s *Service) hasFreshValidateTruth(lease domain.Lease) bool {
 	return entry.fingerprint == leaseFingerprint(lease)
 }
 
-func (s *Service) stampValidateTruth(lease domain.Lease) {
+func (s *Service) stampValidateTruth(lease domain.Lease, leaseVersion uint64) {
 	ttl := s.validateTruthTTL
 	if ttl <= 0 {
 		return
@@ -330,7 +335,7 @@ func (s *Service) stampValidateTruth(lease domain.Lease) {
 	entry := validateTruthEntry{
 		fingerprint:              leaseFingerprint(lease),
 		verifiedAt:               now,
-		leaseInvalidationVersion: s.currentLeaseInvalidationVersion(),
+		leaseInvalidationVersion: leaseVersion,
 	}
 	s.validateTruthMu.Lock()
 	defer s.validateTruthMu.Unlock()
@@ -654,6 +659,9 @@ func extractHost(target string) string {
 // hot-path traffic does not fan out into one DNS request per goroutine. Public
 // IP literals skip the resolver entirely.
 func (s *Service) isSafeHost(ctx context.Context, host string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if host == "" {
 		return false
 	}
@@ -682,10 +690,7 @@ func (s *Service) isSafeHost(ctx context.Context, host string) bool {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	lookupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ips, err := resolver.LookupIP(lookupCtx, "ip", host)
 	if err != nil || len(ips) == 0 {

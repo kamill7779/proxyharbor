@@ -83,6 +83,7 @@ type captureCache struct {
 	puts    atomic.Int64
 	invalid atomic.Int64
 	leaseVer atomic.Uint64
+	afterPut func()
 }
 
 func (c *captureCache) GetLease(_ context.Context, _ string, _ string) (domain.Lease, bool, error) {
@@ -98,6 +99,9 @@ func (c *captureCache) PutLease(_ context.Context, lease domain.Lease, _ time.Du
 	defer c.mu.Unlock()
 	c.lease = lease
 	c.hit = true
+	if c.afterPut != nil {
+		c.afterPut()
+	}
 	return nil
 }
 
@@ -229,6 +233,18 @@ func TestSafeTargetPublicIPSkipsResolver(t *testing.T) {
 	}
 	if got := resolver.calls.Load(); got != 0 {
 		t.Fatalf("public IP dialed resolver %d times, want 0", got)
+	}
+}
+
+func TestSafeTargetNilContextDoesNotPanic(t *testing.T) {
+	store := storage.NewMemoryStore()
+	svc := NewService(store, "http://gateway.local")
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
+
+	if !svc.safeTarget(nil, "https://example.com/resource") {
+		t.Fatal("safeTarget(nil, hostname) = false, want true")
 	}
 }
 
@@ -505,5 +521,45 @@ func TestValidateLeaseRemoteMutationVersionInvalidatesFreshTruth(t *testing.T) {
 	}
 	if got := counter.getLeaseCalls.Load(); got != 2 {
 		t.Fatalf("after remote mutation getLease=%d, want 2 because invalidation version must bypass stale truth", got)
+	}
+}
+
+func TestValidateLeaseDoesNotStampTruthAcrossVersionRace(t *testing.T) {
+	ctx := context.Background()
+	mem := storage.NewMemoryStore()
+	if _, err := mem.UpsertProxy(ctx, domain.Proxy{ID: "proxy-a", Endpoint: "http://proxy.local:8080", Healthy: true, Weight: 1}); err != nil {
+		t.Fatalf("UpsertProxy() error = %v", err)
+	}
+	counter := &countingStore{Store: mem}
+	cc := &captureCache{}
+	cc.afterPut = cc.bumpLeaseInvalidationVersion
+	svc := NewService(counter, "http://gateway.local")
+	svc.SetCache(cc, time.Minute)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	resolver := newStubResolver()
+	resolver.ips["example.com"] = []net.IP{net.ParseIP("1.1.1.1")}
+	svc.resolver = resolver
+
+	created, err := svc.CreateLease(ctx, domain.Principal{TenantID: "tenant-a"}, "idem-version-race", CreateLeaseRequest{
+		Subject:     domain.Subject{Type: "user", ID: "user-a"},
+		ResourceRef: domain.ResourceRef{Kind: "url", ID: "https://example.com/resource"},
+	})
+	if err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	if _, err := svc.ValidateLease(ctx, created.TenantID, created.ID, created.Password, "https://example.com/resource"); err != nil {
+		t.Fatalf("first ValidateLease error = %v", err)
+	}
+	if got := counter.getLeaseCalls.Load(); got != 1 {
+		t.Fatalf("after first validate getLease=%d, want 1", got)
+	}
+
+	if _, err := svc.ValidateLease(ctx, created.TenantID, created.ID, created.Password, "https://example.com/resource"); err != nil {
+		t.Fatalf("second ValidateLease error = %v", err)
+	}
+	if got := counter.getLeaseCalls.Load(); got != 2 {
+		t.Fatalf("after version race getLease=%d, want 2 because truth must not stamp across lease version change", got)
 	}
 }
