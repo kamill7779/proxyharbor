@@ -210,13 +210,7 @@ func runSDKHAHappyPath(ctx context.Context, admin, tenant *proxyharbor.Client, s
 	}
 
 	endpoint := "http://198.51.100.10:28080"
-	proxyID := "sdk-ha-flow-proxy-" + time.Now().UTC().Format("20060102150405.000000000")
-	added, err := admin.Proxies.Upsert(ctx, proxyharbor.ProxyDTO{
-		ID:       proxyID,
-		Endpoint: endpoint,
-		Healthy:  true,
-		Weight:   1,
-	})
+	added, err := admin.AddProxy(ctx, endpoint)
 	if err != nil {
 		return fmt.Errorf("sdk ha happy path add proxy: %w", err)
 	}

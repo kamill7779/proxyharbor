@@ -95,9 +95,20 @@ func TestRunSDKHAHappyPathLabelsFailingStep(t *testing.T) {
 					if proxy.Weight == 0 {
 						proxy.Weight = 1
 					}
-					if strings.HasPrefix(proxy.ID, "sdk-ha-flow-proxy-") {
-						addedProxyID = proxy.ID
+					_ = json.NewEncoder(w).Encode(proxy)
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/proxies":
+					var proxy proxyPayload
+					if err := json.NewDecoder(r.Body).Decode(&proxy); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
 					}
+					if proxy.ID == "" {
+						proxy.ID = "proxy-added"
+					}
+					if proxy.Weight == 0 {
+						proxy.Weight = 1
+					}
+					addedProxyID = proxy.ID
 					_ = json.NewEncoder(w).Encode(proxy)
 				case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/proxies/"):
 					w.WriteHeader(http.StatusOK)
@@ -181,9 +192,20 @@ func TestRunSDKHAHappyPathRequiresAddedProxyLease(t *testing.T) {
 			if proxy.Weight == 0 {
 				proxy.Weight = 1
 			}
-			if strings.HasPrefix(proxy.ID, "sdk-ha-flow-proxy-") {
-				addedProxyID = proxy.ID
+			_ = json.NewEncoder(w).Encode(proxy)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/proxies":
+			var proxy proxyPayload
+			if err := json.NewDecoder(r.Body).Decode(&proxy); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
+			if proxy.ID == "" {
+				proxy.ID = "proxy-added"
+			}
+			if proxy.Weight == 0 {
+				proxy.Weight = 1
+			}
+			addedProxyID = proxy.ID
 			_ = json.NewEncoder(w).Encode(proxy)
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/proxies/"):
 			w.WriteHeader(http.StatusOK)
@@ -247,7 +269,7 @@ func TestRunSDKHAHappyPathRequiresAddedProxyLease(t *testing.T) {
 func shouldFailHappyPathRequest(stage string, r *http.Request) bool {
 	switch stage {
 	case "add":
-		return r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/proxies/sdk-ha-flow-proxy-")
+		return r.Method == http.MethodPost && r.URL.Path == "/v1/proxies"
 	case "get":
 		return r.Method == http.MethodPost && r.URL.Path == "/v1/leases"
 	case "renew":
@@ -331,10 +353,6 @@ func (s *fakeHAServer) handle(w http.ResponseWriter, r *http.Request) {
 			proxy.Weight = 1
 		}
 		s.mu.Lock()
-		if _, exists := s.proxies[proxy.ID]; !exists && strings.HasPrefix(proxy.ID, "sdk-ha-flow-proxy-") {
-			s.proxyAdds++
-			s.lastAddedProxyID = proxy.ID
-		}
 		s.proxies[proxy.ID] = proxy
 		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(proxy)
