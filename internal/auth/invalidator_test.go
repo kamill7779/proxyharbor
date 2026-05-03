@@ -155,9 +155,10 @@ func TestSubscribeCacheInvalidationsAppliesAuthCatalogLease(t *testing.T) {
 }
 
 type memoryKeyStore struct {
-	mu      sync.RWMutex
-	version int64
-	rows    []TenantKeyRow
+	mu         sync.RWMutex
+	version    int64
+	versionErr error
+	rows       []TenantKeyRow
 }
 
 func (s *memoryKeyStore) GetTenantKeys(context.Context) ([]TenantKeyRow, error) {
@@ -173,6 +174,9 @@ func (s *memoryKeyStore) GetTenantKeysSince(context.Context, time.Time) ([]Tenan
 func (s *memoryKeyStore) GetTenantKeysVersion(context.Context) (int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.versionErr != nil {
+		return 0, s.versionErr
+	}
 	return s.version, nil
 }
 func (s *memoryKeyStore) IncrementTenantKeysVersion(context.Context) error {
