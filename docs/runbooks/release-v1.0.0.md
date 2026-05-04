@@ -33,6 +33,7 @@ go build ./cmd/proxyharbor
 docker build --pull=false -t proxyharbor:ha-test .
 helm lint charts/proxyharbor
 helm template ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml
+python -m pip install --user PyYAML
 python -c "import yaml; yaml.safe_load(open('api/openapi.yaml', encoding='utf-8')); print('openapi ok')"
 ```
 

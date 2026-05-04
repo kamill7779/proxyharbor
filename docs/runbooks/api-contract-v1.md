@@ -52,7 +52,7 @@ rg -n 'HandleFunc\("/healthz"|HandleFunc\("/readyz"|HandleFunc\("/version"|Handl
 Runtime smoke, with a local SQLite profile and a non-production admin key. PowerShell example:
 
 ```powershell
-mkdir -p .tmp
+New-Item -ItemType Directory -Force .tmp | Out-Null
 go run ./cmd/proxyharbor init -storage=sqlite -sqlite-path .tmp/proxyharbor-contract.db
 $env:PROXYHARBOR_ADMIN_KEY = "contract-admin-key-with-at-least-thirty-two-bytes"
 $env:PROXYHARBOR_KEY_PEPPER = "contract-key-pepper-with-at-least-thirty-two-bytes"
