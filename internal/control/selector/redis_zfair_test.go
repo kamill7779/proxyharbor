@@ -171,6 +171,27 @@ func TestRedisZFairLuaKeepsWeightedFairness(t *testing.T) {
 	}
 }
 
+func TestRedisZFairSkipsRedundantCandidateSyncWithinTTL(t *testing.T) {
+	server := miniredis.RunT(t)
+	sel := newTestRedisZFair(t, server)
+	candidates := make([]domain.Proxy, 10)
+	for i := range candidates {
+		candidates[i] = domain.Proxy{ID: fmt.Sprintf("proxy-%02d", i), Healthy: true, Weight: i + 1, HealthScore: 100}
+	}
+	if _, err := sel.Select(context.Background(), candidates, SelectOptions{}); err != nil {
+		t.Fatalf("initial Select() error = %v", err)
+	}
+	before := server.CommandCount()
+	for i := 0; i < 20; i++ {
+		if _, err := sel.Select(context.Background(), candidates, SelectOptions{}); err != nil {
+			t.Fatalf("Select() #%d error = %v", i, err)
+		}
+	}
+	if additional := server.CommandCount() - before; additional > 800 {
+		t.Fatalf("additional Redis command count = %d, want redundant candidate sync skipped", additional)
+	}
+}
+
 func newTestRedisZFair(t *testing.T, server *miniredis.Miniredis) *RedisZFair {
 	t.Helper()
 	sel, err := NewRedisZFair(context.Background(), RedisZFairConfig{Addr: server.Addr(), Quantum: 1000, DefaultLatencyMS: 200, MaxPromote: 128, MaxScan: 128})

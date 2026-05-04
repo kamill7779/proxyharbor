@@ -315,7 +315,7 @@ func (r runner) checkLeaseRevokeInvalidatesValidate(ctx context.Context) error {
 }
 
 func (r runner) validateLeaseAt(ctx context.Context, base string, lease leaseResponse, wantStatus int, wantError string) error {
-	path := "/v1/gateway/validate?tenant_id=" + url.QueryEscape(r.cfg.TenantID) + "&lease_id=" + url.QueryEscape(lease.LeaseID) + "&target=example.com"
+	path := "/v1/gateway/validate?tenant_id=" + url.QueryEscape(r.cfg.TenantID) + "&lease_id=" + url.QueryEscape(lease.LeaseID) + "&target=1.1.1.1"
 	status, body, err := r.validateRequestAt(ctx, base, path, lease.Password)
 	if err != nil {
 		return err
@@ -648,7 +648,7 @@ func metricValue(body, series string) (float64, bool) {
 }
 
 func (r runner) upsertProxy(ctx context.Context, id string, healthy bool) error {
-	payload := map[string]any{"id": id, "endpoint": "http://example.com:8080", "healthy": healthy, "weight": 1, "health_score": 100}
+	payload := map[string]any{"id": id, "endpoint": "http://1.1.1.1:8080", "healthy": healthy, "weight": 1, "health_score": 100}
 	status, body, err := r.request(ctx, http.MethodPost, "/v1/proxies", r.cfg.AdminKey, "", payload)
 	if err != nil {
 		return err
@@ -783,7 +783,7 @@ func createLeasePayload(idempotency string, ttlSeconds int64) map[string]any {
 	}
 	return map[string]any{
 		"subject":      map[string]any{"subject_type": "workload", "subject_id": idempotency},
-		"resource_ref": map[string]any{"kind": "url", "id": "https://example.com"},
+		"resource_ref": map[string]any{"kind": "url", "id": "https://1.1.1.1"},
 		"ttl_seconds":  ttlSeconds,
 	}
 }

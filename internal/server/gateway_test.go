@@ -83,7 +83,7 @@ func TestGatewayConnectClosesTunnelOnShutdownContext(t *testing.T) {
 	}
 	lease, err := svc.CreateLease(context.Background(), domain.Principal{TenantID: "default"}, "idem-connect-shutdown", control.CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "subj"},
-		ResourceRef: domain.ResourceRef{Kind: "host", ID: "example.com"},
+		ResourceRef: domain.ResourceRef{Kind: "host", ID: "1.1.1.1"},
 		TTLSeconds:  60,
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestGatewayConnectClosesTunnelOnShutdownContext(t *testing.T) {
 	}
 	defer clientConn.Close()
 	credentials := base64.StdEncoding.EncodeToString([]byte(lease.Username + ":" + lease.Password))
-	_, _ = fmt.Fprintf(clientConn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic %s\r\n\r\n", credentials)
+	_, _ = fmt.Fprintf(clientConn, "CONNECT 1.1.1.1:443 HTTP/1.1\r\nHost: 1.1.1.1:443\r\nProxy-Authorization: Basic %s\r\n\r\n", credentials)
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		t.Fatalf("ReadResponse() error = %v", err)
@@ -166,7 +166,7 @@ func TestGatewayConnectCancelsPendingHandshakeOnShutdownContext(t *testing.T) {
 	}
 	lease, err := svc.CreateLease(context.Background(), domain.Principal{TenantID: "default"}, "idem-connect-handshake-shutdown", control.CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "subj"},
-		ResourceRef: domain.ResourceRef{Kind: "host", ID: "example.com"},
+		ResourceRef: domain.ResourceRef{Kind: "host", ID: "1.1.1.1"},
 		TTLSeconds:  60,
 	})
 	if err != nil {
@@ -193,7 +193,7 @@ func TestGatewayConnectCancelsPendingHandshakeOnShutdownContext(t *testing.T) {
 	}
 	defer clientConn.Close()
 	credentials := base64.StdEncoding.EncodeToString([]byte(lease.Username + ":" + lease.Password))
-	_, _ = fmt.Fprintf(clientConn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic %s\r\n\r\n", credentials)
+	_, _ = fmt.Fprintf(clientConn, "CONNECT 1.1.1.1:443 HTTP/1.1\r\nHost: 1.1.1.1:443\r\nProxy-Authorization: Basic %s\r\n\r\n", credentials)
 
 	select {
 	case <-accepted:

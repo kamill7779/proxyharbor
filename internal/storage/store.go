@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
@@ -17,6 +19,11 @@ type IdempotencyScope struct {
 
 func (s IdempotencyScope) String() string {
 	return s.TenantID + "|" + s.StableSubjectID + "|" + s.ResourceRef + "|" + s.RequestKind + "|" + s.Key
+}
+
+func LeaseIDForIdempotency(scope IdempotencyScope) string {
+	sum := sha256.Sum256([]byte(scope.String()))
+	return "lease_" + hex.EncodeToString(sum[:12])
 }
 
 type Store interface {

@@ -465,7 +465,7 @@ func (r runner) createLease(ctx context.Context, tenantKey, idempotency string, 
 func (r runner) createLeaseAt(ctx context.Context, base, tenantKey, idempotency string, requirePassword bool) (leaseResponse, error) {
 	status, body, err := r.requestAt(ctx, base, http.MethodPost, "/v1/leases", tenantKey, idempotency, map[string]any{
 		"subject":      map[string]any{"subject_type": "workload", "subject_id": idempotency},
-		"resource_ref": map[string]any{"kind": "url", "id": "https://example.com"},
+		"resource_ref": map[string]any{"kind": "url", "id": "https://1.1.1.1"},
 		"ttl_seconds":  120,
 	})
 	if err != nil {

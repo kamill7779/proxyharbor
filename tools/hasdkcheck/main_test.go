@@ -154,7 +154,7 @@ func TestRunSDKHAHappyPathLabelsFailingStep(t *testing.T) {
 			tenant, err := proxyharbor.New(
 				proxyharbor.WithBaseURL(srv.URL),
 				proxyharbor.WithTenantKey("tenant-key"),
-				proxyharbor.WithDefaultTarget("https://example.com"),
+				proxyharbor.WithDefaultTarget("https://1.1.1.1"),
 				proxyharbor.WithTimeout(5*time.Second),
 				proxyharbor.WithRetry(proxyharbor.RetryConfig{MaxAttempts: 1, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond}),
 				proxyharbor.WithLeasePolicy(proxyharbor.LeasePolicy{AutoRenew: false, AutoReacquire: false}),
@@ -248,7 +248,7 @@ func TestRunSDKHAHappyPathRequiresAddedProxyLease(t *testing.T) {
 	tenant, err := proxyharbor.New(
 		proxyharbor.WithBaseURL(srv.URL),
 		proxyharbor.WithTenantKey("tenant-key"),
-		proxyharbor.WithDefaultTarget("https://example.com"),
+		proxyharbor.WithDefaultTarget("https://1.1.1.1"),
 		proxyharbor.WithTimeout(5*time.Second),
 		proxyharbor.WithRetry(proxyharbor.RetryConfig{MaxAttempts: 1, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond}),
 		proxyharbor.WithLeasePolicy(proxyharbor.LeasePolicy{AutoRenew: false, AutoReacquire: false}),

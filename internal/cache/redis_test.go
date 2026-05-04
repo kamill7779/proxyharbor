@@ -2,13 +2,29 @@ package cache
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/kamill7779/proxyharbor/internal/auth"
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
 	"github.com/redis/go-redis/v9"
 )
+
+type recordingInvalidator struct {
+	calls atomic.Int64
+	last  auth.InvalidationEvent
+}
+
+func (r *recordingInvalidator) Publish(_ context.Context, ev auth.InvalidationEvent) error {
+	r.calls.Add(1)
+	r.last = ev
+	return nil
+}
+
+func (r *recordingInvalidator) Close() error { return nil }
 
 func TestRedisLeaseCachePreservesPasswordHash(t *testing.T) {
 	server := miniredis.RunT(t)
@@ -97,14 +113,23 @@ func TestRedisInvalidatesLeaseAndPublishes(t *testing.T) {
 	if err := cache.PutLease(context.Background(), lease, time.Minute); err != nil {
 		t.Fatalf("PutLease() error = %v", err)
 	}
+	if err := cache.PutValidateTruth(context.Background(), lease.TenantID, lease.ID, "0|fingerprint", time.Minute); err != nil {
+		t.Fatalf("PutValidateTruth() error = %v", err)
+	}
 	if _, hit, err := cache.GetLease(context.Background(), lease.TenantID, lease.ID); err != nil || !hit {
 		t.Fatalf("GetLease() hit=%v err=%v", hit, err)
+	}
+	if _, hit, err := cache.GetValidateTruth(context.Background(), lease.TenantID, lease.ID); err != nil || !hit {
+		t.Fatalf("GetValidateTruth() hit=%v err=%v", hit, err)
 	}
 	if err := cache.InvalidateLease(context.Background(), lease.TenantID, lease.ID); err != nil {
 		t.Fatalf("InvalidateLease() error = %v", err)
 	}
 	if _, hit, err := cache.GetLease(context.Background(), lease.TenantID, lease.ID); err != nil || hit {
 		t.Fatalf("GetLease() after invalidate hit=%v err=%v", hit, err)
+	}
+	if _, hit, err := cache.GetValidateTruth(context.Background(), lease.TenantID, lease.ID); err != nil || hit {
+		t.Fatalf("GetValidateTruth() after invalidate hit=%v err=%v", hit, err)
 	}
 	received, err := sub.ReceiveTimeout(context.Background(), time.Second)
 	if err != nil {
@@ -133,6 +158,9 @@ func TestRedisLocalInvalidationHelpersDoNotPublish(t *testing.T) {
 	if err := cache.PutLease(context.Background(), lease, time.Minute); err != nil {
 		t.Fatalf("PutLease() error = %v", err)
 	}
+	if err := cache.PutValidateTruth(context.Background(), lease.TenantID, lease.ID, "0|fingerprint", time.Minute); err != nil {
+		t.Fatalf("PutValidateTruth() error = %v", err)
+	}
 	if err := cache.PutCatalog(context.Background(), domain.Catalog{Proxies: []domain.Proxy{{ID: "proxy-local"}}}, time.Minute); err != nil {
 		t.Fatalf("PutCatalog() error = %v", err)
 	}
@@ -148,8 +176,65 @@ func TestRedisLocalInvalidationHelpersDoNotPublish(t *testing.T) {
 	if _, hit, err := cache.GetLease(context.Background(), lease.TenantID, lease.ID); err != nil || hit {
 		t.Fatalf("GetLease() after local invalidate hit=%v err=%v", hit, err)
 	}
+	if _, hit, err := cache.GetValidateTruth(context.Background(), lease.TenantID, lease.ID); err != nil || hit {
+		t.Fatalf("GetValidateTruth() after local invalidate hit=%v err=%v", hit, err)
+	}
 	if msg, err := sub.ReceiveTimeout(context.Background(), 100*time.Millisecond); err == nil {
 		t.Fatalf("local helper published unexpected payload = %v", msg)
+	}
+}
+
+func TestRedisValidateTruthRoundTrip(t *testing.T) {
+	server := miniredis.RunT(t)
+	cache, err := NewRedis(context.Background(), server.Addr(), "", 0)
+	if err != nil {
+		t.Fatalf("NewRedis() error = %v", err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	if err := cache.PutValidateTruth(context.Background(), "tenant-a", "lease-1", "7|fingerprint", time.Minute); err != nil {
+		t.Fatalf("PutValidateTruth() error = %v", err)
+	}
+	got, hit, err := cache.GetValidateTruth(context.Background(), "tenant-a", "lease-1")
+	if err != nil {
+		t.Fatalf("GetValidateTruth() error = %v", err)
+	}
+	if !hit {
+		t.Fatal("GetValidateTruth() hit = false")
+	}
+	if got != "7|fingerprint" {
+		t.Fatalf("GetValidateTruth() = %q, want %q", got, "7|fingerprint")
+	}
+	if err := cache.InvalidateValidateTruth(context.Background(), "tenant-a", "lease-1"); err != nil {
+		t.Fatalf("InvalidateValidateTruth() error = %v", err)
+	}
+	if _, hit, err := cache.GetValidateTruth(context.Background(), "tenant-a", "lease-1"); err != nil || hit {
+		t.Fatalf("GetValidateTruth() after invalidate hit=%v err=%v", hit, err)
+	}
+}
+
+func TestRedisInvalidateLeasePublishesEvenWhenLocalDeleteFails(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	invalidator := &recordingInvalidator{}
+	cache := &Redis{client: client, invalidator: invalidator}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := cache.InvalidateLease(ctx, "tenant-a", "lease-1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("InvalidateLease() error = %v, want context.Canceled", err)
+	}
+	if got := invalidator.calls.Load(); got != 1 {
+		t.Fatalf("publish calls = %d, want 1 even when local delete fails", got)
+	}
+	if invalidator.last.Cache != auth.CacheLease || invalidator.last.Action != auth.ActionInvalidate {
+		t.Fatalf("published event = %+v, want lease invalidate", invalidator.last)
+	}
+	if got := cache.LeaseInvalidationVersion(); got != 1 {
+		t.Fatalf("lease invalidation version = %d, want 1", got)
 	}
 }
 

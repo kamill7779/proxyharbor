@@ -167,7 +167,7 @@ docker compose -f docker-compose.ha.yaml up -d --build
 
 HA 模式需要显式 Secret，不自动生成默认密钥。
 
-### HA 本机验证路径（v0.5.4）
+### HA 本机验证路径（v0.5.5）
 
 需要重复验证 3 实例 + MySQL + Redis + LB 的本机 HA 拓扑时，使用 `docker-compose.ha-test.yaml` 和正式 runner，而不是临时脚本：
 
@@ -184,6 +184,18 @@ go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak
 ```
 
 `-docker-internal` 会把压测 worker 放进 compose 网络，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。压测、soak 记录格式见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)。
+
+当前 HA 热路径在本机 Docker 拓扑（3 个 ProxyHarbor + MySQL + Redis + nginx，`-docker-internal`）下的实测规模：
+
+| 场景 | 结果 |
+| --- | --- |
+| `500` 并发、`10m` mixed soak | `1,805,539` 次控制面请求，约 `3.0k req/s`，错误率 `0.252%`，达到 `<0.5%` soak 门槛 |
+| 状态分布 | `200=1,200,818`，`201=600,165`，`409=2,121`，`500=52`，`504=2,383`，无 `502` |
+| 单操作规模感 | `gateway_validate` / `lease_create` / `lease_renew` 各约 `1.0k req/s` |
+| `500` 并发、`2m` mixed soak | `554,842` 次控制面请求，约 `4.6k req/s`，错误率 `0.139%`，无 `500/502` |
+| `lease_create` 500 并发 burst | `500/500` 成功，p50/p95/p99 = `256/318/322ms` |
+
+这些数字衡量的是租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐；启用连接复用后，实际代理转发流量可以远大于控制面请求量。
 
 ### 直接运行二进制
 

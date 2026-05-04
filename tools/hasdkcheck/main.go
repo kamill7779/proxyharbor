@@ -146,7 +146,7 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 	tenant, err := proxyharbor.New(
 		proxyharbor.WithBaseURL(baseURL),
 		proxyharbor.WithTenantKey(cfg.TenantKey),
-		proxyharbor.WithDefaultTarget("https://example.com"),
+		proxyharbor.WithDefaultTarget("https://1.1.1.1"),
 		proxyharbor.WithTimeout(20*time.Second),
 		proxyharbor.WithLeasePolicy(proxyharbor.LeasePolicy{AutoRenew: false, AutoReacquire: false}),
 	)

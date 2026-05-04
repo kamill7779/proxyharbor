@@ -65,7 +65,14 @@ func (s *MySQLStore) GetLeaseByIdempotency(ctx context.Context, scope Idempotenc
 		scope.String(),
 	).Scan(&leaseID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Lease{}, false, nil
+		lease, getErr := s.GetLease(ctx, scope.TenantID, LeaseIDForIdempotency(scope))
+		if getErr == nil {
+			return lease, true, nil
+		}
+		if errors.Is(getErr, domain.ErrNotFound) {
+			return domain.Lease{}, false, nil
+		}
+		return domain.Lease{}, false, getErr
 	}
 	if err != nil {
 		return domain.Lease{}, false, err
@@ -78,26 +85,14 @@ func (s *MySQLStore) GetLeaseByIdempotency(ctx context.Context, scope Idempotenc
 }
 
 func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, lease domain.Lease) (domain.Lease, error) {
+	if lease.ID == LeaseIDForIdempotency(scope) {
+		return s.createLeaseByPrimaryID(ctx, scope, lease)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Lease{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	// 幂等检查
-	var existing string
-	err = tx.QueryRowContext(ctx,
-		`SELECT lease_id FROM proxy_idempotency_keys WHERE idempotency_key = ?`,
-		scope.String(),
-	).Scan(&existing)
-	if err == nil {
-		// 已存在，回退到已有 lease
-		_ = tx.Commit()
-		return s.GetLease(ctx, scope.TenantID, existing)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return domain.Lease{}, err
-	}
 
 	subjectJSON, _ := json.Marshal(lease.Subject)
 	resourceJSON, _ := json.Marshal(lease.ResourceRef)
@@ -105,6 +100,18 @@ func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, le
 
 	// 任何情况下都不持久化明文密码，调用方必须先填好 PasswordHash。
 	lease.Password = ""
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO proxy_idempotency_keys (idempotency_key, tenant_id, stable_subject_id, resource_ref, request_kind, lease_id, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		scope.String(), scope.TenantID, scope.StableSubjectID, scope.ResourceRef, scope.RequestKind, lease.ID, time.Now().UTC(),
+	); err != nil {
+		if isMySQLDuplicateKey(err) {
+			_ = tx.Rollback()
+			return s.leaseByIdempotencyAfterConflict(ctx, scope)
+		}
+		return domain.Lease{}, err
+	}
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO proxy_leases (lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
@@ -118,18 +125,31 @@ func (s *MySQLStore) CreateLease(ctx context.Context, scope IdempotencyScope, le
 	); err != nil {
 		return domain.Lease{}, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO proxy_idempotency_keys (idempotency_key, tenant_id, stable_subject_id, resource_ref, request_kind, lease_id, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		scope.String(), scope.TenantID, scope.StableSubjectID, scope.ResourceRef, scope.RequestKind, lease.ID, time.Now().UTC(),
-	); err != nil {
-		if isMySQLDuplicateKey(err) {
-			_ = tx.Rollback()
-			return s.leaseByIdempotencyAfterConflict(ctx, scope)
-		}
+	if err := tx.Commit(); err != nil {
 		return domain.Lease{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	return lease, nil
+}
+
+func (s *MySQLStore) createLeaseByPrimaryID(ctx context.Context, scope IdempotencyScope, lease domain.Lease) (domain.Lease, error) {
+	subjectJSON, _ := json.Marshal(lease.Subject)
+	resourceJSON, _ := json.Marshal(lease.ResourceRef)
+	policyJSON, _ := json.Marshal(lease.PolicyRef)
+	lease.Password = ""
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxy_leases (lease_id, tenant_id, generation, subject_json, resource_ref_json, policy_ref_json,
+			gateway_url, username, password_hash, proxy_id, expires_at, renew_before, catalog_version,
+			candidate_set_id, revoked, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		lease.ID, lease.TenantID, lease.Generation, subjectJSON, resourceJSON, policyJSON,
+		lease.GatewayURL, lease.Username, lease.PasswordHash, lease.ProxyID,
+		lease.ExpiresAt.UTC(), lease.RenewBefore.UTC(), lease.CatalogVersion,
+		lease.CandidateSetID, lease.Revoked, lease.CreatedAt.UTC(), lease.UpdatedAt.UTC(),
+	); err != nil {
+		if isMySQLDuplicateKey(err) {
+			return s.GetLease(ctx, scope.TenantID, lease.ID)
+		}
 		return domain.Lease{}, err
 	}
 	return lease, nil
