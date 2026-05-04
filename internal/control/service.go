@@ -810,6 +810,9 @@ func (s *Service) clearDefaultPolicy() {
 }
 
 func (s *Service) listSelectableProxies(ctx context.Context) ([]domain.Proxy, error) {
+	if s.selectorMode != selector.NameLocal {
+		return s.store.ListSelectableProxies(ctx)
+	}
 	ttl := s.selectableProxyTTL
 	if ttl <= 0 {
 		return s.store.ListSelectableProxies(ctx)

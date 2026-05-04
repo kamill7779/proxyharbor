@@ -123,6 +123,7 @@ func (s *countingCreatePrereqStore) ListSelectableProxies(ctx context.Context) (
 
 type blockingCreatePrereqStore struct {
 	*storage.MemoryStore
+	mu             sync.Mutex
 	policyStarted  chan struct{}
 	policyRelease  chan struct{}
 	policyCalls    atomic.Int64
@@ -136,13 +137,15 @@ type blockingCreatePrereqStore struct {
 
 func (s *blockingCreatePrereqStore) GetPolicy(context.Context, string) (domain.Policy, error) {
 	s.policyCalls.Add(1)
+	s.mu.Lock()
+	policy := s.policySnapshot
+	s.mu.Unlock()
 	if s.policyStarted != nil {
 		select {
 		case s.policyStarted <- struct{}{}:
 		default:
 		}
 	}
-	policy := s.policySnapshot
 	if s.policyRelease != nil {
 		<-s.policyRelease
 	}
@@ -151,13 +154,15 @@ func (s *blockingCreatePrereqStore) GetPolicy(context.Context, string) (domain.P
 
 func (s *blockingCreatePrereqStore) ListSelectableProxies(context.Context) ([]domain.Proxy, error) {
 	s.proxiesCalls.Add(1)
+	s.mu.Lock()
+	proxies := append([]domain.Proxy(nil), s.proxiesSnapshot...)
+	s.mu.Unlock()
 	if s.proxiesStarted != nil {
 		select {
 		case s.proxiesStarted <- struct{}{}:
 		default:
 		}
 	}
-	proxies := append([]domain.Proxy(nil), s.proxiesSnapshot...)
 	if s.proxiesRelease != nil {
 		<-s.proxiesRelease
 	}
@@ -588,7 +593,9 @@ func TestDefaultPolicyForCreateDoesNotRepopulateStaleEntryAfterInvalidation(t *t
 	}
 
 	svc.clearDefaultPolicy()
+	store.mu.Lock()
 	store.policySnapshot = domain.Policy{ID: "default", Enabled: true, TTLSeconds: 600, Version: 2}
+	store.mu.Unlock()
 	close(store.policyRelease)
 
 	first := <-firstDone
@@ -641,7 +648,9 @@ func TestListSelectableProxiesDoesNotRepopulateStaleEntryAfterInvalidation(t *te
 	}
 
 	svc.clearSelectableProxies()
+	store.mu.Lock()
 	store.proxiesSnapshot = []domain.Proxy{{ID: "proxy-v2", Healthy: true, Weight: 1}}
+	store.mu.Unlock()
 	close(store.proxiesRelease)
 
 	first := <-firstDone
@@ -661,6 +670,42 @@ func TestListSelectableProxiesDoesNotRepopulateStaleEntryAfterInvalidation(t *te
 	}
 	if got := store.proxiesCalls.Load(); got != 2 {
 		t.Fatalf("ListSelectableProxies() calls = %d, want 2", got)
+	}
+}
+
+func TestListSelectableProxiesBypassesLocalTTLForDistributedSelector(t *testing.T) {
+	store := &blockingCreatePrereqStore{
+		MemoryStore: storage.NewMemoryStore(),
+		proxiesSnapshot: []domain.Proxy{
+			{ID: "proxy-v1", Healthy: true, Weight: 1},
+		},
+	}
+	svc := NewService(store, "http://gateway.local")
+	svc.SetSelector(failingSelector{err: domain.ErrNoHealthyProxy})
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	first, err := svc.listSelectableProxies(context.Background())
+	if err != nil {
+		t.Fatalf("first listSelectableProxies() error = %v", err)
+	}
+	if len(first) != 1 || first[0].ID != "proxy-v1" {
+		t.Fatalf("first proxies = %#v, want proxy-v1", first)
+	}
+
+	store.mu.Lock()
+	store.proxiesSnapshot = []domain.Proxy{{ID: "proxy-v2", Healthy: true, Weight: 1}}
+	store.mu.Unlock()
+
+	second, err := svc.listSelectableProxies(context.Background())
+	if err != nil {
+		t.Fatalf("second listSelectableProxies() error = %v", err)
+	}
+	if len(second) != 1 || second[0].ID != "proxy-v2" {
+		t.Fatalf("second proxies = %#v, want fresh proxy-v2 for distributed selector", second)
+	}
+	if got := store.proxiesCalls.Load(); got != 2 {
+		t.Fatalf("ListSelectableProxies() calls = %d, want 2 because distributed selectors bypass local TTL", got)
 	}
 }
 
