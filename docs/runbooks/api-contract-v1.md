@@ -1,17 +1,18 @@
 # ProxyHarbor v1.0 API Contract Audit Runbook
 
-This runbook tracks the v1.0 API and version contract audit. It is documentation-only: do not edit code, `api/openapi.yaml`, Helm metadata, release files, README files, GitHub templates, or `SECURITY.md` from this task.
+This runbook tracks the v1.0 API and version contract audit. The current release-hardening PR is allowed to update version metadata, release automation, and API contract metadata. `SECURITY.md` remains out of scope until the final release phase.
 
-## Current Pre-v1 Blockers
+## Current RC Contract State
 
-These are known blockers and must stay visible until a follow-up contract PR fixes and verifies them:
+The first v1 release-candidate contract is now explicit:
 
-- `internal/server/server.go` still sets `server.Version` to `0.5.3`.
-- `/version` still reports `stability=release-candidate`; v1.0 must explicitly decide and verify the final stability value.
-- `charts/proxyharbor/Chart.yaml` still has `version: 0.5.3` and `appVersion: 0.5.3`.
-- `api/openapi.yaml` still has `info.version: 0.4.6`.
+- `internal/server/server.go` defaults to `Version = "1.0.0-rc.1"` and `Stability = "release-candidate"`.
+- Release builds can override both values through Go `-ldflags`.
+- Docker builds accept `VERSION` and `STABILITY` build args and inject them into `/version`.
+- `charts/proxyharbor/Chart.yaml` reports `version: 1.0.0-rc.1` and `appVersion: 1.0.0-rc.1`.
+- `api/openapi.yaml` reports `info.version: 1.0.0-rc.1` and `x-stability: release-candidate`.
 
-Do not claim v1.0 API/version readiness while any of these blockers remain.
+Do not claim final v1.0 API/version readiness until the final release commit promotes these values to `1.0.0` and `stable`.
 
 ## API Surfaces To Audit Before v1.0
 
@@ -28,19 +29,27 @@ Check implementation, OpenAPI coverage, auth behavior, status codes, and error r
 
 ## Follow-up Contract PR Verification
 
-Run these from the repository root in the follow-up PR that actually changes version/API metadata.
+Run these from the repository root after any version/API metadata change.
 
-Static version alignment:
+Static RC version alignment:
 
 ```bash
-rg -n 'Version = "1\.0\.0"|version: 1\.0\.0|appVersion: 1\.0\.0|version: 1\.0\.0' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml
-if rg -n 'Version = "0\.5\.3"|version: 0\.5\.3|appVersion: 0\.5\.3|version: 0\.4\.6|release-candidate' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml .github/workflows/release.yaml; then
-  echo "stale version/API blocker found"
+rg -n '1\.0\.0-rc\.1|release-candidate' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml .github/workflows/release.yaml Dockerfile
+```
+
+Expected RC result: the command shows intentional RC metadata in server, chart, OpenAPI, Dockerfile defaults, and release workflow defaults.
+
+Static final version alignment:
+
+```bash
+rg -n 'Version\s*=\s*"1\.0\.0"|Stability\s*=\s*"stable"|version: 1\.0\.0|appVersion: 1\.0\.0|x-stability: stable' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml
+if rg -n '1\.0\.0-rc\.1|release-candidate' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml; then
+  echo "final metadata still contains RC markers"
   exit 1
 fi
 ```
 
-Expected result after the contract PR: the first command shows the intentional v1.0.0 metadata; the second command has no stale blocker hits unless a documented exception is added in the same PR.
+Expected final result: the first command shows final metadata; the second command has no hits in core version contract files.
 
 OpenAPI and implementation surface check:
 
@@ -69,7 +78,7 @@ try {
 }
 ```
 
-Expected smoke result after the contract PR: `/version` returns the aligned v1.0.0 version and final stability value; admin-only routes reject invalid credentials with the documented error response shape.
+Expected smoke result after the RC contract PR: `/version` returns the aligned RC version and release-candidate stability value; admin-only routes reject invalid credentials with the documented error response shape.
 
 Regression suite:
 

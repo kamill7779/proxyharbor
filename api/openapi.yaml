@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: ProxyHarbor API
-  version: 0.4.6
+  version: 1.0.0-rc.1
   x-stability: release-candidate
-  description: ProxyHarbor v0.4.6 SQLite single-node release. Admin uses `ProxyHarbor-Key`
+  description: ProxyHarbor v1.0.0 release-candidate contract. Admin uses `ProxyHarbor-Key`
     header with the bootstrap admin key. To act on behalf of a tenant, Admin must
     also include the `X-On-Behalf-Of` header with the tenant ID. Tenant keys authenticate
     directly via `ProxyHarbor-Key` and must not attempt to impersonate another tenant.

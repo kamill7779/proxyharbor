@@ -1,15 +1,15 @@
-# 自动发版工作流
+# Release workflow
 #
-# 触发方式：
-#   1) 推送形如 v0.1.1 / v0.2.0 / v1.0.0 的 tag → 全流程发版
-#   2) 手动 workflow_dispatch + 输入版本号
+# Triggers:
+#   1) Push a semver tag such as v1.0.0-rc.1 or v1.0.0.
+#   2) Run workflow_dispatch with a version without the v prefix.
 #
-# 发布物：
-#   - GitHub Release（含 changelog 摘要）
-#   - 多平台容器镜像 ghcr.io/<owner>/proxyharbor:<version> + :latest
-#   - Helm chart 包（uploaded 到 release assets）
-#
-# 起始版本：v0.1.1
+# Artifacts:
+#   - GitHub Release with changelog summary.
+#   - Multi-arch GHCR image ghcr.io/<owner>/proxyharbor:<version>.
+#   - Stable releases also update ghcr.io/<owner>/proxyharbor:latest.
+#   - Helm chart package.
+#   - Cross-platform proxyharbor binaries plus checksums.
 
 name: release
 
@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（不带 v 前缀，例如 0.1.1）"
+        description: "Version without v prefix, for example 1.0.0-rc.1"
         required: true
-        default: "0.1.1"
+        default: "1.0.0-rc.1"
 
 permissions:
   contents: write
@@ -38,30 +38,143 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      stability: ${{ steps.v.outputs.stability }}
     steps:
       - id: v
+        shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VER="${{ inputs.version }}"
+            VER="${VER#v}"
           else
             VER="${GITHUB_REF_NAME#v}"
           fi
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid semver release version: $VER" >&2
+            exit 1
+          fi
+          if [[ "$VER" == *-* ]]; then
+            PRERELEASE=true
+            STABILITY=release-candidate
+          else
+            PRERELEASE=false
+            STABILITY=stable
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
-          echo "解析到版本: ${VER}"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "stability=${STABILITY}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: ${VER} (${STABILITY})"
 
   test:
+    needs: [resolve-version]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+      STABILITY: ${{ needs.resolve-version.outputs.stability }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 ./...
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+      - name: Check source release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          stability = os.environ["STABILITY"]
+
+          server = pathlib.Path("internal/server/server.go").read_text(encoding="utf-8")
+          checks = {
+              "server.Version": rf'Version\s*=\s*"{re.escape(version)}"',
+              "server.Stability": rf'Stability\s*=\s*"{re.escape(stability)}"',
+          }
+          for name, pattern in checks.items():
+              if not re.search(pattern, server):
+                  sys.exit(f"{name} is not aligned to {version}/{stability}")
+
+          def yaml_scalar(path, key):
+              for raw in pathlib.Path(path).read_text(encoding="utf-8-sig").splitlines():
+                  if raw.startswith(f"{key}:"):
+                      return raw.split(":", 1)[1].strip().strip('"')
+                  if raw.startswith(f"  {key}:"):
+                      return raw.split(":", 1)[1].strip().strip('"')
+              sys.exit(f"{path} missing {key}")
+
+          if yaml_scalar("charts/proxyharbor/Chart.yaml", "version") != version:
+              sys.exit("Chart.yaml version mismatch")
+          if yaml_scalar("charts/proxyharbor/Chart.yaml", "appVersion") != version:
+              sys.exit("Chart.yaml appVersion mismatch")
+          if yaml_scalar("api/openapi.yaml", "version") != version:
+              sys.exit("OpenAPI info.version mismatch")
+          if yaml_scalar("api/openapi.yaml", "x-stability") != stability:
+              sys.exit("OpenAPI x-stability mismatch")
+          print("release metadata ok")
+          PY
+      - name: Go checks
+        run: |
+          go vet ./...
+          go build -trimpath -ldflags="-s -w -X github.com/kamill7779/proxyharbor/internal/server.Version=${VERSION} -X github.com/kamill7779/proxyharbor/internal/server.Stability=${STABILITY}" ./cmd/proxyharbor
+          go test -race -count=1 ./...
+      - name: Helm checks
+        run: |
+          helm lint charts/proxyharbor
+          helm template ph charts/proxyharbor -f charts/proxyharbor/examples/dynamic-ha-values.yaml > /tmp/proxyharbor-render.yaml
+          test -s /tmp/proxyharbor-render.yaml
+      - name: OpenAPI parse
+        run: |
+          python -m pip install --user PyYAML
+          python - <<'PY'
+          import yaml
+          with open("api/openapi.yaml", encoding="utf-8") as fh:
+              yaml.safe_load(fh)
+          print("openapi ok")
+          PY
+
+  ha-runtime:
+    needs: [resolve-version, test]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+      STABILITY: ${{ needs.resolve-version.outputs.stability }}
+      PROXYHARBOR_ADMIN_KEY: admin-key-with-at-least-thirty-two-bytes-release
+      PROXYHARBOR_KEY_PEPPER: pepper-with-at-least-thirty-two-bytes-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build HA runtime image
+        run: |
+          docker build --pull=false -t proxyharbor:ha-test \
+            --build-arg VERSION="${VERSION}" \
+            --build-arg STABILITY="${STABILITY}" \
+            .
+      - name: Runtime HA correctness
+        run: go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
+      - name: HA cache invalidation correctness
+        run: go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
+      - name: HA write correctness
+        run: go run ./tools/hacorrect -docker -timeout 6m
+      - name: HA Go SDK correctness
+        working-directory: tools/hasdkcheck
+        run: go run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
 
   docker:
-    needs: [resolve-version, test]
+    needs: [resolve-version, ha-runtime]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,15 +186,25 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push multi-arch image
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.resolve-version.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.resolve-version.outputs.prerelease == 'false' }}
+      - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.resolve-version.outputs.version }}
+            STABILITY=${{ needs.resolve-version.outputs.stability }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -93,11 +216,6 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.15.0
-      - name: Sync chart version
-        run: |
-          VER="${{ needs.resolve-version.outputs.version }}"
-          sed -i "s/^version: .*/version: ${VER}/" charts/proxyharbor/Chart.yaml
-          sed -i "s/^appVersion: .*/appVersion: ${VER}/" charts/proxyharbor/Chart.yaml
       - name: Package chart
         run: |
           mkdir -p dist
@@ -107,8 +225,52 @@ jobs:
           name: helm-chart
           path: dist/*.tgz
 
+  binaries:
+    needs: [resolve-version, test]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+      STABILITY: ${{ needs.resolve-version.outputs.stability }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build binary archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          LDFLAGS="-s -w -X github.com/kamill7779/proxyharbor/internal/server.Version=${VERSION} -X github.com/kamill7779/proxyharbor/internal/server.Stability=${STABILITY}"
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+          )
+          for target in "${targets[@]}"; do
+            read -r goos goarch <<< "$target"
+            name="proxyharbor_${VERSION}_${goos}_${goarch}"
+            work="dist/${name}"
+            mkdir -p "$work"
+            bin="${work}/proxyharbor"
+            if [ "$goos" = "windows" ]; then
+              bin="${bin}.exe"
+            fi
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags="$LDFLAGS" -o "$bin" ./cmd/proxyharbor
+            cp README.md README.en.md LICENSE "$work/"
+            tar -C dist -czf "dist/${name}.tar.gz" "$name"
+            rm -rf "$work"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/*.tar.gz
+
   release:
-    needs: [resolve-version, docker, helm]
+    needs: [resolve-version, docker, helm, binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -116,8 +278,13 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: helm-chart
           path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
       - name: Generate changelog
         id: cl
         run: |
@@ -135,5 +302,6 @@ jobs:
           tag_name: ${{ needs.resolve-version.outputs.tag }}
           name: ProxyHarbor ${{ needs.resolve-version.outputs.tag }}
           body_path: /tmp/cl.md
-          files: dist/*.tgz
+          files: dist/*
+          prerelease: ${{ needs.resolve-version.outputs.prerelease == 'true' }}
           generate_release_notes: false

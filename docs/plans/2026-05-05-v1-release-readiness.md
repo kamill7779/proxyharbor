@@ -8,6 +8,8 @@
 
 **Tech Stack:** Go 1.23, Docker / Docker Compose, Helm, GitHub Actions, OpenAPI 3.1, GitHub issue forms.
 
+**Scope update:** This PR was expanded from documentation/community readiness into release hardening. The expansion is limited to version metadata, release workflow gates, artifact packaging, and checksums. It still does not change product behavior, storage semantics, selector behavior, or HA hot-path algorithms.
+
 ---
 
 ## Scope Boundaries
@@ -18,7 +20,8 @@
 - Align release documentation around the current v0.5.5 HA evidence and v1.0.0 readiness path.
 - Add a v1.0.0 release checklist and release runbook.
 - Audit and update documentation references that still describe v0.4.x or v0.5.4 as the current release baseline.
-- Identify version/API metadata gaps that must be fixed before v1.0.0.
+- Align the first release-candidate metadata across `/version`, Helm, OpenAPI, Docker, and release automation.
+- Harden release workflow gates and artifacts.
 - Keep changes documentation-first and reviewable.
 
 ### Out of Scope
@@ -31,9 +34,8 @@
 
 ## Release-Critical Findings To Carry Forward
 
-- `internal/server/server.go` still reports `Version = "0.5.3"` and `/version` returns `stability=release-candidate`.
-- `charts/proxyharbor/Chart.yaml` still has `version: 0.5.3` and `appVersion: 0.5.3`.
-- `api/openapi.yaml` still has `info.version: 0.4.6`.
+- Release metadata now targets the first RC: `1.0.0-rc.1` / `release-candidate`.
+- Final `v1.0.0` still requires a follow-up metadata promotion to `1.0.0` / `stable`.
 - `docs/versions/v0.5.5.md` records that the final HA soak availability gate is met, but strict per-operation p95/p99 latency gates are not fully met.
 - `docs/deployment/distributed/README.md`, `docs/runbooks/ha-pressure.md`, and `charts/proxyharbor/README.md` still contain v0.5.4 release-baseline wording.
 - GitHub community health still needs issue templates, PR template, and a fuller `CONTRIBUTING.md`; `CODE_OF_CONDUCT.md` already exists on `origin/main`.
@@ -138,30 +140,37 @@ git diff --check
 
 **Files:**
 
-- Inspect: `internal/server/server.go`
-- Inspect: `charts/proxyharbor/Chart.yaml`
-- Inspect: `api/openapi.yaml`
+- Modify: `internal/server/server.go`
+- Modify: `charts/proxyharbor/Chart.yaml`
+- Modify: `api/openapi.yaml`
+- Modify: `Dockerfile`
+- Modify: `.github/workflows/release.yaml`
 - Inspect: `cmd/proxyharbor/main.go`
-- Update documentation references only in this PR unless approved.
 
 **Design:**
 
 - Produce a short release-blocker checklist in `docs/versions/v1.0.0.md` or `docs/runbooks/release-v1.0.0.md`.
-- Do not silently bump code version in a docs-only PR unless explicitly approved.
-- The required follow-up code/API PR must align:
+- Align the first release-candidate metadata:
   - `/version`
   - `server.Version`
+  - `server.Stability`
   - Helm `version` and `appVersion`
   - OpenAPI `info.version`
+  - OpenAPI `x-stability`
+  - Docker build args / ldflags
   - release workflow tag/changelog behavior.
+- Do not update `latest` for RC image tags.
+- Attach Helm, binary, and checksum release assets.
+- Leave final `1.0.0` / `stable` promotion to the final release phase after RC evidence is reviewed.
 
 **Verification:**
 
 ```bash
-rg -n 'Version = "0.5.3"|version: 0.5.3|appVersion: 0.5.3|version: 0.4.6|release-candidate' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml .github/workflows/release.yaml
+rg -n '1.0.0-rc.1|release-candidate' internal/server/server.go charts/proxyharbor/Chart.yaml api/openapi.yaml .github/workflows/release.yaml Dockerfile
+go test ./internal/server -run TestVersionEndpointUsesBuildMetadata -count=1
 ```
 
-Expected: the command may still find blockers after this PR; they must be documented as pre-v1.0 follow-up if not fixed here.
+Expected: the command shows intentional RC metadata. Final-release blocker docs must say that only `SECURITY.md`, RC validation, and final `stable` metadata promotion remain.
 
 ## Task 5: Final Review And PR Readiness
 
@@ -173,6 +182,7 @@ Expected: the command may still find blockers after this PR; they must be docume
 
 - No `SECURITY.md` in this PR.
 - No product behavior changes.
+- No HA algorithm changes.
 - No broad README restructuring.
 - No false claim that v1.0.0 is already released.
 - No false claim that all strict p95/p99 latency gates are met.
@@ -181,12 +191,17 @@ Expected: the command may still find blockers after this PR; they must be docume
 **Verification:**
 
 ```bash
-git diff --check
 go test ./...
 go vet ./...
+go build ./cmd/proxyharbor
+docker build --pull=false -t proxyharbor:ha-test --build-arg VERSION=1.0.0-rc.1 --build-arg STABILITY=release-candidate .
+docker run --rm -d -p 18082:8080 --name proxyharbor-version-smoke proxyharbor:ha-test
+curl -fsS http://127.0.0.1:18082/version
+docker stop proxyharbor-version-smoke
+git diff --check
 ```
 
-If only docs/templates changed, full HA soak is not required for this PR. The release runbook must still list the full matrix that a v1.0.0 release candidate must run.
+Full 500/10m HA soak is still not required for this release-hardening PR. It is required for the `v1.0.0-rc.1` evidence run before final promotion.
 
 ## `SECURITY.md` Final-Phase Design
 

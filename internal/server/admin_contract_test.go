@@ -60,6 +60,38 @@ func TestAdminOnlyRoutesReturnContractErrors(t *testing.T) {
 	}
 }
 
+func TestVersionEndpointUsesBuildMetadata(t *testing.T) {
+	oldVersion := Version
+	oldStability := Stability
+	Version = "9.9.9-test"
+	Stability = "test-stability"
+	t.Cleanup(func() {
+		Version = oldVersion
+		Stability = oldStability
+	})
+
+	handler := NewWithOptions(
+		control.NewService(storage.NewMemoryStore(), "http://localhost:8080"),
+		auth.NewDynamicKeys(nil).WithAdminKey("admin-key-with-at-least-thirty-two-bytes"),
+		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["version"] != Version || body["stability"] != Stability {
+		t.Fatalf("version body = %#v, want version=%q stability=%q", body, Version, Stability)
+	}
+}
+
 func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 	store := storage.NewMemoryStore()
 	svc := control.NewService(store, "http://localhost:8080")
