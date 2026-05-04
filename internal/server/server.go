@@ -22,7 +22,10 @@ import (
 	"github.com/kamill7779/proxyharbor/internal/storage"
 )
 
-const Version = "0.5.3"
+var (
+	Version   = "1.0.0-rc.1"
+	Stability = "release-candidate"
+)
 
 type gatewayValidationResponse struct {
 	ID             string             `json:"lease_id"`
@@ -408,7 +411,7 @@ func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	if !allow(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"version": Version, "stability": "release-candidate", "role": string(s.role)})
+	writeJSON(w, http.StatusOK, map[string]string{"version": Version, "stability": Stability, "role": string(s.role)})
 }
 
 func (s *Server) leases(w http.ResponseWriter, r *http.Request) {

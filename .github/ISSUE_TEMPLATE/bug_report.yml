@@ -1,0 +1,111 @@
+name: Bug 报告 / Bug Report
+description: 报告 ProxyHarbor 的错误行为 / Report incorrect ProxyHarbor behavior
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告问题。复现信息越具体，越容易定位和修复。
+
+        Thanks for reporting. Concrete reproduction details make issues much easier to fix.
+
+        安全漏洞、认证绕过、SSRF、secret 泄露或可利用细节请不要发到 public issue。
+        Do not post security vulnerabilities, auth bypasses, SSRF details, leaked secrets, or exploit details in public issues.
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 填 tag、commit SHA、Docker image digest 或 Helm chart 版本。
+      placeholder: "v0.5.5, commit ce0f948, proxyharbor@sha256:..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署模式 / Deployment mode
+      options:
+        - SQLite 单体 / SQLite single-node
+        - MySQL + Redis HA
+        - Docker Compose
+        - Helm / Kubernetes
+        - Go SDK
+        - 其他 / Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: affected-area
+    attributes:
+      label: 影响范围 / Affected area
+      options:
+        - label: Admin API / tenant keys
+        - label: Lease create / renew
+        - label: Gateway validate
+        - label: SQLite storage
+        - label: MySQL storage
+        - label: Redis cache / selector
+        - label: Go SDK
+        - label: Helm / Docker packaging
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述 / What happened?
+      description: 说明实际行为、期望行为，以及是否稳定复现。
+      placeholder: |
+        Actual:
+        Expected:
+        Reproducibility:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 贴出最小 curl、SDK 片段、docker compose 或 helm 命令。请打码 secret。
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 配置 / Configuration
+      description: 填 storage、selector、Redis/MySQL 是否启用、是否经过 nginx。请打码 key、DSN 密码和真实代理凭据。
+      placeholder: |
+        storage:
+        selector:
+        redis:
+        mysql:
+        nginx:
+        relevant env:
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: 贴 ProxyHarbor、nginx、MySQL、Redis 或 SDK 日志。请打码 token、tenant key、DSN 和真实代理 endpoint。
+      render: shell
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: 已尝试的验证 / Verification tried
+      description: 例如 `go test ./...`、haruntimecheck、hacorrect、hacachecheck、hasdkcheck、hapressure、singlebench。
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境 / Environment
+      description: 操作系统、Docker/Go/Helm/Kubernetes 版本，以及机器规格。
+      placeholder: |
+        OS:
+        Go:
+        Docker:
+        Helm/Kubernetes:
+        CPU/RAM:

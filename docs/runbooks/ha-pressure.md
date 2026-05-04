@@ -1,6 +1,6 @@
 # HA Pressure / Release Runbook
 
-This runbook defines the stable v0.5.4 HA release evidence path. It documents the repeatable local topology, the formal runners that are already part of the repository, and the exact fields that must appear in the release PR.
+This runbook defines the stable v0.5.5 HA evidence path for v1.0 readiness. It documents the repeatable local topology, the formal runners that are already part of the repository, and the exact fields that must appear in a release-readiness PR.
 
 ## Scope
 
@@ -49,7 +49,7 @@ Coverage summary:
 
 ## Pressure runner
 
-`tools/hapressure` is the formal v0.5.4 pressure / soak runner. Only record results produced by the checked-in runner under `tools/`.
+`tools/hapressure` is the formal v0.5.5 pressure / soak runner. Only record results produced by the checked-in runner under `tools/`.
 
 Use `-docker-internal` when validating the local HA compose topology. This runs the worker inside the compose network and avoids host port-publishing connection refusals on Docker Desktop / Windows / macOS.
 
@@ -62,9 +62,11 @@ go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pres
 go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
 ```
 
+Current evidence shows the `500` concurrency / `10m` mixed-soak availability gate is met and no sustained `502` cascade remains. Strict per-operation p95/p99 latency gates are still not fully met and should be recorded as a P1 performance follow-up, not hidden as release evidence. These runs measure control-plane lease and gateway-validation paths; they are not external proxy data-plane throughput benchmarks.
+
 ## PR evidence template
 
-Every v0.5.4 HA release PR should contain:
+Every v0.5.5 / v1.0-readiness HA release PR should contain:
 
 ```md
 ## HA pressure / release evidence
@@ -86,7 +88,8 @@ Every v0.5.4 HA release PR should contain:
 - lease create: p95= / p99=
 - lease renew: p95= / p99=
 - soak error rate:
-- Threshold met: yes / no
+- 500/10m availability gate met: yes / no
+- Strict p95/p99 latency gates met: yes / no
 - Notes / gaps:
 ```
 

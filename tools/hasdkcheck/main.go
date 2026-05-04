@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ type config struct {
 	Docker         bool
 	ComposeFile    string
 	Timeout        time.Duration
+	InstanceURLs   []string
 }
 
 type tenantKeyResponse struct {
@@ -61,6 +63,8 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.Docker, "docker", false, "start docker-compose HA test topology")
 	flag.StringVar(&cfg.ComposeFile, "compose-file", defaultComposeFile(), "compose file used with -docker")
 	flag.DurationVar(&cfg.Timeout, "timeout", 10*time.Minute, "overall timeout")
+	instanceURLs := envDefault("PROXYHARBOR_INSTANCE_URLS", "")
+	flag.StringVar(&instanceURLs, "instance-urls", instanceURLs, "comma-separated HA instance URLs used to wait for new tenant-key visibility")
 	flag.Parse()
 	if cfg.AdminKey == "" {
 		cfg.AdminKey = os.Getenv("PROXYHARBOR_ADMIN_KEY")
@@ -80,10 +84,25 @@ func parseFlags() config {
 	if cfg.DisableSamples < 100 {
 		cfg.DisableSamples = 100
 	}
+	if strings.TrimSpace(instanceURLs) == "" && cfg.Docker {
+		instanceURLs = "http://127.0.0.1:18083,http://127.0.0.1:18084,http://127.0.0.1:18085"
+	}
+	cfg.InstanceURLs = parseInstanceURLs(instanceURLs)
 	return cfg
 }
 
 func defaultComposeFile() string { return "docker-compose.ha-test.yaml" }
+
+func parseInstanceURLs(raw string) []string {
+	var out []string
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, strings.TrimRight(value, "/"))
+		}
+	}
+	return out
+}
 
 func projectRoot() string {
 	cwd, err := os.Getwd()
@@ -142,6 +161,9 @@ func run(ctx context.Context, cfg config, stdout io.Writer) error {
 			return err
 		}
 		cfg.TenantKey = key
+		if err := waitTenantKeyVisible(ctx, baseURL, cfg.InstanceURLs, cfg.TenantKey); err != nil {
+			return err
+		}
 	}
 	tenant, err := proxyharbor.New(
 		proxyharbor.WithBaseURL(baseURL),
@@ -377,6 +399,70 @@ func issueTenantKey(ctx context.Context, baseURL, adminKey, tenantID string) (st
 	return resp.Key, nil
 }
 
+func waitTenantKeyVisible(ctx context.Context, baseURL string, instances []string, tenantKey string) error {
+	if tenantKey == "" {
+		return nil
+	}
+	targets := instances
+	if len(targets) == 0 {
+		targets = []string{strings.TrimRight(baseURL, "/")}
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, base := range targets {
+		base := base
+		if err := retryUntil(ctx, 20*time.Second, func() error {
+			return tenantKeyAuthProbe(ctx, client, base, tenantKey)
+		}); err != nil {
+			return fmt.Errorf("tenant key not visible at %s: %w", base, err)
+		}
+	}
+	return nil
+}
+
+func tenantKeyAuthProbe(ctx context.Context, client *http.Client, baseURL, tenantKey string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/v1/catalog/latest", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("ProxyHarbor-Key", tenantKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	switch resp.StatusCode {
+	case http.StatusForbidden, http.StatusOK:
+		return nil
+	default:
+		return fmt.Errorf("tenant auth probe status %d: %s", resp.StatusCode, bodySummary(raw))
+	}
+}
+
+func retryUntil(ctx context.Context, timeout time.Duration, fn func() error) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if err := fn(); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if last == nil {
+		last = errors.New("condition not met")
+	}
+	return last
+}
+
 func jsonRequest(ctx context.Context, client *http.Client, method, url, key string, payload map[string]any) (int, []byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -434,7 +520,7 @@ func startDocker(ctx context.Context, cfg config) error {
 		return err
 	}
 	defer cleanup()
-	commands := [][]string{{"compose", "-f", composeFile, "down", "-v", "--remove-orphans"}, {"build", "--pull=false", "-t", "proxyharbor:ha-test", "."}, {"compose", "-f", composeFile, "up", "-d", "--no-build", "--remove-orphans"}}
+	commands := [][]string{{"compose", "-f", composeFile, "down", "-v", "--remove-orphans"}, {"build", "--pull=false", "-t", "proxyharbor:ha-test", "."}, {"compose", "-f", composeFile, "up", "-d", "--no-build", "--wait", "--remove-orphans"}}
 	for _, args := range commands {
 		args = addComposeEnvFile(args, envFile)
 		cmd := exec.CommandContext(ctx, "docker", args...)

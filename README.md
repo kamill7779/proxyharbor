@@ -14,13 +14,13 @@
 
 ---
 
-ProxyHarbor 是一个单 binary 的代理池控制面与网关。它提供全局 Provider / Proxy 管理、动态租户 Key、租约颁发、HTTP/HTTPS 网关校验与 SQLite 单体持久化能力。v0.4.x 的默认方向是 **single-first**：本地和小规模部署默认不需要 MySQL、Redis 或手工密钥配置；需要高可用时再切换到 MySQL + Redis。
+ProxyHarbor 是一个单 binary 的代理池控制面与网关。它提供代理库存管理、动态租户 Key、租约颁发、HTTP/HTTPS 网关校验和 SQLite 单体持久化。产品边界保持 **single-first**：本地和小规模部署默认不需要 MySQL、Redis 或手工密钥配置；需要高可用时再切换到 MySQL + Redis。
 
 ## 功能特性
 
 - **单体优先**：默认 `role=all`、`storage=sqlite`、`selector=local`，一个进程即可完成控制面与网关。
 - **零配置本地启动**：未提供 `PROXYHARBOR_ADMIN_KEY` / `PROXYHARBOR_KEY_PEPPER` 时自动生成并持久化到 `secrets.env`。
-- **全局代理库存**：Admin 管理 Provider / Proxy；租户只拿租约，不暴露代理 endpoint 列表。
+- **全局代理库存**：Admin 管理 Provider / Proxy；租户只拿租约，不读取代理 endpoint 列表。
 - **动态租户 Key**：Admin API 签发、撤销租户 Key；明文 Key 只在签发响应中返回一次。
 - **租约网关**：租约绑定 `resource_ref`，网关请求目标必须匹配租约资源。
 - **本地平滑加权轮询**：单体模式使用进程内 selector；HA 模式可使用 Redis-backed zfair。
@@ -90,7 +90,7 @@ go get github.com/kamill7779/proxyharbor/sdks/go/proxyharbor
 
 ### 5. 添加代理并直接使用
 
-下面是全 default 最短闭环：默认连接 `http://localhost:18080`，从 `data/secrets.env` 读取本地 Admin Key，用 SDK 添加一个代理，再直接获取可用于 HTTP client 的代理 URL。
+下面是全 default 最短闭环：默认连接 `http://localhost:18080`，从 `data/secrets.env` 读取本地 Admin Key，用 SDK 添加一个代理，再获取可用于 HTTP client 的代理 URL。把示例 endpoint 换成你的真实代理；这里使用 IP 字面量，避免文档示例被本机 DNS 污染影响。
 
 ```go
 package main
@@ -111,7 +111,7 @@ func main() {
         log.Fatal(err)
     }
 
-    if _, err := client.AddProxy(ctx, "http://proxy1.example.com:8080"); err != nil {
+    if _, err := client.AddProxy(ctx, "http://203.0.113.10:8080"); err != nil {
         log.Fatal(err)
     }
 
@@ -124,7 +124,7 @@ func main() {
 }
 ```
 
-> 本地测试回环地址或内网 IP 时，启动前设置 `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true`。
+> 本地测试回环地址或内网代理 endpoint 时，启动前设置 `PROXYHARBOR_ALLOW_INTERNAL_PROXY_ENDPOINT=true`。该开关只放开 proxy endpoint 注册，不放开租约 target 的 SSRF 校验。
 
 ### 6. 显式指定本地配置（可选）
 
@@ -167,35 +167,26 @@ docker compose -f docker-compose.ha.yaml up -d --build
 
 HA 模式需要显式 Secret，不自动生成默认密钥。
 
-### HA 本机验证路径（v0.5.5）
+### HA 本机验证路径
 
-需要重复验证 3 实例 + MySQL + Redis + LB 的本机 HA 拓扑时，使用 `docker-compose.ha-test.yaml` 和正式 runner，而不是临时脚本：
+需要重复验证 3 实例 + MySQL + Redis + LB 的本机 HA 拓扑时，使用正式 runner，而不是临时脚本。完整 release-candidate 矩阵见 [v1.0.0 release runbook](docs/runbooks/release-v1.0.0.md)；首页只保留核心入口：
 
 ```bash
 docker build --pull=false -t proxyharbor:ha-test .
 go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
-go run ./tools/hacorrect -docker -timeout 6m
-go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
-go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
-go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
-go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
-go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
 go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
 ```
 
-`-docker-internal` 会把压测 worker 放进 compose 网络，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。压测、soak 记录格式见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)。
+`-docker-internal` 会把压测 worker 放进 compose 网络，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。完整 HA 压测命令、压力分项和记录格式见 [HA 压测 runbook](docs/runbooks/ha-pressure.md)。
 
-当前 HA 热路径在本机 Docker 拓扑（3 个 ProxyHarbor + MySQL + Redis + nginx，`-docker-internal`）下的实测规模：
+当前 HA 热路径在本机 Docker 拓扑（3 个 ProxyHarbor + MySQL + Redis + nginx，`-docker-internal`）下的可用性证据：
 
 | 场景 | 结果 |
 | --- | --- |
 | `500` 并发、`10m` mixed soak | `1,805,539` 次控制面请求，约 `3.0k req/s`，错误率 `0.252%`，达到 `<0.5%` soak 门槛 |
 | 状态分布 | `200=1,200,818`，`201=600,165`，`409=2,121`，`500=52`，`504=2,383`，无 `502` |
-| 单操作规模感 | `gateway_validate` / `lease_create` / `lease_renew` 各约 `1.0k req/s` |
-| `500` 并发、`2m` mixed soak | `554,842` 次控制面请求，约 `4.6k req/s`，错误率 `0.139%`，无 `500/502` |
-| `lease_create` 500 并发 burst | `500/500` 成功，p50/p95/p99 = `256/318/322ms` |
 
-这些数字衡量的是租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐；启用连接复用后，实际代理转发流量可以远大于控制面请求量。
+这些数字只衡量租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐。当前 `500` 并发、`10m` mixed soak 可用性门槛已达成；严格的单操作 p95/p99 延迟门槛仍未完全达成，作为 P1 性能工作跟进。完整证据见 [v0.5.5 记录](docs/versions/v0.5.5.md) 和 [v1.0.0 readiness](docs/versions/v1.0.0.md)。
 
 ### 直接运行二进制
 
@@ -297,7 +288,7 @@ helm install proxyharbor charts/proxyharbor --set auth.existingSecret=proxyharbo
 
 ## 贡献指南
 
-Issues 和 PRs 都欢迎。单体能力优先保持轻量、可复制、可验证；HA 能力坚持显式 Secret 和云原生部署边界。
+Issues 和 PRs 都欢迎。提交前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)。单体能力优先保持轻量、可复制、可验证；HA 能力坚持显式 Secret 和云原生部署边界。
 
 ## 联系方式
 
