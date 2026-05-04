@@ -14,7 +14,7 @@
 
 ---
 
-ProxyHarbor is a single-binary proxy-pool control plane and gateway. It provides global Provider / Proxy management, dynamic tenant keys, lease issuance, HTTP/HTTPS gateway validation, and SQLite-backed single-node persistence. The v0.4.x direction is **single-first**: local and small deployments do not require MySQL, Redis, or hand-written secrets by default; switch to MySQL + Redis only when HA is needed.
+ProxyHarbor is a single-binary proxy-pool control plane and gateway. It provides global Provider / Proxy management, dynamic tenant keys, lease issuance, HTTP/HTTPS gateway validation, and SQLite-backed single-node persistence. The product boundary remains **single-first**: local and small deployments do not require MySQL, Redis, or hand-written secrets by default; switch to MySQL + Redis only when HA is needed.
 
 ## Features
 
@@ -166,6 +166,35 @@ docker compose -f docker-compose.ha.yaml up -d --build
 ```
 
 HA mode requires explicit secrets and does not auto-generate defaults.
+
+### Local HA verification path (v0.5.5)
+
+To repeatedly validate the local 3 instance + MySQL + Redis + LB HA topology, use `docker-compose.ha-test.yaml` and the formal runners instead of ad-hoc scripts:
+
+```bash
+docker build --pull=false -t proxyharbor:ha-test .
+go run ./tools/haruntimecheck -docker -docker-skip-build -timeout 8m
+go run ./tools/hacorrect -docker -timeout 6m
+go run ./tools/hacachecheck -docker -docker-skip-build -timeout 6m
+go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurrency 16 -timeout 8m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations gateway_validate -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_create -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
+go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
+```
+
+`-docker-internal` runs the pressure worker inside the compose network and avoids host port-publishing connection-refusal noise on Docker Desktop / Windows / macOS. See [HA pressure runbook](docs/runbooks/ha-pressure.md) for pressure and soak result formatting.
+
+Current HA hot-path evidence from the local Docker topology (3 ProxyHarbor instances + MySQL + Redis + nginx, `-docker-internal`):
+
+| Scenario | Result |
+| --- | --- |
+| `500` concurrency, `10m` mixed soak | `1,805,539` control-plane requests, about `3.0k req/s`, error rate `0.252%`, meeting the `<0.5%` soak gate |
+| Status distribution | `200=1,200,818`, `201=600,165`, `409=2,121`, `500=52`, `504=2,383`, no `502` |
+| `500` concurrency, `2m` mixed soak | `554,842` control-plane requests, about `4.6k req/s`, error rate `0.139%`, no `500/502` |
+| `lease_create` 500 concurrency burst | `500/500` succeeded, p50/p95/p99 = `256/318/322ms` |
+
+These numbers measure only control-plane hot paths such as lease creation, renewal, and gateway validation. They do not represent external proxy data-plane throughput. The `500` concurrency, `10m` mixed-soak availability gate is met; strict per-operation p95/p99 latency gates remain a v1.0 follow-up P1 performance item.
 
 ### Local binary
 

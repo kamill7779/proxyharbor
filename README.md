@@ -14,7 +14,7 @@
 
 ---
 
-ProxyHarbor 是一个单 binary 的代理池控制面与网关。它提供全局 Provider / Proxy 管理、动态租户 Key、租约颁发、HTTP/HTTPS 网关校验与 SQLite 单体持久化能力。v0.4.x 的默认方向是 **single-first**：本地和小规模部署默认不需要 MySQL、Redis 或手工密钥配置；需要高可用时再切换到 MySQL + Redis。
+ProxyHarbor 是一个单 binary 的代理池控制面与网关。它提供全局 Provider / Proxy 管理、动态租户 Key、租约颁发、HTTP/HTTPS 网关校验与 SQLite 单体持久化能力。产品边界保持 **single-first**：本地和小规模部署默认不需要 MySQL、Redis 或手工密钥配置；需要高可用时再切换到 MySQL + Redis。
 
 ## 功能特性
 
@@ -191,11 +191,10 @@ go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak
 | --- | --- |
 | `500` 并发、`10m` mixed soak | `1,805,539` 次控制面请求，约 `3.0k req/s`，错误率 `0.252%`，达到 `<0.5%` soak 门槛 |
 | 状态分布 | `200=1,200,818`，`201=600,165`，`409=2,121`，`500=52`，`504=2,383`，无 `502` |
-| 单操作规模感 | `gateway_validate` / `lease_create` / `lease_renew` 各约 `1.0k req/s` |
 | `500` 并发、`2m` mixed soak | `554,842` 次控制面请求，约 `4.6k req/s`，错误率 `0.139%`，无 `500/502` |
 | `lease_create` 500 并发 burst | `500/500` 成功，p50/p95/p99 = `256/318/322ms` |
 
-这些数字衡量的是租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐；启用连接复用后，实际代理转发流量可以远大于控制面请求量。
+这些数字只衡量租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐。当前 `500` 并发、`10m` mixed soak 可用性门槛已达成；严格的单操作 p95/p99 延迟门槛仍未完全达成，作为 v1.0 后续 P1 性能工作跟进。
 
 ### 直接运行二进制
 

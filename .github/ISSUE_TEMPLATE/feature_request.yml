@@ -1,0 +1,47 @@
+name: 功能请求 / Feature Request
+description: 建议一个 ProxyHarbor 新功能 / Suggest a ProxyHarbor feature
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题 / Problem
+      description: 说明当前缺口、使用场景，以及为什么现有能力不够。
+      placeholder: "When using ProxyHarbor for ..., I need ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望行为 / Proposed behavior
+      description: 描述你希望 ProxyHarbor 如何表现，包含 API、配置或 SDK 形态。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: 可能影响 / Possible impact
+      options:
+        - label: Public API compatibility
+        - label: Go SDK
+        - label: SQLite single-node mode
+        - label: MySQL + Redis HA mode
+        - label: Gateway behavior
+        - label: Helm / Docker deployment
+        - label: Documentation only
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案 / Alternatives considered
+      description: 现在有没有 workaround？为什么不够好？
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: 是否愿意提 PR / Willing to submit a PR?
+      options:
+        - label: 我想自己实现 / I would like to implement this myself

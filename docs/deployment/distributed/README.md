@@ -1,6 +1,6 @@
 # ProxyHarbor 分布式 / HA 部署与验证
 
-本文档只描述当前已经有正式 runner 支持、并适合作为 v0.5.4 发布收口依据的 HA 路径。它不是云厂商级 benchmark 指南，也不覆盖未验证的拓扑玩法。
+本文档只描述当前已经有正式 runner 支持、并适合作为 v0.5.5 evidence / v1.0 readiness 依据的 HA 路径。它不是云厂商级 benchmark 指南，也不覆盖未验证的拓扑玩法。
 
 ## 稳定边界
 
@@ -50,7 +50,7 @@ go -C tools/hasdkcheck run . -docker -samples 500 -disable-samples 100 -concurre
 
 ## Pressure / soak 记录口径
 
-v0.5.4 的性能记录必须使用正式 runner。不要提交一次性的压测脚本，也不要在 PR 描述里写“手工压了一下”。
+v0.5.5 / v1.0 readiness 的性能记录必须使用正式 runner。不要提交一次性的压测脚本，也不要在 PR 描述里写“手工压了一下”。
 
 本机 compose HA 压测使用 `tools/hapressure` 的 `-docker-internal` 模式。它会把 worker 放进 compose 网络内执行，避免 Docker Desktop / Windows / macOS 上宿主机端口映射的连接拒绝噪声。
 
@@ -60,6 +60,8 @@ go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pres
 go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode pressure -operations lease_renew -concurrency 500 -samples-per-op 500 -warmup-leases 500 -timeout 20m
 go run ./tools/hapressure -docker -docker-skip-build -docker-internal -mode soak -concurrency 500 -duration 10m -warmup-leases 500 -timeout 20m
 ```
+
+当前已验证的结论是：`500` 并发、`10m` mixed soak 可用性门槛已达成，且没有持续 `502` 级联；严格的单操作 p95/p99 延迟门槛仍未完全达成。这里的压测只覆盖租约创建、续租和网关校验等控制面热路径，不代表真实代理数据流吞吐。
 
 ## Helm HA 起步配置
 
@@ -87,7 +89,7 @@ helm install proxyharbor charts/proxyharbor \
 
 ## PR 描述模板
 
-把下面模板直接填进 v0.5.4 HA PR 描述：
+把下面模板直接填进 v0.5.5 / v1.0 readiness HA PR 描述：
 
 ```md
 ## HA pressure / release evidence
@@ -109,7 +111,8 @@ helm install proxyharbor charts/proxyharbor \
 - lease create: p95= / p99=
 - lease renew: p95= / p99=
 - soak error rate:
-- Threshold met: yes / no
+- 500/10m availability gate met: yes / no
+- Strict p95/p99 latency gates met: yes / no
 - Notes / gaps:
 ```
 
@@ -124,5 +127,5 @@ helm install proxyharbor charts/proxyharbor \
 - `hacorrect`
 - `hasdkcheck`
 
-不要把长时间 soak test 直接塞进 CI。详细路线仍以 [设计 / 分布式路线](../../design/distributed-roadmap.md) 和 [v0.5.4 计划](../../versions/v0.5.4.md) 为准。
+不要把长时间 soak test 直接塞进 CI。详细路线仍以 [设计 / 分布式路线](../../design/distributed-roadmap.md) 和 [v0.5.5 evidence](../../versions/v0.5.5.md) 为准。
 

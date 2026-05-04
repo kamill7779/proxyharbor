@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全敏感问题 / Security-sensitive issue
+    url: https://github.com/kamill7779/proxyharbor/issues/new?template=bug_report.yml
+    about: 请先提交不含 PoC、token、secret 或可利用细节的最小报告；正式 SECURITY.md 会在 v1.0 final phase 补齐。 / Open a minimal report without PoCs, tokens, secrets, or exploit details; SECURITY.md is deferred to the v1.0 final phase.
