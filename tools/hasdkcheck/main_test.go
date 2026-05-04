@@ -57,6 +57,44 @@ func TestRunIncludesSDKHAHappyPath(t *testing.T) {
 	}
 }
 
+func TestWaitTenantKeyVisibleRetriesUntilAuthenticated(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/catalog/latest" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("ProxyHarbor-Key") != "tenant-key" {
+			http.Error(w, "missing tenant key", http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+		if current < 3 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"auth_failed"}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := waitTenantKeyVisible(context.Background(), "http://unused.invalid", []string{srv.URL}, "tenant-key"); err != nil {
+		t.Fatalf("waitTenantKeyVisible: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Fatalf("auth probe attempts = %d, want 3", attempts)
+	}
+}
+
 func TestRunSDKHAHappyPathLabelsFailingStep(t *testing.T) {
 	t.Parallel()
 
