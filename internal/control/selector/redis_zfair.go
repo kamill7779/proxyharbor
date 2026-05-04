@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/kamill7779/proxyharbor/internal/shared/domain"
@@ -171,6 +175,10 @@ type RedisZFair struct {
 	defaultLatencyMS int64
 	maxPromote       int64
 	maxScan          int64
+	syncTTL          time.Duration
+	syncMu           sync.Mutex
+	lastSyncAt       time.Time
+	lastSyncSig      string
 }
 
 type zfairSelectionRequest struct {
@@ -212,7 +220,7 @@ func NewRedisZFair(ctx context.Context, cfg RedisZFairConfig) (*RedisZFair, erro
 	if cfg.MaxScan <= 0 {
 		cfg.MaxScan = 128
 	}
-	return &RedisZFair{client: client, now: time.Now, quantum: cfg.Quantum, defaultLatencyMS: cfg.DefaultLatencyMS, maxPromote: cfg.MaxPromote, maxScan: cfg.MaxScan}, nil
+	return &RedisZFair{client: client, now: time.Now, quantum: cfg.Quantum, defaultLatencyMS: cfg.DefaultLatencyMS, maxPromote: cfg.MaxPromote, maxScan: cfg.MaxScan, syncTTL: 100 * time.Millisecond}, nil
 }
 
 func (s *RedisZFair) Close() error { return s.client.Close() }
@@ -235,30 +243,7 @@ func (s *RedisZFair) Select(ctx context.Context, candidates []domain.Proxy, _ Se
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorNoEligible, "zfair_no_eligible_proxy", nil)
 	}
 
-	pipe := s.client.Pipeline()
-	for _, candidate := range candidates {
-		if _, ok := req.candidates[candidate.ID]; !ok {
-			continue
-		}
-		latencyMS := candidate.LatencyEWMAms
-		if latencyMS <= 0 {
-			latencyMS = int(s.defaultLatencyMS)
-		}
-		circuitOpenUntil := int64(0)
-		if !candidate.CircuitOpenUntil.IsZero() {
-			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
-		}
-		pipe.HSet(ctx, nodeKey(candidate.ID), map[string]any{
-			"proxy_id":           candidate.ID,
-			"weight":             candidate.Weight,
-			"health_score":       candidate.HealthScore,
-			"latency_ewma_ms":    latencyMS,
-			"circuit_open_until": circuitOpenUntil,
-		})
-		pipe.HSetNX(ctx, nodeKey(candidate.ID), "virtual_runtime", 0)
-		pipe.HSetNX(ctx, nodeKey(candidate.ID), "next_eligible_at", 0)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := s.syncCandidates(ctx, req.candidates); err != nil {
 		return domain.Proxy{}, noHealthy(domain.ErrorKindSelectorRedis, "redis_candidate_sync_failed", err)
 	}
 
@@ -324,6 +309,78 @@ func (s *RedisZFair) buildSelectionRequest(candidates []domain.Proxy) (zfairSele
 		args = append(args, proxyID)
 	}
 	return zfairSelectionRequest{candidates: eligibleByID, keys: []string{readyKey(), delayedKey(), nodePrefix()}, args: args}, nil
+}
+
+func (s *RedisZFair) syncCandidates(ctx context.Context, candidates map[string]domain.Proxy) error {
+	now := s.now()
+	signature := candidateSyncSignature(candidates, s.defaultLatencyMS)
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if s.syncTTL > 0 && signature == s.lastSyncSig && s.lastSyncAt.Add(s.syncTTL).After(now) {
+		return nil
+	}
+	if err := s.writeCandidateNodes(ctx, candidates); err != nil {
+		return err
+	}
+	s.lastSyncAt = now
+	s.lastSyncSig = signature
+	return nil
+}
+
+func (s *RedisZFair) writeCandidateNodes(ctx context.Context, candidates map[string]domain.Proxy) error {
+	pipe := s.client.Pipeline()
+	for _, candidate := range candidates {
+		latencyMS := candidate.LatencyEWMAms
+		if latencyMS <= 0 {
+			latencyMS = int(s.defaultLatencyMS)
+		}
+		circuitOpenUntil := int64(0)
+		if !candidate.CircuitOpenUntil.IsZero() {
+			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
+		}
+		pipe.HSet(ctx, nodeKey(candidate.ID), map[string]any{
+			"proxy_id":           candidate.ID,
+			"weight":             candidate.Weight,
+			"health_score":       candidate.HealthScore,
+			"latency_ewma_ms":    latencyMS,
+			"circuit_open_until": circuitOpenUntil,
+		})
+		pipe.HSetNX(ctx, nodeKey(candidate.ID), "virtual_runtime", 0)
+		pipe.HSetNX(ctx, nodeKey(candidate.ID), "next_eligible_at", 0)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func candidateSyncSignature(candidates map[string]domain.Proxy, defaultLatencyMS int64) string {
+	ids := make([]string, 0, len(candidates))
+	for id := range candidates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var b strings.Builder
+	for _, id := range ids {
+		candidate := candidates[id]
+		latencyMS := int64(candidate.LatencyEWMAms)
+		if latencyMS <= 0 {
+			latencyMS = defaultLatencyMS
+		}
+		circuitOpenUntil := int64(0)
+		if !candidate.CircuitOpenUntil.IsZero() {
+			circuitOpenUntil = candidate.CircuitOpenUntil.UTC().UnixMilli()
+		}
+		b.WriteString(id)
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(candidate.Weight))
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(candidate.HealthScore))
+		b.WriteByte('|')
+		b.WriteString(strconv.FormatInt(latencyMS, 10))
+		b.WriteByte('|')
+		b.WriteString(strconv.FormatInt(circuitOpenUntil, 10))
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 func parseSelectionResult(values []any, ok bool, candidates map[string]domain.Proxy) (domain.Proxy, error) {

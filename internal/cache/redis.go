@@ -64,6 +64,10 @@ func leaseKey(tenantID, leaseID string) string {
 	return "ph:lease:" + tenantID + ":" + leaseID
 }
 
+func validateTruthKey(tenantID, leaseID string) string {
+	return "ph:lease_truth:" + tenantID + ":" + leaseID
+}
+
 func catalogKey() string {
 	return "ph:catalog:global"
 }
@@ -97,12 +101,38 @@ func (r *Redis) PutLease(ctx context.Context, lease domain.Lease, ttl time.Durat
 	return r.client.Set(ctx, leaseKey(lease.TenantID, lease.ID), raw, ttl).Err()
 }
 
-func (r *Redis) InvalidateLease(ctx context.Context, tenantID, leaseID string) error {
-	if err := r.InvalidateLeaseLocal(ctx, tenantID, leaseID); err != nil {
-		return err
+func (r *Redis) GetValidateTruth(ctx context.Context, tenantID, leaseID string) (string, bool, error) {
+	raw, err := r.client.Get(ctx, validateTruthKey(tenantID, leaseID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
 	}
-	_ = r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheLease, Action: auth.ActionInvalidate, Reason: "lease_change"})
-	return nil
+	if err != nil {
+		return "", false, err
+	}
+	return raw, true, nil
+}
+
+func (r *Redis) PutValidateTruth(ctx context.Context, tenantID, leaseID, fingerprint string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil
+	}
+	return r.client.Set(ctx, validateTruthKey(tenantID, leaseID), fingerprint, ttl).Err()
+}
+
+func (r *Redis) InvalidateValidateTruth(ctx context.Context, tenantID, leaseID string) error {
+	return r.client.Del(ctx, validateTruthKey(tenantID, leaseID)).Err()
+}
+
+func (r *Redis) InvalidateLease(ctx context.Context, tenantID, leaseID string) error {
+	localErr := r.InvalidateLeaseLocal(ctx, tenantID, leaseID)
+	publishErr := r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheLease, Action: auth.ActionInvalidate, Reason: "lease_change"})
+	if localErr != nil && publishErr != nil {
+		return errors.Join(localErr, publishErr)
+	}
+	if localErr != nil {
+		return localErr
+	}
+	return publishErr
 }
 
 func (r *Redis) GetCatalog(ctx context.Context) (domain.Catalog, bool, error) {
@@ -137,7 +167,7 @@ func (r *Redis) InvalidateCatalogLocal(ctx context.Context) error {
 
 func (r *Redis) InvalidateLeaseLocal(ctx context.Context, tenantID, leaseID string) error {
 	r.leaseVer.Add(1)
-	if err := r.client.Del(ctx, leaseKey(tenantID, leaseID)).Err(); err != nil {
+	if err := r.client.Del(ctx, leaseKey(tenantID, leaseID), validateTruthKey(tenantID, leaseID)).Err(); err != nil {
 		return err
 	}
 	return nil
@@ -145,9 +175,26 @@ func (r *Redis) InvalidateLeaseLocal(ctx context.Context, tenantID, leaseID stri
 
 func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
 	r.leaseVer.Add(1)
+	for _, pattern := range []string{"ph:lease:*", "ph:lease_truth:*"} {
+		if err := r.deleteByPattern(ctx, pattern); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Redis) InvalidateCatalog(ctx context.Context) error {
+	if err := r.InvalidateCatalogLocal(ctx); err != nil {
+		return err
+	}
+	_ = r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheCatalog, Action: auth.ActionInvalidate, Reason: "catalog_change"})
+	return nil
+}
+
+func (r *Redis) deleteByPattern(ctx context.Context, pattern string) error {
 	var cursor uint64
 	for {
-		keys, next, err := r.client.Scan(ctx, cursor, "ph:lease:*", 100).Result()
+		keys, next, err := r.client.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
 			return err
 		}
@@ -161,12 +208,4 @@ func (r *Redis) InvalidateAllLeases(ctx context.Context) error {
 			return nil
 		}
 	}
-}
-
-func (r *Redis) InvalidateCatalog(ctx context.Context) error {
-	if err := r.InvalidateCatalogLocal(ctx); err != nil {
-		return err
-	}
-	_ = r.invalidator.Publish(ctx, auth.InvalidationEvent{Cache: auth.CacheCatalog, Action: auth.ActionInvalidate, Reason: "catalog_change"})
-	return nil
 }

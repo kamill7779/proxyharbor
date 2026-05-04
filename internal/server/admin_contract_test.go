@@ -68,7 +68,7 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 	}
 	lease, err := svc.CreateLease(context.Background(), domain.Principal{TenantID: "default"}, "idem-gateway-validate", control.CreateLeaseRequest{
 		Subject:     domain.Subject{Type: "user", ID: "subj"},
-		ResourceRef: domain.ResourceRef{Kind: "host", ID: "example.com"},
+		ResourceRef: domain.ResourceRef{Kind: "host", ID: "1.1.1.1"},
 		TTLSeconds:  60,
 	})
 	if err != nil {
@@ -80,7 +80,7 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 		Options{AdminStore: NewMemoryAdminStore(), Pepper: "pepper-with-at-least-thirty-two-bytes"},
 	)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&target=example.com", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&target=1.1.1.1", nil)
 	req.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
 	req.Header.Set("ProxyHarbor-Password", lease.Password)
 	rr := httptest.NewRecorder()
@@ -99,7 +99,7 @@ func TestGatewayValidateResponseOmitsLeasePassword(t *testing.T) {
 		t.Fatalf("gateway validate body = %#v", body)
 	}
 
-	queryReq := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&password="+lease.Password+"&target=example.com", nil)
+	queryReq := httptest.NewRequest(http.MethodGet, "/v1/gateway/validate?tenant_id=default&lease_id="+lease.ID+"&password="+lease.Password+"&target=1.1.1.1", nil)
 	queryReq.Header.Set(auth.HeaderName, "admin-key-with-at-least-thirty-two-bytes")
 	queryRR := httptest.NewRecorder()
 	handler.ServeHTTP(queryRR, queryReq)

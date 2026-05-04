@@ -29,7 +29,7 @@ const (
 	opLeaseCreate = "lease_create"
 	opLeaseRenew  = "lease_renew"
 
-	defaultTarget         = "https://example.com"
+	defaultTarget         = "https://1.1.1.1"
 	seedProxyCount        = 10
 	requiredSoakCountHint = 500
 )
@@ -152,24 +152,24 @@ type soakThresholdResult struct {
 }
 
 type operationAccumulator struct {
-	Total    int
-	Success  int
-	Failure  int
-	Statuses map[int]int
-	Latency  []float64
+	Total        int
+	Success      int
+	Failure      int
+	Statuses     map[int]int
+	Latency      []float64
 	ErrorKinds   map[string]int
 	ErrorSamples []string
 }
 
 type accumulator struct {
-	mu         sync.Mutex
-	total      int
-	success    int
-	failure    int
-	statuses   map[int]int
-	errorKinds map[string]int
+	mu           sync.Mutex
+	total        int
+	success      int
+	failure      int
+	statuses     map[int]int
+	errorKinds   map[string]int
 	errorSamples []string
-	operations map[string]*operationAccumulator
+	operations   map[string]*operationAccumulator
 }
 
 func main() {
@@ -635,7 +635,7 @@ func (r *runner) uniqueKey(prefix string, worker, sequence int) string {
 
 func newAccumulator() *accumulator {
 	return &accumulator{
-		statuses: map[int]int{},
+		statuses:   map[int]int{},
 		errorKinds: map[string]int{},
 		operations: map[string]*operationAccumulator{
 			opValidate:    {Statuses: map[int]int{}, ErrorKinds: map[string]int{}},
@@ -944,7 +944,7 @@ func runDockerInternal(ctx context.Context, cfg config, stdout io.Writer) error 
 		"-timeout", cfg.Timeout.String(),
 	}
 	if cfg.TenantKey != "" {
-		args = append(args, "-e", "PROXYHARBOR_TENANT_KEY="+cfg.TenantKey)
+		args = append(args, "-tenant-key", cfg.TenantKey)
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = projectRoot()

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,9 @@ import (
 const (
 	hostSafetyCacheTTL    = 15 * time.Second
 	hostSafetyCacheMax    = 4096
+	defaultPolicyTTL      = 50 * time.Millisecond
+	selectableProxyTTL    = 50 * time.Millisecond
+	selectorTimeout       = 75 * time.Millisecond
 	validateTruthCacheTTL = 250 * time.Millisecond
 	validateTruthCacheMax = 8192
 )
@@ -34,14 +38,40 @@ type hostSafetyEntry struct {
 }
 
 type hostSafetyCall struct {
-	safe bool
-	done chan struct{}
+	safe  bool
+	retry bool
+	done  chan struct{}
 }
 
 type validateTruthEntry struct {
-	fingerprint               string
-	verifiedAt                time.Time
-	leaseInvalidationVersion  uint64
+	fingerprint              string
+	lease                    domain.Lease
+	verifiedAt               time.Time
+	leaseInvalidationVersion uint64
+}
+
+type policyEntry struct {
+	policy    domain.Policy
+	expiresAt time.Time
+}
+
+type policyCall struct {
+	policy domain.Policy
+	err    error
+	done   chan struct{}
+	epoch  uint64
+}
+
+type selectableProxyEntry struct {
+	proxies   []domain.Proxy
+	expiresAt time.Time
+}
+
+type selectableProxyCall struct {
+	proxies []domain.Proxy
+	err     error
+	done    chan struct{}
+	epoch   uint64
 }
 
 type ipResolver interface {
@@ -50,6 +80,12 @@ type ipResolver interface {
 
 type leaseInvalidationVersioner interface {
 	LeaseInvalidationVersion() uint64
+}
+
+type validateTruthCache interface {
+	GetValidateTruth(ctx context.Context, tenantID, leaseID string) (string, bool, error)
+	PutValidateTruth(ctx context.Context, tenantID, leaseID, fingerprint string, ttl time.Duration) error
+	InvalidateValidateTruth(ctx context.Context, tenantID, leaseID string) error
 }
 
 type Service struct {
@@ -61,32 +97,49 @@ type Service struct {
 	allowInternalProxyEndpoint bool
 	resolver                   ipResolver
 	selector                   selector.ProxySelector
+	localSelector              *selector.Local
 	selectorMode               string
+	selectorTimeout            time.Duration
 	logger                     *slog.Logger
 	hostSafetyMu               sync.RWMutex
 	hostSafety                 map[string]hostSafetyEntry
 	hostSafetyCalls            map[string]*hostSafetyCall
 	hostSafetyTTL              time.Duration
+	defaultPolicyMu            sync.RWMutex
+	defaultPolicy              policyEntry
+	defaultPolicyCall          *policyCall
+	defaultPolicyEpoch         uint64
+	defaultPolicyTTL           time.Duration
+	selectableProxyMu          sync.RWMutex
+	selectableProxyEntry       selectableProxyEntry
+	selectableProxyCall        *selectableProxyCall
+	selectableProxyEpoch       uint64
+	selectableProxyTTL         time.Duration
 	validateTruthMu            sync.RWMutex
 	validateTruth              map[string]validateTruthEntry
 	validateTruthTTL           time.Duration
 }
 
 func NewService(store storage.Store, gatewayURL string) *Service {
+	localSelector := selector.NewLocal()
 	return &Service{
-		store:            store,
-		cache:            cache.Noop{},
-		cacheTTL:         time.Minute,
-		now:              time.Now,
-		gatewayURL:       gatewayURL,
-		resolver:         net.DefaultResolver,
-		selector:         selector.NewLocal(),
-		selectorMode:     selector.NameLocal,
-		hostSafety:       make(map[string]hostSafetyEntry),
-		hostSafetyCalls:  make(map[string]*hostSafetyCall),
-		hostSafetyTTL:    hostSafetyCacheTTL,
-		validateTruth:    make(map[string]validateTruthEntry),
-		validateTruthTTL: validateTruthCacheTTL,
+		store:              store,
+		cache:              cache.Noop{},
+		cacheTTL:           time.Minute,
+		now:                time.Now,
+		gatewayURL:         gatewayURL,
+		resolver:           net.DefaultResolver,
+		selector:           localSelector,
+		localSelector:      localSelector,
+		selectorMode:       selector.NameLocal,
+		selectorTimeout:    selectorTimeout,
+		hostSafety:         make(map[string]hostSafetyEntry),
+		hostSafetyCalls:    make(map[string]*hostSafetyCall),
+		hostSafetyTTL:      hostSafetyCacheTTL,
+		defaultPolicyTTL:   defaultPolicyTTL,
+		selectableProxyTTL: selectableProxyTTL,
+		validateTruth:      make(map[string]validateTruthEntry),
+		validateTruthTTL:   validateTruthCacheTTL,
 	}
 }
 
@@ -112,8 +165,11 @@ func (s *Service) SetCache(c cache.Cache, ttl time.Duration) {
 }
 
 func (s *Service) SetSelector(sel selector.ProxySelector) {
+	if s.localSelector == nil {
+		s.localSelector = selector.NewLocal()
+	}
 	if sel == nil {
-		s.selector = selector.NewLocal()
+		s.selector = s.localSelector
 		s.selectorMode = selector.NameLocal
 		return
 	}
@@ -139,34 +195,21 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 		return domain.Lease{}, domain.ErrPolicyDenied
 	}
 	if !s.safeResource(ctx, req.ResourceRef) {
-		return domain.Lease{}, domain.ErrUnsafeDestination
+		return domain.Lease{}, unsafeDestinationErr(ctx)
 	}
 	idem := storage.IdempotencyScope{TenantID: principal.TenantID, StableSubjectID: req.Subject.StableID(), ResourceRef: req.ResourceRef.StableID(), RequestKind: "create_lease", Key: key}
-	if lease, ok, err := s.store.GetLeaseByIdempotency(ctx, idem); err != nil {
-		return domain.Lease{}, err
-	} else if ok {
-		return lease, nil
-	}
 	policy, err := s.pickPolicy(ctx, req)
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	candidates, err := s.store.ListSelectableProxies(ctx)
+	candidates, err := s.listSelectableProxies(ctx)
 	if err != nil {
 		return domain.Lease{}, err
 	}
-	started := time.Now()
-	proxy, err := s.selector.Select(ctx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
-	selectorLatency := float64(time.Since(started).Milliseconds())
-	metrics.SelectorLatencyMS.Observe(selectorLatency)
-	s.observeSelectorLatency(selectorLatency)
+	proxy, err := s.selectLeaseProxy(ctx, principal.TenantID, candidates)
 	if err != nil {
-		s.logSelectorError(principal.TenantID, len(candidates), err)
-		metrics.SelectorErrors.Inc()
-		s.incrementSelectorError(err)
 		return domain.Lease{}, err
 	}
-	s.incrementSelectorSelected()
 	now := s.now()
 	ttl := time.Duration(policy.TTLSeconds) * time.Second
 	if req.TTLSeconds > 0 && req.TTLSeconds < policy.TTLSeconds {
@@ -175,7 +218,7 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
-	leaseID := "lease_" + randomHex(12)
+	leaseID := storage.LeaseIDForIdempotency(idem)
 	lease := domain.Lease{ID: leaseID, TenantID: principal.TenantID, Generation: 1, Subject: req.Subject, ResourceRef: req.ResourceRef, PolicyRef: domain.PolicyRef{ID: policy.ID, Version: policy.Version, Hash: fmt.Sprintf("v%d", policy.Version)}, GatewayURL: s.gatewayURL, Username: principal.TenantID + "|" + leaseID, ProxyID: proxy.ID, ExpiresAt: now.Add(ttl), RenewBefore: now.Add(ttl / 2), CatalogVersion: "memory", CandidateSetID: "healthy", CreatedAt: now, UpdatedAt: now}
 	plaintext := "lease_" + randomHex(24)
 	lease.Password = plaintext
@@ -187,6 +230,10 @@ func (s *Service) CreateLease(ctx context.Context, principal domain.Principal, k
 
 	if saved.ID == lease.ID && saved.PasswordHash == lease.PasswordHash {
 		saved.Password = plaintext
+	}
+	s.cacheLease(ctx, saved)
+	if s.hasLeaseInvalidationVersion() {
+		s.rememberValidateTruth(ctx, saved, s.currentLeaseInvalidationVersion())
 	}
 	return saved, nil
 }
@@ -218,7 +265,7 @@ func (s *Service) RenewLease(ctx context.Context, principal domain.Principal, le
 	updated, err := s.store.UpdateLease(ctx, lease)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, updated.TenantID, updated.ID)
-		s.invalidateValidateTruth(updated.TenantID, updated.ID)
+		s.clearValidateTruth(ctx, updated.TenantID, updated.ID)
 	}
 	return updated, err
 }
@@ -227,41 +274,40 @@ func (s *Service) RevokeLease(ctx context.Context, principal domain.Principal, l
 	err := s.store.RevokeLease(ctx, principal.TenantID, leaseID)
 	if err == nil {
 		_ = s.cache.InvalidateLease(ctx, principal.TenantID, leaseID)
-		s.invalidateValidateTruth(principal.TenantID, leaseID)
+		s.clearValidateTruth(ctx, principal.TenantID, leaseID)
 	}
 	return err
 }
 
 func (s *Service) ValidateLease(ctx context.Context, tenantID, leaseID, password, target string) (domain.Lease, error) {
 	if !s.safeTarget(ctx, target) {
-		return domain.Lease{}, domain.ErrUnsafeDestination
+		return domain.Lease{}, unsafeDestinationErr(ctx)
+	}
+	leaseVersion := s.currentLeaseInvalidationVersion()
+	if lease, ok := s.localValidatedLease(ctx, tenantID, leaseID); ok {
+		if err := s.validateLeaseFields(lease, password, target); err != nil {
+			return domain.Lease{}, err
+		}
+		return lease, nil
 	}
 	if cached, hit, _ := s.cache.GetLease(ctx, tenantID, leaseID); hit {
-		if s.hasFreshValidateTruth(cached) {
+		if s.hasFreshSharedValidateTruth(ctx, cached, leaseVersion) {
 			if err := s.validateLeaseFields(cached, password, target); err != nil {
 				return domain.Lease{}, err
 			}
 			return cached, nil
 		}
 	}
-	leaseVerBefore := s.currentLeaseInvalidationVersion()
 	lease, err := s.store.GetLease(ctx, tenantID, leaseID)
 	if err != nil {
-		s.invalidateValidateTruth(tenantID, leaseID)
+		s.clearValidateTruth(ctx, tenantID, leaseID)
 		return domain.Lease{}, err
 	}
-	remain := time.Until(lease.ExpiresAt)
-	if remain > 0 {
-		ttl := s.cacheTTL
-		if remain < ttl {
-			ttl = remain
-		}
-		_ = s.cache.PutLease(ctx, lease, ttl)
-	}
-	if leaseVerAfter := s.currentLeaseInvalidationVersion(); leaseVerBefore == leaseVerAfter {
-		s.stampValidateTruth(lease, leaseVerAfter)
+	s.cacheLease(ctx, lease)
+	if s.hasLeaseInvalidationVersion() && leaseVersion == s.currentLeaseInvalidationVersion() {
+		s.rememberValidateTruth(ctx, lease, leaseVersion)
 	} else {
-		s.invalidateValidateTruth(tenantID, leaseID)
+		s.clearValidateTruth(ctx, tenantID, leaseID)
 	}
 	if err := s.validateLeaseFields(lease, password, target); err != nil {
 		return domain.Lease{}, err
@@ -285,6 +331,30 @@ func (s *Service) validateLeaseFields(lease domain.Lease, password, target strin
 	return nil
 }
 
+func unsafeDestinationErr(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return domain.ErrUnsafeDestination
+}
+
+func (s *Service) cacheLease(ctx context.Context, lease domain.Lease) {
+	remain := lease.ExpiresAt.Sub(s.now())
+	if remain <= 0 {
+		return
+	}
+	ttl := s.cacheTTL
+	if ttl <= 0 || remain < ttl {
+		ttl = remain
+	}
+	if ttl <= 0 {
+		return
+	}
+	_ = s.cache.PutLease(ctx, lease, ttl)
+}
+
 func validateTruthKey(tenantID, leaseID string) string {
 	return tenantID + "|" + leaseID
 }
@@ -304,25 +374,74 @@ func leaseFingerprint(lease domain.Lease) string {
 	)
 }
 
-func (s *Service) hasFreshValidateTruth(lease domain.Lease) bool {
+func (s *Service) localValidatedLease(ctx context.Context, tenantID, leaseID string) (domain.Lease, bool) {
+	entry, ok := s.freshLocalValidateTruth(tenantID, leaseID)
+	if !ok {
+		return domain.Lease{}, false
+	}
+	if !s.hasSharedValidateTruthFingerprint(ctx, entry.lease) {
+		return domain.Lease{}, false
+	}
+	return entry.lease, true
+}
+
+func (s *Service) freshLocalValidateTruth(tenantID, leaseID string) (validateTruthEntry, bool) {
 	ttl := s.validateTruthTTL
 	if ttl <= 0 {
-		return false
+		return validateTruthEntry{}, false
 	}
-	key := validateTruthKey(lease.TenantID, lease.ID)
+	key := validateTruthKey(tenantID, leaseID)
 	s.validateTruthMu.RLock()
 	entry, ok := s.validateTruth[key]
 	s.validateTruthMu.RUnlock()
 	if !ok {
-		return false
+		return validateTruthEntry{}, false
 	}
 	if !entry.verifiedAt.Add(ttl).After(s.now()) {
+		return validateTruthEntry{}, false
+	}
+	return entry, true
+}
+
+func (s *Service) hasSharedValidateTruthFingerprint(ctx context.Context, lease domain.Lease) bool {
+	cache, ok := s.cache.(validateTruthCache)
+	if !ok {
 		return false
 	}
-	if entry.leaseInvalidationVersion != s.currentLeaseInvalidationVersion() {
+	raw, hit, err := cache.GetValidateTruth(ctx, lease.TenantID, lease.ID)
+	if err != nil || !hit {
+		return false
+	}
+	entry, ok := decodeValidateTruth(raw)
+	if !ok {
 		return false
 	}
 	return entry.fingerprint == leaseFingerprint(lease)
+}
+
+func (s *Service) hasFreshSharedValidateTruth(ctx context.Context, lease domain.Lease, leaseVersion uint64) bool {
+	cache, ok := s.cache.(validateTruthCache)
+	if !ok {
+		return false
+	}
+	raw, hit, err := cache.GetValidateTruth(ctx, lease.TenantID, lease.ID)
+	if err != nil || !hit {
+		return false
+	}
+	entry, ok := decodeValidateTruth(raw)
+	if !ok {
+		return false
+	}
+	if entry.fingerprint != leaseFingerprint(lease) {
+		return false
+	}
+	s.stampValidateTruth(lease, leaseVersion)
+	return true
+}
+
+func (s *Service) rememberValidateTruth(ctx context.Context, lease domain.Lease, leaseVersion uint64) {
+	s.stampValidateTruth(lease, leaseVersion)
+	s.storeSharedValidateTruth(ctx, lease, leaseVersion)
 }
 
 func (s *Service) stampValidateTruth(lease domain.Lease, leaseVersion uint64) {
@@ -334,6 +453,7 @@ func (s *Service) stampValidateTruth(lease domain.Lease, leaseVersion uint64) {
 	now := s.now()
 	entry := validateTruthEntry{
 		fingerprint:              leaseFingerprint(lease),
+		lease:                    lease,
 		verifiedAt:               now,
 		leaseInvalidationVersion: leaseVersion,
 	}
@@ -356,6 +476,21 @@ func (s *Service) stampValidateTruth(lease domain.Lease, leaseVersion uint64) {
 	s.validateTruth[key] = entry
 }
 
+func (s *Service) storeSharedValidateTruth(ctx context.Context, lease domain.Lease, leaseVersion uint64) {
+	cache, ok := s.cache.(validateTruthCache)
+	if !ok {
+		return
+	}
+	ttl := s.validateTruthTTL
+	if ttl <= 0 {
+		return
+	}
+	_ = cache.PutValidateTruth(ctx, lease.TenantID, lease.ID, encodeValidateTruth(validateTruthEntry{
+		fingerprint:              leaseFingerprint(lease),
+		leaseInvalidationVersion: leaseVersion,
+	}), ttl)
+}
+
 func (s *Service) currentLeaseInvalidationVersion() uint64 {
 	if versioned, ok := s.cache.(leaseInvalidationVersioner); ok {
 		return versioned.LeaseInvalidationVersion()
@@ -363,11 +498,44 @@ func (s *Service) currentLeaseInvalidationVersion() uint64 {
 	return 0
 }
 
+func (s *Service) hasLeaseInvalidationVersion() bool {
+	_, ok := s.cache.(leaseInvalidationVersioner)
+	return ok
+}
+
+func encodeValidateTruth(entry validateTruthEntry) string {
+	return fmt.Sprintf("%d|%s", entry.leaseInvalidationVersion, entry.fingerprint)
+}
+
+func decodeValidateTruth(raw string) (validateTruthEntry, bool) {
+	versionText, fingerprint, ok := strings.Cut(raw, "|")
+	if !ok || fingerprint == "" {
+		return validateTruthEntry{}, false
+	}
+	version, err := strconv.ParseUint(versionText, 10, 64)
+	if err != nil {
+		return validateTruthEntry{}, false
+	}
+	return validateTruthEntry{
+		fingerprint:              fingerprint,
+		leaseInvalidationVersion: version,
+	}, true
+}
+
 func (s *Service) invalidateValidateTruth(tenantID, leaseID string) {
 	key := validateTruthKey(tenantID, leaseID)
 	s.validateTruthMu.Lock()
 	delete(s.validateTruth, key)
 	s.validateTruthMu.Unlock()
+}
+
+func (s *Service) clearValidateTruth(ctx context.Context, tenantID, leaseID string) {
+	s.invalidateValidateTruth(tenantID, leaseID)
+	cache, ok := s.cache.(validateTruthCache)
+	if !ok {
+		return
+	}
+	_ = cache.InvalidateValidateTruth(ctx, tenantID, leaseID)
 }
 
 func (s *Service) ValidateGatewayRequest(ctx context.Context, tenantID, leaseID, password, target string) (domain.Lease, domain.Proxy, error) {
@@ -409,6 +577,7 @@ func (s *Service) CreateProvider(ctx context.Context, principal domain.Principal
 	out, err := s.store.UpsertProvider(ctx, provider)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return out, err
 }
@@ -423,6 +592,7 @@ func (s *Service) UpdateProvider(ctx context.Context, principal domain.Principal
 	out, err := s.store.UpsertProvider(ctx, provider)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return out, err
 }
@@ -433,6 +603,7 @@ func (s *Service) DeleteProvider(ctx context.Context, principal domain.Principal
 	err := s.store.DeleteProvider(ctx, id)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return err
 }
@@ -444,11 +615,12 @@ func (s *Service) CreateProxy(ctx context.Context, principal domain.Principal, p
 		return domain.Proxy{}, domain.ErrForbidden
 	}
 	if proxy.Endpoint == "" || !s.safeProxyEndpoint(ctx, proxy.Endpoint) {
-		return domain.Proxy{}, domain.ErrUnsafeDestination
+		return domain.Proxy{}, unsafeDestinationErr(ctx)
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return out, err
 }
@@ -461,11 +633,12 @@ func (s *Service) UpdateProxy(ctx context.Context, principal domain.Principal, i
 	}
 	proxy.ID = id
 	if proxy.Endpoint == "" || !s.safeProxyEndpoint(ctx, proxy.Endpoint) {
-		return domain.Proxy{}, domain.ErrUnsafeDestination
+		return domain.Proxy{}, unsafeDestinationErr(ctx)
 	}
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return out, err
 }
@@ -476,6 +649,7 @@ func (s *Service) DeleteProxy(ctx context.Context, principal domain.Principal, i
 	err := s.store.DeleteProxy(ctx, id)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return err
 }
@@ -493,6 +667,7 @@ func (s *Service) UpdateProxyHealth(ctx context.Context, principal domain.Princi
 	out, err := s.store.UpsertProxy(ctx, proxy)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearSelectableProxies()
 	}
 	return out, err
 }
@@ -506,6 +681,7 @@ func (s *Service) CreatePolicy(ctx context.Context, principal domain.Principal, 
 	out, err := s.store.UpsertPolicy(ctx, policy)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearDefaultPolicy()
 	}
 	return out, err
 }
@@ -520,6 +696,7 @@ func (s *Service) UpdatePolicy(ctx context.Context, principal domain.Principal, 
 	out, err := s.store.UpsertPolicy(ctx, policy)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearDefaultPolicy()
 	}
 	return out, err
 }
@@ -530,6 +707,7 @@ func (s *Service) DeletePolicy(ctx context.Context, principal domain.Principal, 
 	err := s.store.DeletePolicy(ctx, id)
 	if err == nil {
 		_ = s.cache.InvalidateCatalog(ctx)
+		s.clearDefaultPolicy()
 	}
 	return err
 }
@@ -545,7 +723,7 @@ func (s *Service) pickPolicy(ctx context.Context, req CreateLeaseRequest) (domai
 	if req.PolicyID != "" && req.PolicyID != "default" {
 		return domain.Policy{}, domain.ErrPolicyDenied
 	}
-	policy, err := s.store.GetPolicy(ctx, "default")
+	policy, err := s.defaultPolicyForCreate(ctx)
 	if err != nil {
 		return domain.Policy{}, err
 	}
@@ -553,6 +731,218 @@ func (s *Service) pickPolicy(ctx context.Context, req CreateLeaseRequest) (domai
 		return domain.Policy{}, domain.ErrPolicyDenied
 	}
 	return policy, nil
+}
+
+func (s *Service) defaultPolicyForCreate(ctx context.Context) (domain.Policy, error) {
+	ttl := s.defaultPolicyTTL
+	if ttl <= 0 {
+		return s.store.GetPolicy(ctx, "default")
+	}
+	now := s.now()
+	if entry, ok := s.lookupDefaultPolicy(now); ok {
+		return entry.policy, nil
+	}
+	for {
+		call, owner := s.beginDefaultPolicyLookup(now)
+		if !owner {
+			if call.done == nil {
+				return call.policy, call.err
+			}
+			select {
+			case <-call.done:
+				return call.policy, call.err
+			case <-ctx.Done():
+				return domain.Policy{}, ctx.Err()
+			}
+		}
+		policy, err := s.store.GetPolicy(ctx, "default")
+		s.finishDefaultPolicyLookup(now, call, policy, err)
+		return policy, err
+	}
+}
+
+func (s *Service) lookupDefaultPolicy(now time.Time) (policyEntry, bool) {
+	if s.defaultPolicyTTL <= 0 {
+		return policyEntry{}, false
+	}
+	s.defaultPolicyMu.RLock()
+	entry := s.defaultPolicy
+	s.defaultPolicyMu.RUnlock()
+	if entry.policy.ID == "" || !entry.expiresAt.After(now) {
+		return policyEntry{}, false
+	}
+	return entry, true
+}
+
+func (s *Service) beginDefaultPolicyLookup(now time.Time) (*policyCall, bool) {
+	s.defaultPolicyMu.Lock()
+	defer s.defaultPolicyMu.Unlock()
+	if entry := s.defaultPolicy; entry.policy.ID != "" && entry.expiresAt.After(now) {
+		return &policyCall{policy: entry.policy}, false
+	}
+	if call := s.defaultPolicyCall; call != nil && call.epoch == s.defaultPolicyEpoch {
+		return call, false
+	}
+	call := &policyCall{done: make(chan struct{}), epoch: s.defaultPolicyEpoch}
+	s.defaultPolicyCall = call
+	return call, true
+}
+
+func (s *Service) finishDefaultPolicyLookup(now time.Time, call *policyCall, policy domain.Policy, err error) {
+	s.defaultPolicyMu.Lock()
+	call.policy = policy
+	call.err = err
+	if err == nil && s.defaultPolicyEpoch == call.epoch {
+		s.defaultPolicy = policyEntry{policy: policy, expiresAt: now.Add(s.defaultPolicyTTL)}
+	}
+	if s.defaultPolicyCall == call {
+		s.defaultPolicyCall = nil
+	}
+	close(call.done)
+	s.defaultPolicyMu.Unlock()
+}
+
+func (s *Service) clearDefaultPolicy() {
+	s.defaultPolicyMu.Lock()
+	s.defaultPolicyEpoch++
+	s.defaultPolicy = policyEntry{}
+	s.defaultPolicyMu.Unlock()
+}
+
+func (s *Service) listSelectableProxies(ctx context.Context) ([]domain.Proxy, error) {
+	ttl := s.selectableProxyTTL
+	if ttl <= 0 {
+		return s.store.ListSelectableProxies(ctx)
+	}
+	now := s.now()
+	if entry, ok := s.lookupSelectableProxies(now); ok {
+		return entry.proxies, nil
+	}
+	for {
+		call, owner := s.beginSelectableProxyLookup(now)
+		if !owner {
+			if call.done == nil {
+				return copyProxies(call.proxies), call.err
+			}
+			select {
+			case <-call.done:
+				return copyProxies(call.proxies), call.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		proxies, err := s.store.ListSelectableProxies(ctx)
+		s.finishSelectableProxyLookup(now, call, proxies, err)
+		return copyProxies(proxies), err
+	}
+}
+
+func (s *Service) lookupSelectableProxies(now time.Time) (selectableProxyEntry, bool) {
+	if s.selectableProxyTTL <= 0 {
+		return selectableProxyEntry{}, false
+	}
+	s.selectableProxyMu.RLock()
+	entry := s.selectableProxyEntry
+	s.selectableProxyMu.RUnlock()
+	if len(entry.proxies) == 0 || !entry.expiresAt.After(now) {
+		return selectableProxyEntry{}, false
+	}
+	return selectableProxyEntry{proxies: copyProxies(entry.proxies), expiresAt: entry.expiresAt}, true
+}
+
+func (s *Service) beginSelectableProxyLookup(now time.Time) (*selectableProxyCall, bool) {
+	s.selectableProxyMu.Lock()
+	defer s.selectableProxyMu.Unlock()
+	if entry := s.selectableProxyEntry; len(entry.proxies) > 0 && entry.expiresAt.After(now) {
+		return &selectableProxyCall{proxies: copyProxies(entry.proxies)}, false
+	}
+	if call := s.selectableProxyCall; call != nil && call.epoch == s.selectableProxyEpoch {
+		return call, false
+	}
+	call := &selectableProxyCall{done: make(chan struct{}), epoch: s.selectableProxyEpoch}
+	s.selectableProxyCall = call
+	return call, true
+}
+
+func (s *Service) finishSelectableProxyLookup(now time.Time, call *selectableProxyCall, proxies []domain.Proxy, err error) {
+	s.selectableProxyMu.Lock()
+	call.proxies = copyProxies(proxies)
+	call.err = err
+	if err == nil && len(proxies) > 0 && s.selectableProxyEpoch == call.epoch {
+		s.selectableProxyEntry = selectableProxyEntry{proxies: copyProxies(proxies), expiresAt: now.Add(s.selectableProxyTTL)}
+	}
+	if s.selectableProxyCall == call {
+		s.selectableProxyCall = nil
+	}
+	close(call.done)
+	s.selectableProxyMu.Unlock()
+}
+
+func (s *Service) clearSelectableProxies() {
+	s.selectableProxyMu.Lock()
+	s.selectableProxyEpoch++
+	s.selectableProxyEntry = selectableProxyEntry{}
+	s.selectableProxyMu.Unlock()
+}
+
+func copyProxies(in []domain.Proxy) []domain.Proxy {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]domain.Proxy, len(in))
+	copy(out, in)
+	return out
+}
+
+func (s *Service) selectLeaseProxy(ctx context.Context, tenantID string, candidates []domain.Proxy) (domain.Proxy, error) {
+	started := time.Now()
+	selectorCtx := ctx
+	cancel := func() {}
+	if timeout := s.selectorTimeout; timeout > 0 && s.selectorMode != selector.NameLocal {
+		selectorCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	proxy, err := s.selector.Select(selectorCtx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
+	cancel()
+	selectorLatency := float64(time.Since(started).Milliseconds())
+	metrics.SelectorLatencyMS.Observe(selectorLatency)
+	s.observeSelectorLatency(selectorLatency)
+	if err == nil {
+		s.incrementSelectorSelected()
+		return proxy, nil
+	}
+	if selectorCtx.Err() != nil && ctx.Err() == nil {
+		err = domain.NewKindedError(domain.ErrNoHealthyProxy, domain.ErrorKindSelectorRedis, "selector_timeout", err)
+	}
+
+	s.logSelectorError(tenantID, len(candidates), err)
+	metrics.SelectorErrors.Inc()
+	s.incrementSelectorError(err)
+	if !s.shouldFallbackToLocalSelector(err) {
+		return domain.Proxy{}, err
+	}
+
+	proxy, fallbackErr := s.localSelector.Select(ctx, candidates, selector.SelectOptions{AffinityPolicy: selector.PolicyNone})
+	if fallbackErr != nil {
+		return domain.Proxy{}, fallbackErr
+	}
+	s.logSelectorFallback(tenantID, len(candidates), err, proxy.ID)
+	return proxy, nil
+}
+
+func (s *Service) shouldFallbackToLocalSelector(err error) bool {
+	if s.selectorMode == selector.NameLocal || s.localSelector == nil {
+		return false
+	}
+	switch domain.ErrorKindOf(err) {
+	case domain.ErrorKindSelectorRedis,
+		domain.ErrorKindSelectorEmptyResult,
+		domain.ErrorKindSelectorMalformedResult,
+		domain.ErrorKindSelectorStaleResult,
+		domain.ErrorKindSelectorReadyRebuild:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) logSelectorError(tenantID string, candidateCount int, err error) {
@@ -566,6 +956,21 @@ func (s *Service) logSelectorError(tenantID string, candidateCount int, err erro
 		"error", domain.ErrorCode(err),
 		"error_kind", string(domain.ErrorKindOf(err)),
 		"reason", domain.ErrorReason(err),
+	)
+}
+
+func (s *Service) logSelectorFallback(tenantID string, candidateCount int, cause error, proxyID string) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("selector.select.fallback_local",
+		"tenant_present", tenantID != "",
+		"candidate_count", candidateCount,
+		"error", domain.ErrorCode(cause),
+		"error_kind", string(domain.ErrorKindOf(cause)),
+		"reason", domain.ErrorReason(cause),
+		"proxy_id", proxyID,
 	)
 }
 
@@ -675,35 +1080,23 @@ func (s *Service) isSafeHost(ctx context.Context, host string) bool {
 	if decision, ok := s.lookupHostSafety(host); ok {
 		return decision
 	}
-	call, owner := s.beginHostSafetyLookup(host)
-	if !owner {
-		select {
-		case <-call.done:
-			return call.safe
-		case <-ctx.Done():
-			return false
+	for {
+		call, owner := s.beginHostSafetyLookup(host)
+		if !owner {
+			select {
+			case <-call.done:
+				if call.retry && ctx.Err() == nil {
+					continue
+				}
+				return call.safe
+			case <-ctx.Done():
+				return false
+			}
 		}
+		safe, retry := s.resolveHostSafety(ctx, host)
+		s.finishHostSafetyLookup(host, call, safe, retry)
+		return safe
 	}
-	safe := false
-	defer s.finishHostSafetyLookup(host, call, &safe)
-	resolver := s.resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
-	}
-	lookupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	ips, err := resolver.LookupIP(lookupCtx, "ip", host)
-	if err != nil || len(ips) == 0 {
-		return false
-	}
-	for _, ip := range ips {
-		if isInternalIP(ip) {
-			s.storeHostSafety(host, false)
-			return false
-		}
-	}
-	safe = true
-	return true
 }
 
 func (s *Service) lookupHostSafety(host string) (bool, bool) {
@@ -733,12 +1126,40 @@ func (s *Service) beginHostSafetyLookup(host string) (*hostSafetyCall, bool) {
 	return call, true
 }
 
-func (s *Service) finishHostSafetyLookup(host string, call *hostSafetyCall, safe *bool) {
+func (s *Service) finishHostSafetyLookup(host string, call *hostSafetyCall, safe, retry bool) {
 	s.hostSafetyMu.Lock()
-	call.safe = *safe
+	call.safe = safe
+	call.retry = retry
 	delete(s.hostSafetyCalls, host)
 	close(call.done)
 	s.hostSafetyMu.Unlock()
+}
+
+func (s *Service) resolveHostSafety(ctx context.Context, host string) (bool, bool) {
+	resolver := s.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	lookupCtx := ctx
+	cancel := func() {}
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 2*time.Second {
+		lookupCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+	}
+	defer cancel()
+	ips, err := resolver.LookupIP(lookupCtx, "ip", host)
+	if ctx.Err() != nil {
+		return false, true
+	}
+	if err != nil || len(ips) == 0 {
+		return false, false
+	}
+	for _, ip := range ips {
+		if isInternalIP(ip) {
+			s.storeHostSafety(host, false)
+			return false, false
+		}
+	}
+	return true, false
 }
 
 func (s *Service) storeHostSafety(host string, safe bool) {
@@ -775,10 +1196,19 @@ func isInternalIP(ip net.IP) bool {
 	}
 	// CGNAT 100.64.0.0/10 娴犮儱寮风敮姝岊潌娴?metadata IP
 	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 0 {
+			return true
+		}
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
 			return true
 		}
 		if v4.Equal(net.IPv4(169, 254, 169, 254)) {
+			return true
+		}
+		if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
+			return true
+		}
+		if v4[0] >= 240 {
 			return true
 		}
 	}

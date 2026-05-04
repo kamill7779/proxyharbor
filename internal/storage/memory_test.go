@@ -56,3 +56,18 @@ func TestMemoryStoreCreateLeaseDoesNotPersistPlaintextPassword(t *testing.T) {
 		t.Fatalf("GetLeaseByIdempotency() PasswordHash = %q, want %q", replayed.PasswordHash, lease.PasswordHash)
 	}
 }
+
+func TestLeaseIDForIdempotencyIsStableAndScoped(t *testing.T) {
+	scope := IdempotencyScope{TenantID: "tenant-a", StableSubjectID: "user:user-a", ResourceRef: "url:https://example.com", RequestKind: "create_lease", Key: "idem-stable"}
+	first := LeaseIDForIdempotency(scope)
+	second := LeaseIDForIdempotency(scope)
+	if first == "" || first != second {
+		t.Fatalf("LeaseIDForIdempotency() = %q then %q, want stable non-empty id", first, second)
+	}
+
+	other := scope
+	other.Key = "idem-other"
+	if got := LeaseIDForIdempotency(other); got == first {
+		t.Fatalf("LeaseIDForIdempotency() did not include idempotency key: %q", got)
+	}
+}
